@@ -343,6 +343,17 @@ class VirtualHost(Base):
     # it, so a typo cannot take the fleet down, but it is your rope.
     custom_config = Column(Text)
 
+    # gui or raw.
+    #
+    # gui means this site is built from the settings above and the custom_config
+    # is appended to it.  raw means the person is writing the whole server block
+    # themselves and we write out exactly what they typed.
+    #
+    # Raw still goes through the same two phase apply, so "I am driving" does
+    # not mean "I can take the fleet down".  Every node still has to pass
+    # nginx -t on it before any node applies it.
+    config_mode = Column(String(10), default="gui")
+
     notes = Column(Text)
     created_at = Column(DateTime, default=utcnow)
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)

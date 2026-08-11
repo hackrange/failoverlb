@@ -96,11 +96,28 @@ def password_problems(password: str) -> list:
     if len(password) > 200:
         problems.append("has to be under 200 characters")
 
+    # Block the obvious ones without punishing a long passphrase that happens to
+    # contain the word.
+    #
+    # A plain substring check refuses "correct-horse-battery-password-42", which
+    # is a perfectly good password, and it does it with a message that sounds
+    # like the person did something wrong.  Worse, somebody hitting that on the
+    # forced change screen can easily think the change went through when it did
+    # not, and then find themselves locked out with the old password they have
+    # already forgotten.
+    #
+    # What actually makes "password123" weak is that the guessable part is
+    # nearly the whole thing.  So compare lengths: if the common word is most of
+    # the password, it is weak.  If it is a small part of something much longer,
+    # the length is doing the work and the word does not matter.
     lowered = password.lower()
     for common in ("password", "nginx", "admin", "letmein", "changeme",
                    "welcome", "qwerty", "123456"):
-        if common in lowered:
-            problems.append(f"cannot contain {common!r}, it is one of the first things guessed")
+        if common in lowered and len(common) * 2 > len(password):
+            problems.append(
+                f"is too close to {common!r}, which is one of the first things guessed.  "
+                f"A longer passphrase can contain it, this one is mostly it."
+            )
             break
 
     if password and len(set(password)) < 5:

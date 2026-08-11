@@ -309,7 +309,7 @@ HOST_FIELDS = {
     "http_port", "https_port", "default_server", "http2", "force_https",
     "cert_id", "mode", "pool_id", "document_root", "redirect_target",
     "redirect_code", "settings", "access_list_id", "admin_only",
-    "custom_config", "notes",
+    "custom_config", "notes", "config_mode",
 }
 
 
@@ -427,6 +427,16 @@ def _apply_host_fields(g, host, payload):
         if code not in (301, 302, 307, 308):
             raise HTTPException(status_code=400, detail="a redirect has to be 301, 302, 307 or 308")
         host.redirect_code = code
+
+    if "config_mode" in payload:
+        if payload["config_mode"] not in ("gui", "raw"):
+            raise HTTPException(status_code=400, detail="config mode is gui or raw")
+        # Writing a whole server block by hand is an admin thing.  An operator
+        # can change any setting they like through the forms, where every value
+        # is checked, but hand written config is a much bigger door.
+        if payload["config_mode"] == "raw":
+            g.require("raw_config")
+        host.config_mode = payload["config_mode"]
 
     if "settings" in payload:
         host.settings = json.dumps(_validate_settings(payload["settings"], "server"))
@@ -989,6 +999,90 @@ async def preview(g: ObjectGuard = Depends(guard)):
         "files": files,
         "current_version": current.version if current else 0,
     }
+
+
+@router.get("/hosts/{host_id}/config")
+async def get_host_config(host_id: str, g: ObjectGuard = Depends(guard)):
+    """
+    The nginx this site turns into.
+
+    In gui mode this is generated, so it is read only and there to be looked at.
+    In raw mode it is what the person typed, and it is what gets written.
+    """
+    host = g.get(VirtualHost, host_id)
+
+    files, _, _ = render_current(g.session)
+    from app.core.render import _safe_name
+
+    key = f"sites/{_safe_name(host.name)}.conf"
+
+    return {
+        "mode": host.config_mode or "gui",
+        "generated": files.get(key, ""),
+        "custom_config": host.custom_config or "",
+        "editable": (host.config_mode or "gui") == "raw",
+    }
+
+
+@router.put("/hosts/{host_id}/config")
+async def put_host_config(host_id: str, request: Request,
+                          g: ObjectGuard = Depends(changing)):
+    """
+    Save hand written config for a site.
+
+    Checked twice before it is stored: our own parser for the obvious mistakes,
+    then nginx itself in the context of the whole config.  Storing something
+    that fails nginx -t would leave a site that cannot be applied and no obvious
+    way back, so it does not get saved at all.
+    """
+    host = g.get(VirtualHost, host_id, "raw_config")
+    payload = await request.json()
+    text = payload.get("config", "")
+
+    if not isinstance(text, str):
+        raise HTTPException(status_code=400, detail="config has to be text")
+    if len(text) > 512 * 1024:
+        raise HTTPException(status_code=400, detail="that config is unreasonably large")
+
+    problems = quick_check(text)
+    fatal = [p for p in problems if p["severity"] == "error"]
+    if fatal:
+        raise HTTPException(status_code=400, detail={
+            "error": "that config has problems",
+            "problems": problems,
+        })
+
+    # Try it against nginx in place, so a site that would not load never gets
+    # stored.  We swap this site's file for the candidate and test the lot.
+    from app.core.render import _safe_name
+
+    files, _, _ = render_current(g.session)
+    files[f"sites/{_safe_name(host.name)}.conf"] = text
+
+    try:
+        agent = get_agent()
+        await agent.write_staging(files)
+        result = await agent.test_staging()
+    except AgentError as exc:
+        raise HTTPException(status_code=400, detail=f"could not check it: {exc}")
+
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail={
+            "error": "nginx will not load that",
+            "output": result.get("output", ""),
+        })
+
+    before = host.custom_config
+    host.custom_config = text
+    host.config_mode = "raw"
+    host.updated_by = g.user.username
+    g.session.commit()
+
+    audit.record("site.raw_config", user=g.user, object_type="site",
+                 object_name=host.name,
+                 changes={"length": {"from": len(before or ""), "to": len(text)}})
+
+    return {"ok": True, "problems": problems}
 
 
 @router.post("/config/validate")

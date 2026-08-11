@@ -90,7 +90,7 @@ def render(request: Request, template: str, user, csrf_token: str = None, **cont
             "can": lambda perm: can(user, perm),
             "node_name": settings.node_name,
             "csp_nonce": getattr(request.state, "csp_nonce", ""),
-            "active_page": template.replace(".html", ""),
+            "active_page": template.replace(".html", "").replace("site_detail", "sites"),
             # Everything in the templates is built from this, so the whole GUI
             # works the same whether it is at the root or behind a prefix.
             "base": settings.root_path.rstrip("/"),
@@ -449,6 +449,28 @@ async def sites_page(request: Request, db: DBSession = Depends(get_db)):
     response = render(
         request, "sites.html", user, csrf_token=token,
         hosts=db.query(VirtualHost).order_by(VirtualHost.name).all(),
+        pools=db.query(Pool).order_by(Pool.name).all(),
+        certs=db.query(Certificate).order_by(Certificate.name).all(),
+    )
+    issue_csrf_token(response, token)
+    return response
+
+
+@router.get("/sites/{host_id}", response_class=HTMLResponse)
+async def site_detail(host_id: str, request: Request, db: DBSession = Depends(get_db)):
+    user = require_page_user(request, db)
+
+    # Through the same guard the API uses, so a site you are not allowed to see
+    # answers the same way whether you ask for the page or the JSON.
+    from app.web.security import ObjectGuard
+
+    guard = ObjectGuard(db, user)
+    host = guard.get(VirtualHost, host_id)
+
+    token = ensure_csrf_token(request)
+    response = render(
+        request, "site_detail.html", user, csrf_token=token,
+        host=host,
         pools=db.query(Pool).order_by(Pool.name).all(),
         certs=db.query(Certificate).order_by(Certificate.name).all(),
     )

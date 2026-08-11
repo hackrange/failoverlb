@@ -568,3 +568,27 @@ input:disabled, select:disabled { background: var(--bg-sunk); color: var(--text-
 @media (min-width: 821px) {
     .menu-toggle { display: none; }
 }
+
+/* ------------------------------------------------------------------- tabs */
+/* Used on the site editor.  Plain buttons rather than links so the page does
+   not reload when you flip between them and lose what you were typing. */
+.tabs {
+    display: flex;
+    gap: 2px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 16px;
+}
+.tab {
+    padding: 8px 16px;
+    border: none;
+    background: none;
+    color: var(--text-soft);
+    font-family: inherit;
+    font-size: 0.88rem;
+    font-weight: 500;
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+}
+.tab:hover { color: var(--text); }
+.tab.active { color: var(--text); border-bottom-color: var(--text); font-weight: 600; }

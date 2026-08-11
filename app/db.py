@@ -109,9 +109,85 @@ def get_db():
         session.close()
 
 
+def ensure_schema():
+    """
+    Add any columns the models have that the database does not.
+
+    create_all only makes tables that are missing.  It looks at an existing
+    table, sees the name is there, and moves on without checking the columns.
+    So adding a field to a model does nothing at all to a database that already
+    exists, and the first query touching it dies with "no such column".
+
+    On a fresh install nobody notices, because the table gets created complete.
+    It only shows up when somebody upgrades, which is the worst time to find it.
+
+    This walks the models, compares them to what is really there, and adds what
+    is missing.  Additive only, on purpose:
+
+      - a new column is safe and is what almost every change actually is
+      - renaming, dropping or retyping a column needs a decision about the data
+        in it, and quietly guessing is how you lose somebody's config
+
+    Anything beyond adding a column wants a real migration written by hand.  If
+    that day comes, alembic is already in the requirements.
+    """
+    engine = get_engine()
+    added = []
+
+    with engine.connect() as conn:
+        for table in Base.metadata.sorted_tables:
+            rows = conn.execute(text(f"PRAGMA table_info({table.name})")).fetchall()
+            if not rows:
+                # No such table yet.  create_all handles that case.
+                continue
+
+            existing = {r[1] for r in rows}
+
+            for column in table.columns:
+                if column.name in existing:
+                    continue
+
+                # sqlite will not add a column that is NOT NULL without a
+                # default, because it has no idea what to put in the rows that
+                # are already there.  Nothing we would add fits that shape, but
+                # skip it loudly rather than blowing up on startup.
+                ddl_type = column.type.compile(engine.dialect)
+                parts = [f'ALTER TABLE {table.name} ADD COLUMN "{column.name}" {ddl_type}']
+
+                default = column.default
+                if default is not None and getattr(default, "is_scalar", False):
+                    value = default.arg
+                    if isinstance(value, bool):
+                        parts.append(f"DEFAULT {1 if value else 0}")
+                    elif isinstance(value, (int, float)):
+                        parts.append(f"DEFAULT {value}")
+                    elif isinstance(value, str):
+                        escaped = value.replace("'", "''")
+                        parts.append(f"DEFAULT '{escaped}'")
+                elif not column.nullable:
+                    log.error(
+                        "cannot add %s.%s automatically, it is NOT NULL with no default",
+                        table.name, column.name,
+                    )
+                    continue
+
+                statement = " ".join(parts)
+                try:
+                    conn.execute(text(statement))
+                    added.append(f"{table.name}.{column.name}")
+                except Exception as exc:
+                    log.error("could not add %s.%s: %s", table.name, column.name, exc)
+
+        conn.commit()
+
+    if added:
+        log.warning("added missing columns to the database: %s", ", ".join(added))
+
+
 def init_db():
     engine = get_engine()
     Base.metadata.create_all(engine)
+    ensure_schema()
 
     with engine.connect() as conn:
         conn.execute(text("PRAGMA optimize"))

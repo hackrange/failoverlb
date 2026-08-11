@@ -1,0 +1,644 @@
+{% extends "base.html" %}
+{% block title %}{{ host.name }} &middot; NGINX Fleet Manager{% endblock %}
+
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <h1>{{ host.name }}</h1>
+    <div class="sub mono">{{ host.name_list()|join('  ') }}</div>
+  </div>
+  <div class="page-actions">
+    <a href="{{ base }}/sites" class="btn">Back to sites</a>
+    {% if can('apply_config') %}
+      <button class="btn primary" id="apply-config">Apply config</button>
+    {% endif %}
+  </div>
+</div>
+
+<div class="notice info" id="unsaved" hidden>
+  <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 3a.9.9 0 1 1 0 1.8A.9.9 0 0 1 8 4zm1.2 8H6.8v-.9h.7V7.9h-.7V7h2.1v4.1h.3V12z"/></svg>
+  <div>
+    You have unsaved changes.  <strong>Save</strong> stores them, and
+    <strong>Apply config</strong> is what sends them to nginx.
+  </div>
+</div>
+
+{# ---- tabs ---- #}
+<div class="tabs" role="tablist">
+  <button class="tab active" data-tab="basics" role="tab">Basics</button>
+  <button class="tab" data-tab="settings" role="tab">Settings</button>
+  <button class="tab" data-tab="config" role="tab">nginx config</button>
+</div>
+
+{# ============================ basics ============================ #}
+<div class="tab-panel" data-panel="basics">
+  <div class="card">
+    <div class="card-head"><h2>What this site is</h2></div>
+    <div class="card-body">
+      <div class="form-grid">
+        <div class="field">
+          <label for="f-names">
+            Server names
+            <button class="help-btn" data-help-static="h-names"
+                    data-help-title="Server names" aria-label="Help">?</button>
+          </label>
+          <input type="text" id="f-names" value="{{ host.name_list()|join(' ') }}">
+          <div class="hint">Space separated hostnames this site answers to.</div>
+        </div>
+
+        <div class="field">
+          <label for="f-mode">What it does</label>
+          <select id="f-mode">
+            <option value="proxy"    {{ 'selected' if host.mode == 'proxy' }}>Proxy to a backend pool</option>
+            <option value="static"   {{ 'selected' if host.mode == 'static' }}>Serve files off the disk</option>
+            <option value="redirect" {{ 'selected' if host.mode == 'redirect' }}>Redirect somewhere else</option>
+          </select>
+        </div>
+
+        <div class="field" data-when-mode="proxy">
+          <label for="f-pool">Backend pool</label>
+          <select id="f-pool">
+            <option value="">none</option>
+            {% for p in pools %}
+              <option value="{{ p.id }}" {{ 'selected' if host.pool_id == p.id }}>
+                {{ p.name }} ({{ p.healthy_count }}/{{ p.total_count }} up)
+              </option>
+            {% endfor %}
+          </select>
+        </div>
+
+        <div class="field" data-when-mode="static">
+          <label for="f-root">Document root</label>
+          <input type="text" id="f-root" value="{{ host.document_root or '' }}"
+                 placeholder="/var/www/example">
+        </div>
+
+        <div class="field" data-when-mode="redirect">
+          <label for="f-target">Redirect to</label>
+          <input type="text" id="f-target" value="{{ host.redirect_target or '' }}"
+                 placeholder="https://www.example.com">
+        </div>
+
+        <div class="field">
+          <label for="f-cert">
+            Certificate
+            <button class="help-btn" data-help-static="h-cert"
+                    data-help-title="Certificates on a site" aria-label="Help">?</button>
+          </label>
+          <select id="f-cert">
+            <option value="">none, http only</option>
+            {% for c in certs %}
+              <option value="{{ c.id }}" {{ 'selected' if host.cert_id == c.id }}>
+                {{ c.name }}{% if c.days_left is not none %} ({{ c.days_left }}d left){% endif %}
+              </option>
+            {% endfor %}
+          </select>
+        </div>
+      </div>
+
+      <div class="checkline">
+        <input type="checkbox" id="f-enabled" {{ 'checked' if host.enabled }}>
+        <label for="f-enabled">Enabled</label>
+      </div>
+      <div class="checkline">
+        <input type="checkbox" id="f-https" {{ 'checked' if host.listen_https }}>
+        <label for="f-https">Listen on https</label>
+      </div>
+      <div class="checkline">
+        <input type="checkbox" id="f-force" {{ 'checked' if host.force_https }}>
+        <label for="f-force">Redirect http to https</label>
+      </div>
+      <div class="checkline">
+        <input type="checkbox" id="f-http2" {{ 'checked' if host.http2 }}>
+        <label for="f-http2">HTTP/2</label>
+      </div>
+      <div class="checkline">
+        <input type="checkbox" id="f-default" {{ 'checked' if host.default_server }}>
+        <label for="f-default">
+          Default site
+          <button class="help-btn" data-help-static="h-default"
+                  data-help-title="The default site" aria-label="Help">?</button>
+        </label>
+      </div>
+      <div class="checkline">
+        <input type="checkbox" id="f-admin" {{ 'checked' if host.admin_only }}>
+        <label for="f-admin">
+          Management network only
+          <button class="help-btn" data-help-static="h-adminonly"
+                  data-help-title="Management only sites" aria-label="Help">?</button>
+        </label>
+      </div>
+
+      <div class="field mt">
+        <label for="f-notes">Notes</label>
+        <textarea id="f-notes" rows="2"
+                  placeholder="what this site is for, who owns it">{{ host.notes or '' }}</textarea>
+      </div>
+    </div>
+  </div>
+</div>
+
+{# ============================ settings ============================ #}
+<div class="tab-panel" data-panel="settings" hidden>
+  <div class="notice info">
+    <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 3a.9.9 0 1 1 0 1.8A.9.9 0 0 1 8 4zm1.2 8H6.8v-.9h.7V7.9h-.7V7h2.1v4.1h.3V12z"/></svg>
+    <div>
+      Only settings this box's nginx can actually run are shown.  The module
+      list comes from <code>nginx -V</code> on the real build, so you cannot
+      save something that would stop nginx starting.  Click any
+      <strong>?</strong> for what a setting does and an example.
+    </div>
+  </div>
+
+  <div class="flex wrap mb">
+    <label class="checkline" style="margin:0">
+      <input type="checkbox" id="show-advanced">
+      <span>Show advanced settings</span>
+    </label>
+    <input type="text" id="setting-filter" placeholder="filter settings..."
+           style="max-width:260px; margin-left:auto">
+  </div>
+
+  <div id="settings-holder">
+    <div class="empty"><strong>Loading settings...</strong></div>
+  </div>
+</div>
+
+{# ============================ raw config ============================ #}
+<div class="tab-panel" data-panel="config" hidden>
+  <div class="card">
+    <div class="card-head">
+      <h2>nginx config for this site</h2>
+      <div class="flex">
+        <span class="small faint" id="mode-label"></span>
+        <button class="help-btn" data-help-static="h-raw"
+                data-help-title="Editing the config directly" data-help-wide
+                aria-label="Help">?</button>
+      </div>
+    </div>
+    <div class="card-body">
+
+      {% if can('raw_config') %}
+        <div class="checkline mb">
+          <input type="checkbox" id="f-raw" {{ 'checked' if host.config_mode == 'raw' }}>
+          <label for="f-raw">
+            Let me write this server block myself
+          </label>
+        </div>
+        <p class="small muted" style="margin-top:-6px">
+          With this off, the config below is generated from the settings and is
+          read only.  With it on, what you type here is exactly what gets
+          written, and the forms stop driving this site.
+        </p>
+      {% else %}
+        <p class="small muted" style="margin-top:0">
+          Read only.  Editing the config by hand needs the admin role.
+        </p>
+      {% endif %}
+
+      <textarea id="raw-config" rows="24" spellcheck="false"
+                style="width:100%; font-family:var(--mono)"></textarea>
+
+      <div id="config-problems"></div>
+
+      <div class="flex mt">
+        <button class="btn" id="check-config">Check it</button>
+        {% if can('raw_config') %}
+          <button class="btn primary" id="save-config" disabled>Save config</button>
+        {% endif %}
+      </div>
+      <p class="small faint mt">
+        Checked by nginx itself, on this node, before it is stored.  Something
+        nginx will not load never gets saved.
+      </p>
+    </div>
+  </div>
+</div>
+
+{# ---- save bar ---- #}
+<div class="card" style="position:sticky; bottom:0; z-index:50">
+  <div class="card-body flex-between">
+    <div class="small faint">
+      Saving stores the change.  Nothing reaches nginx until you apply.
+    </div>
+    <div class="flex">
+      {% if can('edit_sites') %}
+        <button class="btn danger" id="delete-site">Delete site</button>
+        <button class="btn primary" id="save-site">Save</button>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+{# ---- help ---- #}
+<div hidden id="h-names">
+  <div class="help-section">
+    <p>The hostnames this site answers to.  nginx matches the Host header
+       against these to pick which server block handles a request.</p>
+  </div>
+  <div class="help-section">
+    <h4>Examples</h4>
+    <ul>
+      <li><code>www.example.com</code> that exact name only</li>
+      <li><code>www.example.com example.com</code> both</li>
+      <li><code>*.example.com</code> any subdomain</li>
+      <li><code>_</code> the catch all, for the default site</li>
+    </ul>
+  </div>
+</div>
+
+<div hidden id="h-cert">
+  <div class="help-section">
+    <p>Which certificate this site serves over https.</p>
+  </div>
+  <div class="help-section">
+    <h4>Worth knowing</h4>
+    <p>With no certificate attached, the https server block is left out
+       altogether.  That is on purpose: nginx refuses to start at all if it
+       finds an ssl listener with no certificate, so writing one anyway would
+       take the whole box down rather than just this site.</p>
+  </div>
+</div>
+
+<div hidden id="h-default">
+  <div class="help-section">
+    <p>Handles any request whose Host header does not match another site.</p>
+  </div>
+  <div class="help-section">
+    <h4>Why you want one</h4>
+    <p>Without a default, nginx uses whichever server block it loaded first,
+       which is usually not what you meant and moves around as you add sites.
+       People find your server by IP address and get a random one of your
+       sites.
+
+A default that returns a plain 404 keeps that tidy.</p>
+  </div>
+</div>
+
+<div hidden id="h-adminonly">
+  <div class="help-section">
+    <p>Locks this site to the management networks and the cluster nodes.</p>
+  </div>
+  <div class="help-section">
+    <h4>What it writes</h4>
+    <p>An allow line for every node in the cluster plus your management
+       networks, then deny all.  The node list is generated from the roster, so
+       a node you add later lands in here on its own.</p>
+  </div>
+</div>
+
+<div hidden id="h-raw">
+  <div class="help-section">
+    <p>Two ways to drive a site, and you can switch between them.</p>
+  </div>
+  <div class="help-section">
+    <h4>Generated, the normal way</h4>
+    <p>The config comes from the settings on the other tabs.  Every value is
+       checked before it is stored, the help explains what each one does, and
+       settings your nginx cannot run are not offered.  The config here is read
+       only so you can see exactly what your choices produced.</p>
+  </div>
+  <div class="help-section">
+    <h4>Hand written</h4>
+    <p>You write the whole server block.  Useful for something the forms do not
+       cover yet, or config you already have and want to bring across as is.
+
+The forms stop driving this site while it is in this mode, so the two cannot
+fight over the same file.</p>
+  </div>
+  <div class="help-section">
+    <h4>You still cannot break the fleet</h4>
+    <p>Hand written config goes through exactly the same checks as everything
+       else.  It is tested by nginx here before it is even saved, and at apply
+       time every node stages it and runs nginx -t before any node goes live.
+       If one node says no, nothing changes anywhere.
+
+So the worst case is a config that refuses to save, not a fleet that stops
+serving.</p>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script nonce="{{ csp_nonce }}">
+document.addEventListener("DOMContentLoaded", function () {
+  const HOST_ID = {{ host.id }};
+  const BASE = document.querySelector('meta[name=nfm-base]').content;
+  const saved = {{ host.setting_map()|tojson }};
+  let catalog = null;
+  let dirty = false;
+
+  function markDirty() {
+    dirty = true;
+    document.getElementById("unsaved").hidden = false;
+  }
+
+  // ---- tabs ----
+  document.querySelectorAll(".tab").forEach(function (t) {
+    t.addEventListener("click", function () {
+      document.querySelectorAll(".tab").forEach(x => x.classList.remove("active"));
+      t.classList.add("active");
+      const want = t.getAttribute("data-tab");
+      document.querySelectorAll(".tab-panel").forEach(function (p) {
+        p.hidden = p.getAttribute("data-panel") !== want;
+      });
+      if (want === "config") loadConfig();
+      if (want === "settings" && !catalog) loadSettings();
+    });
+  });
+
+  // ---- show the right field for the chosen mode ----
+  function syncMode() {
+    const mode = document.getElementById("f-mode").value;
+    document.querySelectorAll("[data-when-mode]").forEach(function (el) {
+      el.style.display = el.getAttribute("data-when-mode") === mode ? "" : "none";
+    });
+  }
+  document.getElementById("f-mode").addEventListener("change", function () {
+    syncMode(); markDirty();
+  });
+  syncMode();
+
+  document.querySelectorAll("input, select, textarea").forEach(function (el) {
+    el.addEventListener("change", markDirty);
+  });
+
+  // ---- the settings tab, built from the catalog ----
+  async function loadSettings() {
+    try {
+      catalog = await NFM.api("/catalog?context=server");
+    } catch (err) {
+      document.getElementById("settings-holder").innerHTML =
+        '<div class="notice bad"><div>' + NFM.escapeHtml(err.message) + "</div></div>";
+      return;
+    }
+    renderSettings();
+  }
+
+  function renderSettings() {
+    const holder = document.getElementById("settings-holder");
+    const showAdv = document.getElementById("show-advanced").checked;
+    const filter = document.getElementById("setting-filter").value.toLowerCase();
+
+    const byCat = {};
+    catalog.features.forEach(function (f) {
+      if (f.advanced && !showAdv) return;
+      if (filter && !(f.label.toLowerCase().includes(filter) ||
+                      f.key.toLowerCase().includes(filter) ||
+                      (f.directive || "").toLowerCase().includes(filter))) return;
+      (byCat[f.category] = byCat[f.category] || []).push(f);
+    });
+
+    let html = "";
+    catalog.categories.forEach(function (cat) {
+      const feats = byCat[cat.key];
+      if (!feats || !feats.length) return;
+
+      html += '<div class="card"><div class="card-head"><div>' +
+              "<h2>" + NFM.escapeHtml(cat.label) + "</h2>" +
+              '<div class="small faint">' + NFM.escapeHtml(cat.description) + "</div>" +
+              "</div></div><div class='card-body'>";
+
+      feats.forEach(function (f) { html += control(f); });
+      html += "</div></div>";
+    });
+
+    holder.innerHTML = html || '<div class="empty"><strong>Nothing matches that filter</strong></div>';
+
+    holder.querySelectorAll("[data-setting]").forEach(function (el) {
+      el.addEventListener("change", markDirty);
+    });
+  }
+
+  function control(f) {
+    const val = saved[f.key] !== undefined ? saved[f.key] : f.default;
+    const id = "s-" + f.key;
+    const disabled = f.available ? "" : " disabled";
+
+    let input = "";
+    if (f.type === "bool") {
+      input = '<div class="checkline"><input type="checkbox" id="' + id +
+              '" data-setting="' + f.key + '" data-type="bool"' +
+              (val ? " checked" : "") + disabled + '>' +
+              '<label for="' + id + '">' + NFM.escapeHtml(f.label) + "</label>" +
+              help(f) + "</div>";
+      return input;
+    }
+
+    if (f.type === "select") {
+      input = '<select id="' + id + '" data-setting="' + f.key + '" data-type="select"' + disabled + ">";
+      f.options.forEach(function (o) {
+        input += '<option value="' + NFM.escapeHtml(o[0]) + '"' +
+                 (String(val) === String(o[0]) ? " selected" : "") + ">" +
+                 NFM.escapeHtml(o[1]) + "</option>";
+      });
+      input += "</select>";
+    } else if (f.type === "multiselect") {
+      const chosen = Array.isArray(val) ? val : [];
+      input = '<div data-setting="' + f.key + '" data-type="multiselect" class="flex wrap">';
+      f.options.forEach(function (o) {
+        input += '<label class="checkline" style="margin:0 12px 4px 0">' +
+                 '<input type="checkbox" value="' + NFM.escapeHtml(o[0]) + '"' +
+                 (chosen.includes(o[0]) ? " checked" : "") + disabled + ">" +
+                 "<span>" + NFM.escapeHtml(o[1]) + "</span></label>";
+      });
+      input += "</div>";
+    } else if (f.type === "list") {
+      const lines = Array.isArray(val) ? val.join("\n") : (val || "");
+      input = '<textarea id="' + id + '" data-setting="' + f.key + '" data-type="list" rows="3"' +
+              disabled + ">" + NFM.escapeHtml(lines) + "</textarea>";
+    } else if (f.type === "text") {
+      input = '<textarea id="' + id + '" data-setting="' + f.key + '" data-type="text" rows="2"' +
+              ' placeholder="' + NFM.escapeHtml(f.placeholder || "") + '"' + disabled + ">" +
+              NFM.escapeHtml(val || "") + "</textarea>";
+    } else {
+      const t = f.type === "int" ? "number" : "text";
+      input = '<input type="' + t + '" id="' + id + '" data-setting="' + f.key +
+              '" data-type="' + f.type + '" value="' + NFM.escapeHtml(val === null || val === undefined ? "" : val) +
+              '" placeholder="' + NFM.escapeHtml(f.placeholder || "") + '"' + disabled + ">";
+    }
+
+    return '<div class="field">' +
+           '<label for="' + id + '">' + NFM.escapeHtml(f.label) + help(f) + "</label>" +
+           input +
+           (f.directive ? '<div class="hint mono">' + NFM.escapeHtml(f.directive) + "</div>" : "") +
+           (f.available ? "" : '<div class="hint" style="color:var(--bad)">needs the ' +
+              NFM.escapeHtml(f.module) + " module, which this nginx was not built with</div>") +
+           "</div>";
+  }
+
+  function help(f) {
+    return ' <button class="help-btn" data-help="' + NFM.escapeHtml(f.key) +
+           '" data-help-context="server" aria-label="Help">?</button>';
+  }
+
+  document.getElementById("show-advanced").addEventListener("change", renderSettings);
+  document.getElementById("setting-filter").addEventListener("input", renderSettings);
+
+  function collectSettings() {
+    const out = {};
+    document.querySelectorAll("[data-setting]").forEach(function (el) {
+      const key = el.getAttribute("data-setting");
+      const type = el.getAttribute("data-type");
+
+      if (type === "bool") { out[key] = el.checked; return; }
+      if (type === "multiselect") {
+        const vals = [];
+        el.querySelectorAll("input:checked").forEach(c => vals.push(c.value));
+        out[key] = vals;
+        return;
+      }
+      if (type === "list") {
+        const lines = el.value.split("\n").map(s => s.trim()).filter(Boolean);
+        if (lines.length) out[key] = lines;
+        return;
+      }
+      if (type === "int") {
+        if (el.value !== "") out[key] = parseInt(el.value, 10);
+        return;
+      }
+      if (el.value !== "") out[key] = el.value;
+    });
+    return out;
+  }
+
+  // ---- saving ----
+  const saveBtn = document.getElementById("save-site");
+  if (saveBtn) saveBtn.addEventListener("click", async function () {
+    const mode = document.getElementById("f-mode").value;
+    const body = {
+      server_names: document.getElementById("f-names").value.trim(),
+      mode: mode,
+      enabled: document.getElementById("f-enabled").checked,
+      listen_https: document.getElementById("f-https").checked,
+      force_https: document.getElementById("f-force").checked,
+      http2: document.getElementById("f-http2").checked,
+      default_server: document.getElementById("f-default").checked,
+      admin_only: document.getElementById("f-admin").checked,
+      notes: document.getElementById("f-notes").value
+    };
+
+    const pool = document.getElementById("f-pool").value;
+    body.pool_id = pool ? parseInt(pool, 10) : null;
+    const cert = document.getElementById("f-cert").value;
+    body.cert_id = cert ? parseInt(cert, 10) : null;
+
+    if (mode === "static") body.document_root = document.getElementById("f-root").value.trim();
+    if (mode === "redirect") body.redirect_target = document.getElementById("f-target").value.trim();
+
+    // Only send settings if the tab was opened.  Sending an empty object
+    // because the controls were never built would wipe every setting on the
+    // site, which is a nasty way to lose a config.
+    if (catalog) body.settings = collectSettings();
+
+    saveBtn.disabled = true;
+    try {
+      await NFM.api("/hosts/" + HOST_ID, { method: "PUT", body: body });
+      dirty = false;
+      document.getElementById("unsaved").hidden = true;
+      NFM.toast("Saved.  Apply config to send it to nginx.", "ok");
+    } catch (err) {
+      NFM.toast(err.message, "bad");
+    } finally {
+      saveBtn.disabled = false;
+    }
+  });
+
+  const delBtn = document.getElementById("delete-site");
+  if (delBtn) delBtn.addEventListener("click", function () {
+    NFM.confirmThen("Delete this site?\n\nIt stops being served the next time you apply.",
+      async function () {
+        await NFM.api("/hosts/" + HOST_ID, { method: "DELETE" });
+        window.location.href = BASE + "/sites";
+      });
+  });
+
+  // ---- the config tab ----
+  async function loadConfig() {
+    try {
+      const r = await NFM.api("/hosts/" + HOST_ID + "/config");
+      const box = document.getElementById("raw-config");
+      box.value = r.editable ? (r.custom_config || r.generated) : r.generated;
+      box.readOnly = !r.editable;
+      document.getElementById("mode-label").textContent =
+        r.editable ? "hand written" : "generated from the settings, read only";
+      const save = document.getElementById("save-config");
+      if (save) save.disabled = !r.editable;
+    } catch (err) {
+      NFM.toast(err.message, "bad");
+    }
+  }
+
+  const rawToggle = document.getElementById("f-raw");
+  if (rawToggle) rawToggle.addEventListener("change", async function () {
+    const box = document.getElementById("raw-config");
+    box.readOnly = !rawToggle.checked;
+    document.getElementById("save-config").disabled = !rawToggle.checked;
+    document.getElementById("mode-label").textContent =
+      rawToggle.checked ? "hand written" : "generated from the settings, read only";
+    if (!rawToggle.checked) {
+      try {
+        await NFM.api("/hosts/" + HOST_ID, { method: "PUT", body: { config_mode: "gui" } });
+        NFM.toast("Back to the settings driving this site", "ok");
+        loadConfig();
+      } catch (err) { NFM.toast(err.message, "bad"); }
+    }
+  });
+
+  document.getElementById("check-config").addEventListener("click", async function () {
+    const out = document.getElementById("config-problems");
+    out.innerHTML = "";
+    try {
+      const r = await NFM.api("/config/validate", {
+        method: "POST",
+        body: { config: document.getElementById("raw-config").value }
+      });
+      if (r.ok) {
+        out.innerHTML = '<div class="notice ok">' + NFM.icon("check") +
+                        "<div>nginx is happy with that.</div></div>";
+      } else {
+        let html = "";
+        (r.problems || []).forEach(function (p) {
+          html += '<div class="notice ' + (p.severity === "error" ? "bad" : "warn") + '">' +
+                  NFM.icon("warn") + "<div><strong>line " + p.line + "</strong> " +
+                  NFM.escapeHtml(p.message) + "</div></div>";
+        });
+        if (r.nginx && !r.nginx.ok) {
+          html += '<div class="notice bad">' + NFM.icon("warn") +
+                  "<div><strong>nginx said:</strong><pre>" +
+                  NFM.escapeHtml(r.nginx.output) + "</pre></div></div>";
+        }
+        out.innerHTML = html;
+      }
+    } catch (err) {
+      out.innerHTML = '<div class="notice bad"><div>' + NFM.escapeHtml(err.message) + "</div></div>";
+    }
+  });
+
+  const saveCfg = document.getElementById("save-config");
+  if (saveCfg) saveCfg.addEventListener("click", async function () {
+    saveCfg.disabled = true;
+    try {
+      await NFM.api("/hosts/" + HOST_ID + "/config", {
+        method: "PUT",
+        body: { config: document.getElementById("raw-config").value }
+      });
+      NFM.toast("Config saved.  Apply to send it to nginx.", "ok");
+      document.getElementById("config-problems").innerHTML = "";
+    } catch (err) {
+      document.getElementById("config-problems").innerHTML =
+        '<div class="notice bad">' + NFM.icon("warn") + "<div><pre>" +
+        NFM.escapeHtml(err.message) + "</pre></div></div>";
+    } finally {
+      saveCfg.disabled = false;
+    }
+  });
+
+  window.addEventListener("beforeunload", function (e) {
+    if (dirty) { e.preventDefault(); e.returnValue = ""; }
+  });
+});
+</script>
+{% endblock %}
