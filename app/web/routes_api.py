@@ -548,7 +548,10 @@ def _cross_check(settings: dict) -> list:
                 # not set it, as twice the bigger of the header buffer and one
                 # body buffer.  That figure then has to fit inside everything
                 # except one buffer.
-                busy = 2 * max(head, one)
+                # The renderer pins proxy_busy_buffers_size for us, so this
+                # only has to catch the case where no value can satisfy nginx
+                # at all, which means the buffers really are too small.
+                busy = max(head, one)
                 if busy > total - one:
                     need = busy + one
                     problems.append(

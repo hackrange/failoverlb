@@ -201,12 +201,36 @@
 
         document.body.appendChild(backdrop);
 
-        // Click outside to close, but only on the backdrop itself.  Without the
-        // target check, a click that starts inside the modal and drifts out
-        // closes it, which is maddening when you are selecting text.
+        // A modal holding a form does not close when you click the backdrop.
+        //
+        // For a help popup, click anywhere to dismiss is what everybody expects
+        // and there is nothing to lose.  For a form it is the opposite: you
+        // have typed a hostname, a port and three settings, your mouse clips
+        // the edge of the box, and it is all gone with no undo.  That is a
+        // horrible thing to do to somebody and it is entirely avoidable.
+        //
+        // So forms close on the X, the Close button, or Escape, and Escape asks
+        // first if anything has been filled in.
+        const hasForm = backdrop.querySelector("input, select, textarea") !== null;
+
         backdrop.addEventListener("click", function (e) {
-            if (e.target === backdrop || e.target.hasAttribute("data-close") ||
-                e.target.classList.contains("modal-close")) {
+            const wantsClose = e.target.hasAttribute("data-close") ||
+                               e.target.classList.contains("modal-close");
+
+            if (wantsClose) {
+                if (hasForm && modalHasContent(backdrop) &&
+                    !window.confirm("Close this and lose what you have typed?")) {
+                    return;
+                }
+                closeModal();
+                return;
+            }
+
+            // The backdrop itself.  Only dismisses when there is nothing to
+            // lose.  The target check also stops a click that begins inside the
+            // box and drifts out from closing it, which otherwise ruins
+            // selecting text.
+            if (e.target === backdrop && !hasForm) {
                 closeModal();
             }
         });
@@ -215,7 +239,32 @@
     }
 
     function escClose(e) {
-        if (e.key === "Escape") closeModal();
+        if (e.key !== "Escape") return;
+
+        const backdrop = document.getElementById("active-modal");
+        if (backdrop && backdrop.querySelector("input, select, textarea") &&
+            modalHasContent(backdrop) &&
+            !window.confirm("Close this and lose what you have typed?")) {
+            return;
+        }
+        closeModal();
+    }
+
+    // Has anybody actually put anything in this form?  Nothing typed means
+    // nothing to warn about, and a confirm box on an untouched form is just
+    // noise.
+    function modalHasContent(backdrop) {
+        const fields = backdrop.querySelectorAll("input, select, textarea");
+        for (const field of fields) {
+            if (field.type === "checkbox" || field.type === "radio") {
+                if (field.checked !== field.defaultChecked) return true;
+            } else if (field.type === "hidden") {
+                continue;
+            } else if ((field.value || "").trim() !== (field.defaultValue || "").trim()) {
+                return true;
+            }
+        }
+        return false;
     }
 
     function closeModal() {

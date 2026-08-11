@@ -79,6 +79,54 @@ def esc(value) -> str:
     return text
 
 
+def parse_size(value):
+    """An nginx size like 16k or 1m as bytes.  None when it is not one."""
+    m = re.fullmatch(r"(\d+)([kKmMgG]?)", str(value).strip())
+    if not m:
+        return None
+    return int(m.group(1)) * {"": 1, "k": 1024, "m": 1024 ** 2, "g": 1024 ** 3}[
+        m.group(2).lower()
+    ]
+
+
+def busy_buffers_for(buffer_size, buffers):
+    """
+    Work out a proxy_busy_buffers_size that nginx will accept.
+
+    When you do not set it, nginx picks twice the larger of the header buffer
+    and one body buffer, and then insists that figure fits inside everything
+    except one buffer.  Raise proxy_buffer_size on its own and that sum stops
+    working, and nginx complains about a directive you never touched:
+
+        "proxy_busy_buffers_size" must be less than the size of all
+        "proxy_buffers" minus one buffer
+
+    Somebody raising the header buffer is nearly always doing it to fix a 502
+    from a backend with big cookies.  Making them solve a second puzzle to get
+    there is unkind, so we work out a value that fits and write it down.
+
+    Gives back None when no sensible value exists, which means the buffers are
+    genuinely too small and the person does have to change them.
+    """
+    head = parse_size(buffer_size)
+    m = re.fullmatch(r"(\d+)\s+(\S+)", str(buffers).strip())
+    if not head or not m:
+        return None
+
+    count = int(m.group(1))
+    one = parse_size(m.group(2))
+    if not one or count < 2:
+        return None
+
+    total = count * one
+    ceiling = total - one
+    floor = max(head, one)
+
+    if floor > ceiling:
+        return None
+    return floor
+
+
 def emit(feature, value) -> str:
     """
     Turn a setting into the text that follows its directive.
@@ -1008,6 +1056,16 @@ map $cookie_{cookie} $sticky_{_safe_var(pool.name)} {{
             # Leave it set and every request opens a fresh connection, which
             # quietly undoes the keepalive setting on the pool.
             lines.append(f'{pad}proxy_set_header Connection "";')
+
+        # If the header buffer has been raised, pin the busy buffer size to
+        # something that fits rather than letting nginx work out a number that
+        # does not.  See busy_buffers_for.
+        head = cfg.get("proxy_buffer_size")
+        bufs = cfg.get("proxy_buffers", "8 4k")
+        if head:
+            busy = busy_buffers_for(head, bufs)
+            if busy:
+                lines.append(f"{pad}proxy_busy_buffers_size {busy // 1024}k;")
 
         for key in ("proxy_connect_timeout", "proxy_send_timeout", "proxy_read_timeout",
                     "proxy_buffer_size", "proxy_buffers", "proxy_next_upstream_tries",
