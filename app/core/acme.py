@@ -313,9 +313,12 @@ class CertificateManager:
         if not domains:
             raise AcmeError("that certificate has no domains on it")
 
-        email = self.settings.acme_email
-        if not email:
-            raise AcmeError("no ACME email is set.  Put one in Settings first.")
+        # Whatever an admin put in Settings, falling back to the environment.
+        # Blank is fine, see settings_store.acme_email for why.
+        from app.core import settings_store
+
+        email = settings_store.acme_email()
+        staging = settings_store.get("acme_staging", self.settings.acme_staging)
 
         # ---- pick the node ---------------------------------------------------
         if challenge_type == "dns-01":
@@ -342,7 +345,7 @@ class CertificateManager:
         request = {
             "domains": domains,
             "email": email,
-            "staging": self.settings.acme_staging,
+            "staging": staging,
             "challenge": challenge_type,
             "key_type": key_type,
             "force_renewal": force,
@@ -355,8 +358,22 @@ class CertificateManager:
             # The hooks are what make the token land on every node.  certbot
             # calls them, they call our local API, and that pushes the token out
             # to the cluster before certbot tells Lets Encrypt to go and look.
-            request["auth_hook"] = "/usr/local/lib/nginx-fleet-manager/acme-auth-hook.sh"
-            request["cleanup_hook"] = "/usr/local/lib/nginx-fleet-manager/acme-cleanup-hook.sh"
+            #
+            # Write them first, every time.  A node that was rebuilt will not
+            # have them, and the failure without this is "hook ... is not a file
+            # on this box", which says what is wrong but nothing about why or
+            # what to do about it.
+            from app.core import acme_hooks
+
+            written = await acme_hooks.ensure_hooks()
+            if not written.get("ok"):
+                raise AcmeError(
+                    f"could not put the certbot hooks on this node: {written.get('error')}.  "
+                    f"Without them only the node running certbot can answer the challenge."
+                )
+
+            request["auth_hook"] = acme_hooks.AUTH_HOOK
+            request["cleanup_hook"] = acme_hooks.CLEANUP_HOOK
 
         try:
             if issuing_node == self.settings.node_name:

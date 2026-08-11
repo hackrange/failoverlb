@@ -41,7 +41,7 @@ _hasher = PasswordHasher(
     salt_len=16,
 )
 
-TOTP_ISSUER = "NGINX Fleet Manager"
+TOTP_ISSUER = "NGINX Management"
 RECOVERY_CODE_COUNT = 10
 
 

@@ -21,7 +21,7 @@ from app.auth.service import can, current_user
 from app.catalog import CATEGORIES, all_features, plus_only_features, validate_value
 from app.catalog.registry import get_feature
 from app.config import get_settings
-from app.core import audit
+from app.core import audit, settings_store
 from app.core.acme import AcmeError, get_cert_manager, pick_issuing_node, resolve_domain
 from app.core.agent_client import AgentError, get_agent
 from app.core.capabilities import get_local_capabilities
@@ -131,7 +131,13 @@ def render_current(session) -> tuple:
         node_addresses=sorted(set(node_addresses)),
         settings={
             "node_name": settings.node_name,
-            "management_networks": [str(n) for n in settings.admin_networks],
+            # What an admin typed on the settings page, falling back to the GUI
+            # allow list when nothing has been set there yet.  Those are two
+            # different things, but the allow list is a sensible starting guess.
+            "management_networks": (
+                settings_store.get("management_networks")
+                or [str(n) for n in settings.admin_networks]
+            ),
         },
     )
 
@@ -1397,6 +1403,60 @@ async def delete_cert(cert_id: str, g: ObjectGuard = Depends(changing)):
 async def dns_lookup(domain: str, g: ObjectGuard = Depends(guard)):
     validate_hostname(domain)
     return await resolve_domain(domain)
+
+
+# ==============================================================================
+# The certbot hook endpoint
+# ==============================================================================
+
+@router.post("/acme/hook")
+async def acme_hook(request: Request):
+    """
+    Called by the certbot hook scripts on this host.
+
+    No session and no CSRF, because the caller is a shell script certbot ran,
+    not a browser.  Three things stand in for that:
+
+      the request has to come from this machine
+      it has to carry the shared secret the hooks were written with
+      it can only publish or remove a challenge token, nothing else
+
+    Getting all three means already being on the box, at which point the token
+    file could have been written directly anyway.
+    """
+    from app.core import acme_hooks
+    from app.core.acme import ChallengeCoordinator
+
+    source = client_ip(request)
+    if source not in ("127.0.0.1", "::1", "localhost"):
+        log.warning("acme hook called from %s, which is not this machine", source)
+        raise HTTPException(status_code=404, detail="not found")
+
+    sent = request.headers.get("X-NFM-Hook-Secret", "")
+    expected = acme_hooks.get_hook_secret()
+
+    import secrets as _secrets
+
+    if not sent or not _secrets.compare_digest(sent, expected):
+        log.warning("acme hook called with the wrong secret")
+        raise HTTPException(status_code=403, detail="no")
+
+    payload = await request.json()
+    action = payload.get("action")
+    token = payload.get("token", "")
+
+    coordinator = ChallengeCoordinator()
+
+    if action == "publish":
+        result = await coordinator.publish(token, payload.get("value", ""))
+        log.info("challenge token published to %s node(s)", len(result.get("ok", [])))
+        return {"ok": True, "nodes": result.get("ok", []), "failed": result.get("failed", [])}
+
+    if action == "cleanup":
+        await coordinator.cleanup(token)
+        return {"ok": True}
+
+    raise HTTPException(status_code=400, detail="action is publish or cleanup")
 
 
 # ==============================================================================

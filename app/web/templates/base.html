@@ -4,7 +4,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{% block title %}NGINX Fleet Manager{% endblock %}</title>
+<title>{% block title %}NGINX Management{% endblock %}</title>
 {# The prefix we are served under, so the JavaScript builds API URLs that land
    in the right place when something proxies us at a sub path. #}
 <meta name="nfm-base" content="{{ base }}">
@@ -26,7 +26,7 @@
           <rect width="16" height="16" rx="3" fill="currentColor" opacity="0.18"/>
           <path d="M4 11.5v-7h1.4l3.2 4.6V4.5H10v7H8.6L5.4 6.9v4.6z" fill="currentColor"/>
         </svg>
-        NGINX Fleet Manager
+        NGINX Management
       </a>
     </div>
 
@@ -91,6 +91,13 @@
         <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 8a3 3 0 1 0 0-6 3 3 0 0 0 0 6zm0 1.5c-2.7 0-5 1.4-5 3.1V14h10v-1.4c0-1.7-2.3-3.1-5-3.1z"/></svg>
         My Account
       </a>
+
+      {% if can('manage_settings') %}
+        <a href="{{ base }}/settings" class="{{ 'active' if active_page == 'settings' }}">
+          <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 5.2a2.8 2.8 0 1 0 0 5.6 2.8 2.8 0 0 0 0-5.6zm0 4.4a1.6 1.6 0 1 1 0-3.2 1.6 1.6 0 0 1 0 3.2z"/><path d="m13.9 9.2-1.2-.7a4.9 4.9 0 0 0 0-1l1.2-.7a.6.6 0 0 0 .2-.8l-1.2-2a.6.6 0 0 0-.8-.2l-1.2.7a4.9 4.9 0 0 0-.9-.5V2.6a.6.6 0 0 0-.6-.6H6.6a.6.6 0 0 0-.6.6V4c-.3.1-.6.3-.9.5l-1.2-.7a.6.6 0 0 0-.8.2l-1.2 2a.6.6 0 0 0 .2.8l1.2.7a4.9 4.9 0 0 0 0 1l-1.2.7a.6.6 0 0 0-.2.8l1.2 2a.6.6 0 0 0 .8.2l1.2-.7c.3.2.6.4.9.5v1.4a.6.6 0 0 0 .6.6h2.8a.6.6 0 0 0 .6-.6V12c.3-.1.6-.3.9-.5l1.2.7a.6.6 0 0 0 .8-.2l1.2-2a.6.6 0 0 0-.2-.8z"/></svg>
+          Settings
+        </a>
+      {% endif %}
 
       {% if can('manage_users') %}
         <a href="{{ base }}/users" class="{{ 'active' if active_page == 'users' }}">

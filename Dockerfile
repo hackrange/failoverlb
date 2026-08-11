@@ -1,4 +1,4 @@
-# NGINX Fleet Manager
+# NGINX Management
 #
 # Two stages here.  The builder compiles the wheels, since a few of these
 # packages have C code in them (argon2-cffi, cryptography, httptools).  Doing
@@ -36,7 +36,7 @@ RUN pip wheel --wheel-dir=/wheels -r requirements.txt
 # ==============================================================================
 FROM python:3.12-slim-bookworm AS runtime
 
-LABEL org.opencontainers.image.title="NGINX Fleet Manager" \
+LABEL org.opencontainers.image.title="NGINX Management" \
       org.opencontainers.image.description="Clustered web GUI, health checked backend pools, and Lets Encrypt automation for nginx built from source" \
       org.opencontainers.image.licenses="MIT"
 

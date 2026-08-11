@@ -1,4 +1,4 @@
-# NGINX Fleet Manager.  One of these runs on every nginx box you have.
+# NGINX Management.  One of these runs on every nginx box you have.
 #
 # There is no central server to lose.  Every node runs the same container and
 # they form a trust group.  One node is ACTIVE and takes the writes, the rest

@@ -1,0 +1,235 @@
+{% extends "base.html" %}
+{% block title %}Settings &middot; NGINX Management{% endblock %}
+
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <h1>Settings</h1>
+    <div class="sub">
+      Things you can change without restarting anything.
+    </div>
+  </div>
+</div>
+
+{% if error %}
+  <div class="notice bad">
+    <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.5 15 14H1L8 1.5zm0 4a.7.7 0 0 0-.7.8l.25 3.2a.45.45 0 0 0 .9 0l.25-3.2A.7.7 0 0 0 8 5.5zm0 5.4a.8.8 0 1 0 0 1.6.8.8 0 0 0 0-1.6z"/></svg>
+    <div>{{ error }}</div>
+  </div>
+{% endif %}
+{% if ok %}
+  <div class="notice ok">
+    <svg viewBox="0 0 16 16" fill="currentColor"><path d="M13.5 4.5 6 12 2.5 8.5l1-1L6 10l6.5-6.5 1 1z"/></svg>
+    <div>{{ ok }}</div>
+  </div>
+{% endif %}
+
+<form method="post" action="{{ base }}/settings">
+<input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+<div class="card">
+  <div class="card-head">
+    <h2>Certificates</h2>
+    <button class="help-btn" data-help-static="h-acme"
+            data-help-title="Certificate settings" data-help-wide
+            aria-label="Help">?</button>
+  </div>
+  <div class="card-body">
+
+    <div class="field" style="max-width:420px">
+      <label for="acme_email">
+        Contact email
+        <span class="badge neutral">optional</span>
+      </label>
+      <input type="email" id="acme_email" name="acme_email"
+             value="{{ values.acme_email.value or '' }}"
+             placeholder="ssl-admin@example.com">
+      <div class="hint">
+        Where the certificate authority sends expiry warnings.  Leave it empty
+        and certificates still work, you just do not get that mail.  The
+        dashboard warns you either way.  Use a list more than one person reads,
+        not somebody's personal mailbox.
+      </div>
+    </div>
+
+    <div class="checkline">
+      <input type="checkbox" id="acme_staging" name="acme_staging" value="true"
+             {{ 'checked' if values.acme_staging.value }}>
+      <label for="acme_staging">
+        Use the staging service
+        <button class="help-btn" data-help-static="h-staging"
+                data-help-title="Staging versus the real thing" aria-label="Help">?</button>
+      </label>
+    </div>
+    <div class="hint" style="margin:-4px 0 14px 23px">
+      Staging certificates are not trusted by browsers, but the rate limits are
+      far looser.  Leave this on while you are working things out.
+    </div>
+
+    <div class="field" style="max-width:260px">
+      <label for="acme_renew_days_before">Renew this many days before expiry</label>
+      <input type="number" id="acme_renew_days_before" name="acme_renew_days_before"
+             min="1" max="89" value="{{ values.acme_renew_days_before.value or 30 }}">
+      <div class="hint">
+        Lets Encrypt certificates last 90 days and they suggest renewing at 30.
+        That leaves a fortnight to notice a failure and still have time to fix
+        it.
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head">
+    <h2>Management networks</h2>
+    <button class="help-btn" data-help-static="h-mgmt"
+            data-help-title="Management networks" data-help-wide
+            aria-label="Help">?</button>
+  </div>
+  <div class="card-body">
+    <div class="field">
+      <label for="management_networks">Networks that count as management</label>
+      <textarea id="management_networks" name="management_networks" rows="4"
+                placeholder="10.20.30.0/24&#10;192.168.50.10/32">{{ values.management_networks.value|join('\n') if values.management_networks.value else '' }}</textarea>
+      <div class="hint">
+        One CIDR per line.  These get an allow line on any site set to
+        management only, along with every cluster node.
+      </div>
+    </div>
+    <div class="notice info">
+      <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 3a.9.9 0 1 1 0 1.8A.9.9 0 0 1 8 4zm1.2 8H6.8v-.9h.7V7.9h-.7V7h2.1v4.1h.3V12z"/></svg>
+      <div>
+        This is not the same thing as who can reach this GUI.  That is
+        <code>NFM_ADMIN_ALLOWLIST</code> in the environment, because it has to
+        be in force before the login page will even render, which is earlier
+        than anything in the database can be read.
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head"><h2>Monitoring</h2></div>
+  <div class="card-body">
+    <div class="field" style="max-width:260px">
+      <label for="health_check_interval">Default health check interval</label>
+      <input type="number" id="health_check_interval" name="health_check_interval"
+             min="2" max="300" value="{{ values.health_check_interval.value or 10 }}">
+      <div class="hint">
+        Seconds, and only the default for a new pool.  Each pool can set its
+        own and the checker honours it.
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head"><h2>Set in the environment</h2></div>
+  <div class="card-body">
+    <p class="small muted" style="margin-top:0">
+      These are read once when the container starts, so changing them means
+      editing <code>.env</code> and restarting.  Showing them here so you can
+      see what is actually in force.
+    </p>
+    <dl class="kv">
+      <dt>This node</dt><dd class="mono">{{ env.node_name }} at {{ env.node_address }}</dd>
+      <dt>GUI port</dt><dd class="mono">{{ env.gui_port }}</dd>
+      <dt>Peer port</dt><dd class="mono">{{ env.peer_port }}</dd>
+      <dt>Cluster priority</dt><dd class="mono">{{ env.cluster_priority }}</dd>
+      <dt>GUI allow list</dt>
+      <dd class="mono">
+        {% if env.admin_allowlist %}{{ env.admin_allowlist }}
+        {% else %}<span style="color:var(--warn)">not set, anybody who can reach the port sees the login page</span>{% endif %}
+      </dd>
+      <dt>Session timeout</dt><dd class="mono">{{ env.session_timeout }} minutes</dd>
+      <dt>Single sign on</dt>
+      <dd class="mono">{{ 'on' if env.oidc_enabled else 'off, local accounts only' }}</dd>
+      <dt>Served under</dt><dd class="mono">{{ env.root_path or '/' }}</dd>
+    </dl>
+  </div>
+</div>
+
+<div class="card" style="position:sticky; bottom:0">
+  <div class="card-body flex-between">
+    <div class="small faint">Saved straight away.  Certificate settings apply to the next issue or renewal.</div>
+    <button type="submit" class="btn primary">Save settings</button>
+  </div>
+</div>
+
+</form>
+
+<div hidden id="h-acme">
+  <div class="help-section">
+    <p>How the manager talks to the certificate authority.</p>
+  </div>
+  <div class="help-section">
+    <h4>The email really is optional</h4>
+    <p>Lets Encrypt will issue certificates with no contact address at all.  The
+       only thing you give up is the mail they send when something is about to
+       expire.
+
+That matters less here than it would somewhere else, because the manager is
+already watching expiry and puts a warning on the dashboard weeks ahead.  Set
+one anyway if you have a shared mailbox, since a second warning path costs
+nothing.  Just do not use somebody's personal address, because certificates
+outlive jobs.</p>
+  </div>
+  <div class="help-section">
+    <h4>Renewal is driven from here, not by certbot</h4>
+    <p>The certbot timer is turned off on purpose.  It fires on every box, and
+       on a node that does not currently own the public address the challenge
+       fails every single time.  You end up with a mailbox full of failures
+       from two of your three nodes and the real problem buried in it.
+
+The manager works out which node can actually answer, at renewal time, with
+current DNS, and runs it there.</p>
+  </div>
+</div>
+
+<div hidden id="h-staging">
+  <div class="help-section">
+    <p>Lets Encrypt runs a practice service alongside the real one.</p>
+  </div>
+  <div class="help-section">
+    <h4>Why you want it on at first</h4>
+    <p>The real service has hard rate limits: five certificates a week for the
+       same set of names.  Get your setup wrong a few times and you are locked
+       out for a week, with no way to appeal.
+
+Staging has far looser limits.  The certificates it issues are not trusted by
+browsers, so you will see a warning, but everything else behaves the same.  Get
+it working there, then turn this off and do it for real.</p>
+  </div>
+  <div class="help-section">
+    <h4>Switching to real certificates</h4>
+    <p>Turn this off and issue again.  The staging certificate gets replaced.
+       Nothing else needs changing.</p>
+  </div>
+</div>
+
+<div hidden id="h-mgmt">
+  <div class="help-section">
+    <p>Networks that count as yours when a site is set to management only.</p>
+  </div>
+  <div class="help-section">
+    <h4>What it does</h4>
+    <p>Any site with "management network only" ticked gets an allow line for
+       each of these, plus one for every node in the cluster, then a deny all.
+
+The cluster nodes are added from the roster rather than typed in, so when you
+add a node later it lands in every one of those lists on its own.  That is the
+bit people forget by hand, and it is how health checks end up blocked by an ACL
+somebody wrote months earlier.</p>
+  </div>
+  <div class="help-section">
+    <h4>Not the same as the GUI allow list</h4>
+    <p>This decides who your nginx sites let in.  Who can reach this management
+       GUI is a separate setting in the environment, and it has to be, because
+       it is enforced before the login page renders and therefore before
+       anything in the database has been read.</p>
+  </div>
+</div>
+
+{% endblock %}

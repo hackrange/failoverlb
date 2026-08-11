@@ -366,7 +366,7 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
 
     log.info("=" * 70)
-    log.info("NGINX Fleet Manager %s", __version__)
+    log.info("NGINX Management %s", __version__)
     log.info("  node:     %s (%s)", settings.node_name, settings.node_address)
     log.info("  gui:      https://%s:%s", settings.bind_address, settings.gui_port)
     log.info("  peers:    https://%s:%s (client cert required)",
@@ -388,6 +388,16 @@ async def lifespan(app: FastAPI):
     # take a few seconds, and blocking startup on it means a box with no route
     # out sits there looking hung.
     asyncio.create_task(refresh_public_ip())
+
+    # Put the certbot hooks on the host now rather than waiting for the first
+    # certificate.  Finding out they are missing halfway through an issue is a
+    # bad time to find out.
+    async def _hooks():
+        from app.core import acme_hooks
+
+        await acme_hooks.ensure_hooks()
+
+    asyncio.create_task(_hooks())
 
     start_scheduler()
 
@@ -417,7 +427,7 @@ def create_gui_app() -> FastAPI:
     settings = get_settings()
 
     app = FastAPI(
-        title="NGINX Fleet Manager",
+        title="NGINX Management",
         version=__version__,
         lifespan=lifespan,
         # Tells FastAPI it is being served under a prefix, so it does not get
@@ -465,7 +475,7 @@ def create_peer_app() -> FastAPI:
     from app.web.routes_peer import router as peer_router
 
     app = FastAPI(
-        title="NGINX Fleet Manager peer API",
+        title="NGINX Management peer API",
         version=__version__,
         docs_url=None,
         redoc_url=None,
@@ -527,7 +537,7 @@ def _make_gui_cert(settings, cert_path: Path, key_path: Path):
 
     subject = x509.Name([
         x509.NameAttribute(NameOID.COMMON_NAME, settings.node_name),
-        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "NGINX Fleet Manager"),
+        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "NGINX Management"),
     ])
 
     cert = (

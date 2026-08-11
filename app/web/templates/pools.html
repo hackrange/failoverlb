@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Backend Pools &middot; NGINX Fleet Manager{% endblock %}
+{% block title %}Backend Pools &middot; NGINX Management{% endblock %}
 
 {% block content %}
 
@@ -37,7 +37,7 @@
     <div class="card-head">
       <div>
         <h2>
-          {{ pool.name }}
+          <a href="{{ base }}/pools/{{ pool.id }}">{{ pool.name }}</a>
           {% if pool.status_summary == 'healthy' %}
             <span class="badge ok">healthy</span>
           {% elif pool.status_summary == 'degraded' %}

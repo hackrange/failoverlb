@@ -858,7 +858,11 @@ def v_certbot(req):
         if not isinstance(d, str) or not hostname_re.match(d):
             raise AgentError(f"{d!r} is not a valid domain name", "bad_request")
 
-    if not re.fullmatch(r"[^@\s]{1,64}@[^@\s]{1,255}", str(email)):
+    # No email is allowed.  Lets Encrypt will register without a contact
+    # address, you just get no mail before something expires.  The manager
+    # watches expiry itself and warns on the dashboard, so refusing to issue
+    # without one would be us inventing a rule the CA does not have.
+    if email and not re.fullmatch(r"[^@\s]{1,64}@[^@\s]{1,255}", str(email)):
         raise AgentError("that email address does not look right", "bad_request")
 
     if key_type not in ("ecdsa", "rsa"):
@@ -870,11 +874,18 @@ def v_certbot(req):
         "certbot", "certonly",
         "--non-interactive",
         "--agree-tos",
-        "-m", email,
         "--cert-name", cert_name,
         "--key-type", key_type,
         "--preferred-chain", "ISRG Root X1",
     ]
+
+    if email:
+        cmd += ["-m", email]
+    else:
+        # certbot will not register without either a contact address or being
+        # told outright that you meant it.  The flag name is dramatic, but all
+        # it means is nobody gets an expiry warning by mail.
+        cmd.append("--register-unsafely-without-email")
 
     if staging:
         cmd.append("--staging")

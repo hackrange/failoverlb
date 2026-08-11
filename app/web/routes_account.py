@@ -572,3 +572,119 @@ def _users_back(error: str = None, ok: str = None):
     if error:
         return RedirectResponse(_p(f"/users?error={quote(error)}"), status_code=303)
     return RedirectResponse(_p(f"/users?ok={quote(ok or 'done')}"), status_code=303)
+
+
+# ==============================================================================
+# Settings
+# ==============================================================================
+
+@router.get("/settings", response_class=HTMLResponse)
+async def settings_page(request: Request, db: DBSession = Depends(get_db),
+                        error: str = None, ok: str = None):
+    user = require_page_user(request, db)
+    if not can(user, "manage_settings"):
+        raise HTTPException(status_code=403, detail="only an admin can change settings")
+
+    from app.core import settings_store
+
+    env = get_settings()
+    csrf = ensure_csrf_token(request)
+    response = render(
+        request, "settings.html", user, csrf_token=csrf,
+        values=settings_store.all_visible(),
+        error=error, ok=ok,
+        env={
+            "node_name": env.node_name,
+            "node_address": env.node_address,
+            "gui_port": env.gui_port,
+            "peer_port": env.peer_port,
+            "cluster_priority": env.cluster_priority,
+            "admin_allowlist": env.admin_allowlist,
+            "session_timeout": env.session_timeout_minutes,
+            "oidc_enabled": env.oidc_enabled,
+            "root_path": env.root_path,
+        },
+    )
+    issue_csrf_token(response, csrf)
+    return response
+
+
+@router.post("/settings")
+async def save_settings(request: Request, db: DBSession = Depends(get_db),
+                        acme_email: str = Form(""),
+                        acme_staging: str = Form(None),
+                        acme_renew_days_before: str = Form("30"),
+                        management_networks: str = Form(""),
+                        health_check_interval: str = Form("10")):
+    await check_csrf(request)
+    user = require_page_user(request, db)
+    if not can(user, "manage_settings"):
+        raise HTTPException(status_code=403, detail="only an admin can change settings")
+
+    import ipaddress
+    import re
+    from urllib.parse import quote
+
+    from app.core import settings_store
+
+    email = acme_email.strip()
+    # Blank is allowed and is the whole point of this change.  Only check the
+    # shape when somebody actually typed something.
+    if email and not re.fullmatch(r"[^@\s]{1,64}@[^@\s]{1,255}", email):
+        return RedirectResponse(
+            _p(f"/settings?error={quote('that does not look like an email address')}"),
+            status_code=303,
+        )
+
+    networks = []
+    for line in management_networks.replace(",", "\n").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ipaddress.ip_network(line, strict=False)
+        except ValueError:
+            return RedirectResponse(
+                _p(f"/settings?error={quote(f'{line} is not a valid network.  Try 10.20.30.0/24')}"),
+                status_code=303,
+            )
+        networks.append(line)
+
+    try:
+        days = int(acme_renew_days_before)
+        interval = int(health_check_interval)
+    except ValueError:
+        return RedirectResponse(
+            _p(f"/settings?error={quote('those numbers are not numbers')}"), status_code=303
+        )
+
+    if not 1 <= days <= 89:
+        return RedirectResponse(
+            _p(f"/settings?error={quote('renew days has to be between 1 and 89')}"),
+            status_code=303,
+        )
+    if not 2 <= interval <= 300:
+        return RedirectResponse(
+            _p(f"/settings?error={quote('the check interval has to be between 2 and 300 seconds')}"),
+            status_code=303,
+        )
+
+    before = settings_store.all_visible()
+
+    settings_store.set("acme_email", email, user.username)
+    settings_store.set("acme_staging", bool(acme_staging), user.username)
+    settings_store.set("acme_renew_days_before", days, user.username)
+    settings_store.set("management_networks", networks, user.username)
+    settings_store.set("health_check_interval", interval, user.username)
+
+    audit.record("settings.update", user=user, source_ip=client_ip(request),
+                 object_type="settings",
+                 changes={
+                     "acme_email": {"from": before["acme_email"]["value"], "to": email or "(none)"},
+                     "acme_staging": {"from": before["acme_staging"]["value"], "to": bool(acme_staging)},
+                     "management_networks": {"to": networks},
+                 })
+
+    from urllib.parse import quote as q
+
+    return RedirectResponse(_p(f"/settings?ok={q('settings saved')}"), status_code=303)

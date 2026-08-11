@@ -1,4 +1,4 @@
-# NGINX Fleet Manager
+# NGINX Management
 
 A web GUI for running two or more nginx boxes as one unit.  Sites, backend
 pools with real health checks, and Lets Encrypt certificates that work properly

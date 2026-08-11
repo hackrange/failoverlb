@@ -90,7 +90,7 @@ def render(request: Request, template: str, user, csrf_token: str = None, **cont
             "can": lambda perm: can(user, perm),
             "node_name": settings.node_name,
             "csp_nonce": getattr(request.state, "csp_nonce", ""),
-            "active_page": template.replace(".html", "").replace("site_detail", "sites"),
+            "active_page": template.replace(".html", "").replace("site_detail", "sites").replace("pool_detail", "pools"),
             # Everything in the templates is built from this, so the whole GUI
             # works the same whether it is at the root or behind a prefix.
             "base": settings.root_path.rstrip("/"),
@@ -485,6 +485,24 @@ async def pools_page(request: Request, db: DBSession = Depends(get_db)):
     response = render(
         request, "pools.html", user, csrf_token=token,
         pools=db.query(Pool).order_by(Pool.name).all(),
+    )
+    issue_csrf_token(response, token)
+    return response
+
+
+@router.get("/pools/{pool_id}", response_class=HTMLResponse)
+async def pool_detail(pool_id: str, request: Request, db: DBSession = Depends(get_db)):
+    user = require_page_user(request, db)
+
+    from app.web.security import ObjectGuard
+
+    guard = ObjectGuard(db, user)
+    pool = guard.get(Pool, pool_id)
+
+    token = ensure_csrf_token(request)
+    response = render(
+        request, "pool_detail.html", user, csrf_token=token,
+        pool=pool, settings=pool.setting_map(),
     )
     issue_csrf_token(response, token)
     return response
