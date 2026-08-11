@@ -84,8 +84,22 @@ ReadWritePaths=/var/www/certbot
 ReadWritePaths=/var/backups/nginx-fleet-manager
 ReadWritePaths=/usr/local/lib/nginx-fleet-manager
 ReadWritePaths=/run/nginxmgr
-ReadWritePaths=-/var/cache/nginx
 ReadWritePaths=/run
+
+# nginx runs as a child of the agent whenever we test or reload a config, so it
+# inherits this sandbox and needs everywhere it writes listed here too.  Miss
+# one and "nginx -t" fails with a read only filesystem, which reads like a
+# broken config rather than a missing path.
+#
+# This list comes from the build flags in nginx-installer.sh:
+#   --error-log-path=/var/log/nginx/error.log
+#   --http-log-path=/var/log/nginx/access.log
+#   --http-*-temp-path=/var/cache/nginx/*
+#   --pid-path=/run/nginx.pid, --lock-path=/run/nginx.lock  (covered by /run)
+#
+# If you build nginx with different paths, add them here.
+ReadWritePaths=-/var/log/nginx
+ReadWritePaths=-/var/cache/nginx
 
 # No reading anybody's home folder.
 ProtectHome=yes
