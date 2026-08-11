@@ -67,22 +67,41 @@ handles the things that break naive parsers: `server` meaning two different
 things depending on context, braces and semicolons inside quoted strings, and
 round tripping without losing hand written directives.
 
+| Auth | `app/auth/` | Local break glass accounts with mandatory TOTP, plus OIDC with PKCE. |
+| Web GUI and API | `app/web/` | Server rendered pages, JSON API, help modals, no build step. |
+| Test harness | `test/` | Two Ubuntu 26.04 nodes with nginx built from source, plus the managers. |
+
+**It runs.**  `test/run-test-cluster.sh up` brings up a working two node cluster
+and 75 end to end tests pass against it.
+
 ### Still to come
 
 | Piece | Notes |
 |---|---|
-| Auth | Local break-glass accounts with TOTP, plus OIDC.  Model is in place, the flows are not written. |
-| Web GUI and API | The FastAPI app, routes, templates and CSS. |
-| Help modals | The content is all written in the catalog.  The popup that shows it is not. |
 | `install.sh` | Per node installer that lays down the agent and starts the container. |
 | `nginx-gui-mgmt_setup.sh` | One shot install from the git repo into `/data/docker/nginx-gui-mgmt`. |
 | nginx version upgrade | Driving the installer script remotely, one node at a time. |
-| OWASP pass | Object level checks on every endpoint, CSRF, headers.  The peer API is already locked down. |
-| Test harness | Isolated containers so none of this goes near a production nginx. |
+| ACME against a real server | The flow is written.  It has not been run against Lets Encrypt or Pebble yet. |
+| Editing pages | Sites and pools can be created and changed through the API.  The GUI has create forms but not full edit forms yet. |
 
-**It does not start yet.**  There is no `app/main.py`, so `docker compose up`
-will not do anything useful.  The pieces above are written and syntax checked,
-they are just not wired together into a running app.
+## Testing
+
+```bash
+./test/run-test-cluster.sh up      # two nginx nodes plus two managers, isolated
+docker cp test/e2e_test.py nfm-gui-1:/tmp/
+docker exec -e E2E_PASSWORD=<the password from the log> nfm-gui-1 python /tmp/e2e_test.py
+./test/run-test-cluster.sh down
+```
+
+Nothing in the harness touches the host's nginx.  It runs on its own bridge
+network, publishes no ports, and mounts no host paths.
+
+The tests are worth reading before you trust them.  An earlier version passed
+while the login page was completely broken in a browser, because the test read
+the CSRF token from the cookie instead of from the rendered form and was
+helpfully supplying something the page never sent.  The suite now scrapes tokens
+out of the HTML the way a browser does, and it covers both the first login and
+the repeat login, which are different code paths.
 
 ## How the security works
 

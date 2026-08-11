@@ -60,6 +60,11 @@ class HealthChecker:
         self._last_reload = 0.0
         self._lock = asyncio.Lock()
 
+        # When each pool is next due a round of checks.  Keyed by pool id.
+        # This is what lets a pool have its own interval while the loop itself
+        # runs on the shortest one.
+        self._next_due = {}
+
         # One client, reused.  Making a fresh one per check would redo the TLS
         # handshake every time and the connection pool would never do anything.
         self._client = None
@@ -101,10 +106,22 @@ class HealthChecker:
         if not self._running:
             return
 
+        now = time.monotonic()
+
         with session_scope() as session:
             pools = session.query(Pool).filter(Pool.health_check_enabled == True).all()  # noqa: E712
             work = []
             for pool in pools:
+                # Each pool sets its own interval, and this loop runs on the
+                # shortest one in the fleet.  So we skip any pool that is not
+                # due yet.  Without this, setting a pool to check every 60
+                # seconds would do nothing, because the loop would check it
+                # every time it ran anyway.
+                due_at = self._next_due.get(pool.id, 0)
+                if now < due_at:
+                    continue
+                self._next_due[pool.id] = now + max(pool.health_check_interval or 10, 2)
+
                 for member in pool.members:
                     if not member.enabled:
                         continue

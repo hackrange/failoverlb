@@ -1,0 +1,106 @@
+{% extends "base.html" %}
+{% block title %}Open Source Parity &middot; NGINX Fleet Manager{% endblock %}
+
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <h1>Open source parity</h1>
+    <div class="sub">
+      What the paid nginx has, and what we built instead.
+    </div>
+  </div>
+</div>
+
+<div class="notice info">
+  <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 3a.9.9 0 1 1 0 1.8A.9.9 0 0 1 8 4zm1.2 8H6.8v-.9h.7V7.9h-.7V7h2.1v4.1h.3V12z"/></svg>
+  <div>
+    These boxes are not licensed, so none of the paid features are offered in
+    the forms.  Almost all of them can be done from out here instead, by
+    watching what is going on and rewriting the config when something changes.
+    This page lists each one and what we do about it.
+  </div>
+</div>
+
+{% for f in features %}
+  <div class="card">
+    <div class="card-head">
+      <h2>{{ f.label }}</h2>
+      <span class="badge neutral">paid only</span>
+    </div>
+    <div class="card-body">
+      <p style="margin-top:0">{{ f.help.summary }}</p>
+
+      {% if f.help.detail %}
+        <div class="small muted" style="white-space:pre-wrap">{{ f.help.detail }}</div>
+      {% endif %}
+
+      {% if f.oss_alternative %}
+        <div class="notice ok mt">
+          <svg viewBox="0 0 16 16" fill="currentColor"><path d="M13.5 4.5 6 12 2.5 8.5l1-1L6 10l6.5-6.5 1 1z"/></svg>
+          <div><strong>What we do instead:</strong> {{ f.oss_alternative }}</div>
+        </div>
+      {% endif %}
+
+      {% if f.help.example_config %}
+        <pre>{{ f.help.example_config }}</pre>
+      {% endif %}
+    </div>
+  </div>
+{% endfor %}
+
+<div class="card">
+  <div class="card-head">
+    <h2>What we could not rebuild</h2>
+  </div>
+  <div class="card-body">
+    <p style="margin-top:0" class="muted">
+      Being straight about the gaps matters more than a tidy list.
+    </p>
+    <ul class="small">
+      <li><strong>HLS, DASH and f4f streaming.</strong> These are compiled into
+          the nginx binary and there is no way to add them from out here.  If
+          you need packaged video streaming that is a real reason to buy the
+          paid version.</li>
+      <li><strong>NTLM connection pinning.</strong> It keeps a connection pinned
+          through a Windows authentication handshake, and that cannot be faked
+          from outside the process.  If you proxy to something needing NTLM,
+          this one will actually bite you.</li>
+      <li><strong>MQTT preread and filter.</strong> Stream level MQTT parsing.
+          No way around it.</li>
+      <li><strong>The App Protect WAF.</strong> A separate paid product.  We are
+          not going to pretend a few regular expressions are a web application
+          firewall.  Look at ModSecurity or Coraza, and know that the installer
+          does not compile either one in, so it means changing the module list
+          and rebuilding.</li>
+      <li><strong>In flight request counts on the dashboard.</strong> Our
+          numbers come from the access log, and a request that has not finished
+          has not been logged yet.</li>
+    </ul>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head">
+    <h2>A note on reloads</h2>
+  </div>
+  <div class="card-body">
+    <p style="margin-top:0" class="small muted">
+      Most of what is above works by rewriting config and reloading, so it is
+      worth being comfortable with what that does.
+
+      On reload, the nginx master reads the new config and starts new workers
+      with it.  The old workers stop taking new connections but keep serving the
+      requests they already have until those finish, then they exit.  No
+      connection gets cut and nobody sees an error.
+
+      Two things to know.  A reload costs a little CPU and briefly runs two sets
+      of workers, so memory goes up for a moment.  And if you have very long
+      lived connections like WebSockets, the old workers stick around until
+      those close.  The manager already debounces reloads, so twenty backends
+      flapping at once turns into one reload rather than twenty.
+    </p>
+  </div>
+</div>
+
+{% endblock %}

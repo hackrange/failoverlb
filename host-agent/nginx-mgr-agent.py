@@ -71,6 +71,21 @@ MANAGED_DIR = NGINX_PREFIX / "nginxmgr"
 # Where we stage a config before testing it.
 STAGING_DIR = NGINX_PREFIX / ".nginxmgr-staging"
 
+# The throwaway nginx.conf we test a staged config with.
+#
+# This has to sit in the prefix folder itself, next to the real nginx.conf, and
+# that is not a style choice.  nginx resolves a relative include against the
+# folder the config file is in, not against whatever you passed to -p.  The
+# stock nginx.conf has "include mime.types;" in it, so a candidate written
+# anywhere else looks for mime.types beside itself, does not find it, and the
+# test fails for a reason that has nothing to do with the config you changed.
+CANDIDATE_CONF = NGINX_PREFIX / ".nginxmgr-candidate.conf"
+
+# Marker on the include block we add to nginx.conf.  It carries a version so a
+# future release can tell an out of date block from a current one and replace
+# it, rather than leaving a node quietly running an old set of includes.
+INCLUDE_MARKER = "# nginx fleet manager includes, v3.  Do not reorder."
+
 # Numbered backups of the managed folder, one per apply.
 BACKUP_DIR = Path("/var/backups/nginx-fleet-manager")
 BACKUP_KEEP = 30
@@ -167,6 +182,12 @@ def _under_any(path, roots):
 def check_write_path(path_str):
     """Resolve a path and make sure we are allowed to write it."""
     p = _resolve(path_str)
+
+    # The candidate config is the one file we write straight into the prefix
+    # folder, and only this exact name.  See CANDIDATE_CONF for why it cannot
+    # live in the staging folder with everything else.
+    if p == CANDIDATE_CONF.resolve(strict=False):
+        return p
 
     if not _under_any(p, WRITE_ALLOWED):
         raise AgentError(f"not allowed to write outside the managed paths: {p}", "denied")
@@ -491,22 +512,25 @@ def v_test_staging(req):
     else:
         candidate = _inject_include(original, staged_include)
 
-    tmp_conf = STAGING_DIR / "_test-nginx.conf"
-    atomic_write(tmp_conf, candidate, mode=0o640)
+    atomic_write(CANDIDATE_CONF, candidate, mode=0o640)
 
-    # -p keeps the prefix the same so every relative path in the config still
-    # points where it did before.
-    result = run([str(NGINX_BIN), "-t", "-p", str(NGINX_PREFIX), "-c", str(tmp_conf)])
-    output = (result["stderr"] + result["stdout"]).strip()
+    try:
+        # -p as well, so anything that genuinely does key off the prefix, like
+        # a relative access_log path, lands where it normally would.
+        result = run([str(NGINX_BIN), "-t", "-p", str(NGINX_PREFIX), "-c", str(CANDIDATE_CONF)])
+        output = (result["stderr"] + result["stdout"]).strip()
 
-    # nginx prints the temp file name in its errors, which is confusing when
-    # you are staring at it in the GUI.  Point people at the real file instead.
-    output = output.replace(str(tmp_conf), "<candidate config>")
-    output = output.replace(staged_include, live_include)
+        # Tidy up the message before anybody reads it in the GUI.  nginx names
+        # the temp file and the staging folder, and neither means anything to
+        # the person who just changed a setting.  Point them at the real thing.
+        output = output.replace(str(CANDIDATE_CONF), "the candidate config")
+        output = output.replace(staged_include + "/", live_include + "/")
 
-    tmp_conf.unlink(missing_ok=True)
-
-    return {"ok": result["rc"] == 0, "output": output}
+        return {"ok": result["rc"] == 0, "output": output}
+    finally:
+        # Always clean up, even if nginx blew up.  Leaving this behind would
+        # mean the next test reads a stale candidate.
+        CANDIDATE_CONF.unlink(missing_ok=True)
 
 
 def _inject_include(conf_text, include_dir):
@@ -534,12 +558,25 @@ def _inject_include(conf_text, include_dir):
         # Back down to where http started means we just passed its closing
         # brace, so this is the spot.
         if in_http and http_depth is not None and depth == http_depth:
+            # Order matters here and it is not cosmetic.  Anything that gets
+            # referenced by name has to be defined before the thing that uses
+            # it.  00-managed.conf holds the log formats, and a site saying
+            # "access_log ... nfm_main" before that file is read fails with
+            # "unknown log format".  Same story for maps, limit zones and cache
+            # zones.  Sites go last because they use all of it.
+            #
+            # Globs everywhere, never a named file.  nginx treats a missing
+            # named include as fatal, but a glob matching nothing is fine, so a
+            # partial staging tree gives a useful error about the thing you
+            # changed rather than about a file that was never there.
             block = [
                 "",
-                "    # added by nginx fleet manager",
-                f"    include {include_dir}/upstreams/*.conf;",
+                f"    {INCLUDE_MARKER}",
+                f"    include {include_dir}/*.conf;",
                 f"    include {include_dir}/maps/*.conf;",
                 f"    include {include_dir}/limits/*.conf;",
+                f"    include {include_dir}/caches/*.conf;",
+                f"    include {include_dir}/upstreams/*.conf;",
                 f"    include {include_dir}/sites/*.conf;",
             ]
             lines[i:i] = block
@@ -581,8 +618,6 @@ def v_apply(req):
                 shutil.rmtree(previous)
             os.rename(MANAGED_DIR, previous)
 
-        # Clean out the test file so it never ends up in the live folder.
-        (STAGING_DIR / "_test-nginx.conf").unlink(missing_ok=True)
         os.rename(STAGING_DIR, MANAGED_DIR)
     except OSError as exc:
         if previous and previous.exists() and not MANAGED_DIR.exists():
@@ -635,11 +670,37 @@ def _rollback(previous, backup_name):
 
 
 def _ensure_include_present():
+    """
+    Make sure nginx.conf pulls our folder in, with the current include list.
+
+    Checking only for the folder name would miss the case where an older
+    version of the manager wrote a shorter list of includes.  That node would
+    keep running, and keep failing in a confusing way, because a file we now
+    generate is never read.  So we look for the marker instead, and if it is
+    missing or from an older version we strip the old block and write a new one.
+    """
     main_conf = NGINX_PREFIX / "nginx.conf"
     text = main_conf.read_text()
-    if str(MANAGED_DIR) in text:
+
+    if INCLUDE_MARKER in text:
         return
-    log.info("adding our include line to nginx.conf")
+
+    if str(MANAGED_DIR) in text:
+        log.info("replacing an out of date include block in nginx.conf")
+        kept = []
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("# nginx fleet manager includes"):
+                continue
+            if stripped.startswith("# added by nginx fleet manager"):
+                continue
+            if stripped.startswith("include ") and str(MANAGED_DIR) in stripped:
+                continue
+            kept.append(line)
+        text = "\n".join(kept)
+    else:
+        log.info("adding our include block to nginx.conf")
+
     atomic_write(main_conf, _inject_include(text, str(MANAGED_DIR)), mode=0o644)
 
 
@@ -1322,12 +1383,19 @@ def setup_logging():
 
     # syslog too, so the agent's history outlives the journal rotation and
     # lands wherever the rest of your logs go.
-    try:
-        sysl = logging.handlers.SysLogHandler(address="/dev/log")
-        sysl.setFormatter(logging.Formatter("nfm-agent[%(process)d]: %(message)s"))
-        log.addHandler(sysl)
-    except OSError:
-        pass
+    #
+    # Check the socket is actually there first.  Handing SysLogHandler a path
+    # that does not exist does not always fail when you build it, it fails on
+    # the first message instead, and then every single log line prints a
+    # traceback about the logging system rather than the thing you wanted to
+    # read.  Containers usually have no /dev/log, so this comes up.
+    if Path("/dev/log").exists():
+        try:
+            sysl = logging.handlers.SysLogHandler(address="/dev/log")
+            sysl.setFormatter(logging.Formatter("nfm-agent[%(process)d]: %(message)s"))
+            log.addHandler(sysl)
+        except OSError:
+            pass
 
 
 def main():

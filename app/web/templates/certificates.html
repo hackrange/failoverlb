@@ -1,0 +1,291 @@
+{% extends "base.html" %}
+{% block title %}Certificates &middot; NGINX Fleet Manager{% endblock %}
+
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <h1>Certificates</h1>
+    <div class="sub">
+      The manager works out which node can answer the challenge, gets the cert
+      there, and copies it to the rest.
+    </div>
+  </div>
+  <div class="page-actions">
+    {% if can('edit_certs') %}
+      <button class="btn" id="new-cert">New certificate</button>
+    {% endif %}
+  </div>
+</div>
+
+{% if certs %}
+  <div class="card">
+    <div class="card-body tight">
+      <div class="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>Domains</th>
+            <th>Status</th>
+            <th>Expires</th>
+            <th>Issued by</th>
+            <th>Copied to</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for c in certs %}
+            <tr>
+              <td>
+                <strong>{{ c.name }}</strong>
+                <div class="small faint">{{ c.challenge_type }}</div>
+              </td>
+              <td class="mono small">{{ c.domain_list()|join(', ') }}</td>
+              <td>
+                {% if c.status == 'valid' %}
+                  <span class="badge ok">valid</span>
+                {% elif c.status == 'expiring' %}
+                  <span class="badge warn">expiring</span>
+                {% elif c.status == 'critical' %}
+                  <span class="badge bad">expires very soon</span>
+                {% elif c.status == 'expired' %}
+                  <span class="badge bad">expired</span>
+                {% else %}
+                  <span class="badge neutral">not issued yet</span>
+                {% endif %}
+              </td>
+              <td class="small">
+                {% if c.days_left is not none %}
+                  {{ c.days_left }} days
+                {% else %}
+                  <span class="faint">&mdash;</span>
+                {% endif %}
+              </td>
+              <td class="small faint">{{ c.issued_by_node or '&mdash;'|safe }}</td>
+              <td class="small faint">
+                {% set synced = c.sync_map().keys()|list %}
+                {{ synced|length }} of {{ nodes|length }}
+              </td>
+              <td class="right nowrap">
+                <button class="btn sm" data-where="{{ c.id }}">Where?</button>
+                {% if can('edit_certs') %}
+                  <button class="btn sm" data-issue="{{ c.id }}">
+                    {{ 'Renew' if c.not_after else 'Get it' }}
+                  </button>
+                {% endif %}
+              </td>
+            </tr>
+            {% if c.last_renewal_error %}
+              <tr>
+                <td colspan="7" class="small" style="color:var(--bad); padding-top:0;">
+                  Last attempt failed: {{ c.last_renewal_error[:300] }}
+                </td>
+              </tr>
+            {% endif %}
+          {% endfor %}
+        </tbody>
+      </table>
+      </div>
+    </div>
+  </div>
+{% else %}
+  <div class="card">
+    <div class="empty">
+      <strong>No certificates yet</strong>
+      <p>Add one and the manager handles getting it and keeping it renewed
+         across every node.</p>
+    </div>
+  </div>
+{% endif %}
+
+<div class="card">
+  <div class="card-head">
+    <h2>How this works in a cluster</h2>
+    <button class="help-btn" data-help-static="help-acme"
+            data-help-title="Certificates across several nodes" data-help-wide
+            aria-label="Help">?</button>
+  </div>
+  <div class="card-body">
+    <p class="small muted" style="margin:0">
+      Only the node that currently owns the public address for a domain can
+      answer an http challenge, and which node that is changes when you fail
+      over.  So the manager works it out fresh every time, rather than assuming
+      whoever did it last time can do it again.  Click the ? for the details, or
+      <strong>Where?</strong> on a certificate to see the reasoning for that one.
+    </p>
+  </div>
+</div>
+
+<div hidden id="help-acme">
+  <div class="help-section">
+    <p>Getting a certificate onto several load balancers is more awkward than it
+       looks, and this is the part that makes it work.</p>
+  </div>
+  <div class="help-section">
+    <h4>The problem</h4>
+    <p>Lets Encrypt proves you own a domain by connecting to whatever address
+       that domain points at.  In a two node setup only one of those boxes is on
+       the end of that address at any moment.  Run certbot on the other one and
+       the challenge fails every single time, and the error looks like a DNS
+       problem even though DNS is fine.
+
+Worse, the node that owns the address is not fixed.  Failover moves it.  A
+certificate issued from lb-01 three months ago may need to renew from lb-02
+today.</p>
+  </div>
+  <div class="help-section">
+    <h4>What we do</h4>
+    <ul>
+      <li>Look the domain up against public resolvers, not this box's own
+          resolver, because an internal resolver often gives a private answer
+          that is not what Lets Encrypt will see.</li>
+      <li>Compare that against each node's detected public address, and against
+          the addresses actually sitting on their interfaces, which catches a
+          floating VIP.</li>
+      <li>Give the job to whichever node matches.</li>
+      <li>Push the challenge token to every node before validation starts, so it
+          does not matter which one gets connected to.</li>
+      <li>Copy the finished certificate to every node, because they all serve
+          the same sites.</li>
+    </ul>
+  </div>
+  <div class="help-section">
+    <h4>Renewals</h4>
+    <p>The manager schedules these itself, and the installer turns off the
+       certbot timer on purpose.  The stock timer fires on every box, and on a
+       node that does not own the address it fails every time.  You end up with
+       a mailbox full of failures from two of your three nodes and the real
+       problem buried somewhere in there.</p>
+  </div>
+  <div class="help-section">
+    <h4>When http will not work at all</h4>
+    <p>If the domain points at a cloud load balancer or a CDN rather than at
+       your nodes, no http challenge can reach you.  Use dns-01 instead, which
+       does not need any inbound connection and can also do wildcards.</p>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script nonce="{{ csp_nonce }}">
+document.addEventListener("DOMContentLoaded", function () {
+
+  document.body.addEventListener("click", async function (e) {
+    const whereBtn = e.target.closest("[data-where]");
+    if (whereBtn) {
+      try {
+        const r = await NFM.api("/certs/" + whereBtn.getAttribute("data-where") + "/where");
+        const dns = r.dns || {};
+        let html = '<div class="help-section"><h4>What DNS says</h4>';
+        html += dns.resolved
+          ? "<pre>" + NFM.escapeHtml((dns.all || []).join("\n")) + "</pre>"
+          : '<div class="notice bad">' + NFM.icon("warn") +
+            "<div>That domain does not resolve at all right now.</div></div>";
+        html += "</div>";
+
+        html += '<div class="help-section"><h4>Which node would get it</h4><p>' +
+          (r.node ? "<strong>" + NFM.escapeHtml(r.node) + "</strong>" : "none") +
+          "</p></div>";
+
+        const reasons = {
+          public_ip_match: "Its detected public address is one the domain points at.  This is the good case.",
+          local_interface_match: "The address is sitting on one of its interfaces, so it is holding the floating IP.",
+          dns01_any_node: "This one uses a DNS challenge, so no inbound connection is needed and any node can do it.",
+          no_match: "No node reports the address this domain points at.",
+          dns_failed: "The domain did not resolve, so we could not tell."
+        };
+        html += '<div class="help-section"><h4>Why</h4><p>' +
+          NFM.escapeHtml(reasons[r.reason] || r.reason) + "</p></div>";
+
+        if (r.warning) {
+          html += '<div class="notice warn">' + NFM.icon("warn") +
+            "<div>" + NFM.escapeHtml(r.warning) + "</div></div>";
+        }
+
+        NFM.openModal("Certificate placement", "confidence: " + r.confidence, html, true);
+      } catch (err) {
+        NFM.toast(err.message, "bad");
+      }
+      return;
+    }
+
+    const issueBtn = e.target.closest("[data-issue]");
+    if (issueBtn) {
+      NFM.confirmThen(
+        "Ask for this certificate now?\n\n" +
+        "This talks to the certificate authority and can take a minute.  If you " +
+        "are still testing, make sure staging mode is on so you do not burn " +
+        "through the rate limits on the real service.",
+        async function () {
+          issueBtn.disabled = true;
+          issueBtn.textContent = "Working...";
+          try {
+            const r = await NFM.api("/certs/" + issueBtn.getAttribute("data-issue") + "/issue",
+                                    { method: "POST", body: {} });
+            NFM.toast("Issued by " + r.issued_by + ", copied to " +
+                      (r.synced_to || []).join(", "), "ok");
+            setTimeout(function () { window.location.reload(); }, 1500);
+          } finally {
+            issueBtn.disabled = false;
+          }
+        }
+      );
+    }
+  });
+
+  const nc = document.getElementById("new-cert");
+  if (nc) nc.addEventListener("click", function () {
+    NFM.openModal("New certificate", "", `
+      <div class="field">
+        <label for="c-domains">Domains</label>
+        <input type="text" id="c-domains" placeholder="www.example.com example.com" autofocus>
+        <div class="hint">
+          Space or comma separated.  One certificate can cover several names.
+          A wildcard like *.example.com needs a DNS challenge.
+        </div>
+      </div>
+      <div class="field">
+        <label for="c-challenge">How to prove you own it</label>
+        <select id="c-challenge">
+          <option value="http-01">http, serve a file on port 80</option>
+          <option value="dns-01">dns, add a TXT record</option>
+        </select>
+        <div class="hint">
+          http is simpler and needs port 80 reachable from the internet.
+          dns works behind a CDN or a cloud load balancer and is the only way to
+          get a wildcard, but it needs an API token for your DNS provider.
+        </div>
+      </div>
+      <div class="field">
+        <label for="c-keytype">Key type</label>
+        <select id="c-keytype">
+          <option value="ecdsa">ECDSA, smaller and faster</option>
+          <option value="rsa">RSA, for very old clients</option>
+        </select>
+      </div>
+      <div class="mt"><button class="btn primary" id="c-save">Create</button></div>
+    `);
+
+    document.getElementById("c-save").addEventListener("click", async function () {
+      const body = {
+        domains: document.getElementById("c-domains").value.trim(),
+        challenge_type: document.getElementById("c-challenge").value,
+        key_type: document.getElementById("c-keytype").value
+      };
+      if (!body.domains) { NFM.toast("Put in at least one domain", "bad"); return; }
+
+      try {
+        await NFM.api("/certs", { method: "POST", body: body });
+        NFM.closeModal();
+        NFM.toast("Created.  Hit Get it when you are ready to ask for it.", "ok");
+        setTimeout(function () { window.location.reload(); }, 900);
+      } catch (err) {
+        NFM.toast(err.message, "bad");
+      }
+    });
+  });
+});
+</script>
+{% endblock %}

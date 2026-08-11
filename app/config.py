@@ -34,6 +34,15 @@ class Settings(BaseSettings):
     peer_port: int = Field(default=7444, ge=1, le=65535)
     bind_address: str = Field(default="0.0.0.0")
 
+    # Serve the GUI under a path prefix instead of at the root.  Set this when
+    # something in front proxies us at, say, /nginx-manager rather than on a
+    # hostname of our own.  Leave it empty for the normal case.
+    #
+    # Every link, form action and cookie path is built from this, so setting it
+    # is all you have to do.  Getting it wrong shows up immediately as a login
+    # page with no stylesheet.
+    root_path: str = Field(default="")
+
     # ---- where things live --------------------------------------------------
     data_dir: Path = Field(default=Path("/data"))
     agent_socket: Path = Field(default=Path("/run/nginxmgr/agent.sock"))
@@ -72,6 +81,8 @@ class Settings(BaseSettings):
     acme_renew_days_before: int = Field(default=30, ge=1, le=89)
 
     # ---- how often background jobs run, in seconds --------------------------
+    # The default interval a new pool gets.  Each pool can override it, and the
+    # checker honours whatever the pool asks for.
     health_check_interval: int = Field(default=10, ge=2, le=300)
     heartbeat_interval: int = Field(default=5, ge=1, le=60)
     cert_check_interval: int = Field(default=3600, ge=60)

@@ -1,0 +1,89 @@
+{# Sign in.  Two stages: password, then the code from the authenticator app. #}
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign in &middot; NGINX Fleet Manager</title>
+<link rel="stylesheet" href="{{ base }}/static/app.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' rx='3' fill='%23141414'/><path d='M4 11.5v-7h1.4l3.2 4.6V4.5H10v7H8.6L5.4 6.9v4.6z' fill='white'/></svg>">
+</head>
+<body>
+
+<div class="login-wrap">
+  <div class="login-box">
+
+    <div class="brand">
+      <svg viewBox="0 0 16 16" aria-hidden="true">
+        <rect width="16" height="16" rx="3" fill="currentColor" opacity="0.15"/>
+        <path d="M4 11.5v-7h1.4l3.2 4.6V4.5H10v7H8.6L5.4 6.9v4.6z" fill="currentColor"/>
+      </svg>
+      NGINX Fleet Manager
+    </div>
+    <div class="node">{{ node_name }}</div>
+
+    {% if error %}
+      <div class="notice bad">
+        <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.5 15 14H1L8 1.5zm0 4a.7.7 0 0 0-.7.8l.25 3.2a.45.45 0 0 0 .9 0l.25-3.2A.7.7 0 0 0 8 5.5zm0 5.4a.8.8 0 1 0 0 1.6.8.8 0 0 0 0-1.6z"/></svg>
+        <div>{{ error }}</div>
+      </div>
+    {% endif %}
+
+    {% if stage == 'totp' %}
+      {# Second stage.  The password already checked out, so we carry it
+         through in hidden fields rather than making them type it again. #}
+      <form method="post" action="{{ base }}/auth/login">
+        {# Posted back with the form and compared against the cookie.  A form on
+           somebody else's site can carry your cookie but cannot read it to fill
+           this in, which is what stops a cross site post. #}
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="username" value="{{ username }}">
+        <input type="hidden" name="password" value="{{ password }}">
+
+        <div class="field">
+          <label for="totp">Code from your authenticator app</label>
+          <input type="text" id="totp" name="totp"
+                 inputmode="numeric" pattern="[0-9 ]*" maxlength="9"
+                 autocomplete="one-time-code" autofocus required
+                 placeholder="000000">
+          <div class="hint">
+            Or one of your recovery codes if you do not have your phone.
+          </div>
+        </div>
+
+        <button type="submit" class="btn primary">Sign in</button>
+      </form>
+
+      <div class="mt small">
+        <a href="{{ base }}/login">Start again</a>
+      </div>
+
+    {% else %}
+      <form method="post" action="{{ base }}/auth/login">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div class="field">
+          <label for="username">Username</label>
+          <input type="text" id="username" name="username"
+                 autocomplete="username" autofocus required>
+        </div>
+
+        <div class="field">
+          <label for="password">Password</label>
+          <input type="password" id="password" name="password"
+                 autocomplete="current-password" required>
+        </div>
+
+        <button type="submit" class="btn primary">Continue</button>
+      </form>
+
+      {% if oidc_enabled %}
+        <div class="login-divider">or</div>
+        <a href="{{ base }}/auth/oidc/start" class="btn">Sign in with single sign on</a>
+      {% endif %}
+    {% endif %}
+
+  </div>
+</div>
+
+</body>
+</html>

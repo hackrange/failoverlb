@@ -1,0 +1,105 @@
+{# The shell every page sits inside.  Top bar, sidebar, content. #}
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}NGINX Fleet Manager{% endblock %}</title>
+{# The prefix we are served under, so the JavaScript builds API URLs that land
+   in the right place when something proxies us at a sub path. #}
+<meta name="nfm-base" content="{{ base }}">
+<link rel="stylesheet" href="{{ base }}/static/app.css">
+{# The favicon is drawn inline as an SVG so there is no image file to fetch.
+   Keeps the content security policy tight and works with no network. #}
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' rx='3' fill='%23141414'/><path d='M4 11.5v-7h1.4l3.2 4.6V4.5H10v7H8.6L5.4 6.9v4.6z' fill='white'/></svg>">
+</head>
+<body>
+
+<div class="app">
+
+  <div class="topbar">
+    <div class="flex">
+      <button class="btn sm menu-toggle" aria-label="Menu">&#9776;</button>
+      <a href="{{ base }}/" class="brand">
+        {# Hand drawn mark.  An N in a rounded square, nothing fetched. #}
+        <svg viewBox="0 0 16 16" aria-hidden="true">
+          <rect width="16" height="16" rx="3" fill="currentColor" opacity="0.18"/>
+          <path d="M4 11.5v-7h1.4l3.2 4.6V4.5H10v7H8.6L5.4 6.9v4.6z" fill="currentColor"/>
+        </svg>
+        NGINX Fleet Manager
+      </a>
+    </div>
+
+    <div class="right">
+      <span class="node-chip">
+        {% if me and me.role.value == 'active' %}
+          <span class="dot ok"></span>{{ node_name }} &middot; active
+        {% else %}
+          <span class="dot neutral"></span>{{ node_name }} &middot; standby
+        {% endif %}
+      </span>
+      <span>{{ user.username }} <span class="faint">({{ user.role.value }})</span></span>
+      <a href="{{ base }}/logout">Sign out</a>
+    </div>
+  </div>
+
+  <div class="layout">
+
+    <nav class="sidebar">
+      <div class="group-label">Traffic</div>
+
+      <a href="{{ base }}/" class="{{ 'active' if active_page == 'dashboard' }}">
+        <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M2 2h5v5H2V2zm7 0h5v3H9V2zM2 9h5v5H2V9zm7-2h5v7H9V7z"/></svg>
+        Dashboard
+      </a>
+
+      <a href="{{ base }}/sites" class="{{ 'active' if active_page == 'sites' }}">
+        <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zM6.2 2.6A9.6 9.6 0 0 0 5.3 6H2.9a5.6 5.6 0 0 1 3.3-3.4zM2.5 7.3h2.7a12 12 0 0 0 0 1.4H2.5a5.6 5.6 0 0 1 0-1.4zm.4 2.7h2.4a9.6 9.6 0 0 0 .9 3.4A5.6 5.6 0 0 1 2.9 10zm5.1 3.5A8.3 8.3 0 0 1 6.6 10h2.8a8.3 8.3 0 0 1-1.4 3.5zM9.6 8.7H6.4a10.7 10.7 0 0 1 0-1.4h3.2a10.7 10.7 0 0 1 0 1.4zM6.6 6A8.3 8.3 0 0 1 8 2.5 8.3 8.3 0 0 1 9.4 6zm3.2 7.4a9.6 9.6 0 0 0 .9-3.4h2.4a5.6 5.6 0 0 1-3.3 3.4zM10.8 8.7a12 12 0 0 0 0-1.4h2.7a5.6 5.6 0 0 1 0 1.4zm-.1-2.7a9.6 9.6 0 0 0-.9-3.4A5.6 5.6 0 0 1 13.1 6z"/></svg>
+        Sites
+        <span class="count">{{ hosts|length if hosts is defined else '' }}</span>
+      </a>
+
+      <a href="{{ base }}/pools" class="{{ 'active' if active_page == 'pools' }}">
+        <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M2 3h12v3H2V3zm0 4.5h12v3H2v-3zM2 12h12v2H2v-2z"/></svg>
+        Backend Pools
+        <span class="count">{{ pools|length if pools is defined else '' }}</span>
+      </a>
+
+      <div class="group-label">Security</div>
+
+      <a href="{{ base }}/certificates" class="{{ 'active' if active_page == 'certificates' }}">
+        <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 1 3 3v4.3c0 3 2.1 5.8 5 6.7 2.9-.9 5-3.7 5-6.7V3L8 1zm0 1.6 3.5 1.4v3.3c0 2.2-1.5 4.3-3.5 5.1-2-.8-3.5-2.9-3.5-5.1V4L8 2.6z"/><path d="M7.3 9.4 5.6 7.7l.9-.9 1 1 2.2-2.2.9.9z"/></svg>
+        Certificates
+      </a>
+
+      <div class="group-label">Fleet</div>
+
+      <a href="{{ base }}/cluster" class="{{ 'active' if active_page == 'cluster' }}">
+        <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 1.5a2 2 0 1 1 0 4 2 2 0 0 1 0-4zM3 10a2 2 0 1 1 0 4 2 2 0 0 1 0-4zm10 0a2 2 0 1 1 0 4 2 2 0 0 1 0-4zM7.4 6.2 4.3 9.6l-.9-.8 3.1-3.4zm1.2 0 .9-.8 3.1 3.4-.9.8z"/></svg>
+        Cluster
+      </a>
+
+      <a href="{{ base }}/parity" class="{{ 'active' if active_page == 'parity' }}">
+        <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 1.5 9.8 5l3.7.5-2.7 2.7.7 3.8L8 10.2l-3.5 1.8.7-3.8L2.5 5.5 6.2 5z"/></svg>
+        Open Source Parity
+      </a>
+
+      <a href="{{ base }}/audit" class="{{ 'active' if active_page == 'audit' }}">
+        <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M4 1h6l3 3v11H4V1zm5 1v3h3M6 7h5v1H6V7zm0 2.5h5v1H6v-1zm0 2.5h3v1H6v-1z"/></svg>
+        Audit Log
+      </a>
+    </nav>
+
+    <main class="content">
+      {% block content %}{% endblock %}
+    </main>
+
+  </div>
+</div>
+
+<div id="toasts"></div>
+
+<script src="{{ base }}/static/app.js" nonce="{{ csp_nonce }}"></script>
+{% block scripts %}{% endblock %}
+</body>
+</html>
