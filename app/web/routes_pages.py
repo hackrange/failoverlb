@@ -7,6 +7,7 @@ isolated network at 3am, plain HTML that renders without JavaScript beats a
 single page app that needs a bundle to load first.
 """
 
+import json
 import logging
 from pathlib import Path
 
@@ -503,6 +504,17 @@ async def pool_detail(pool_id: str, request: Request, db: DBSession = Depends(ge
     response = render(
         request, "pool_detail.html", user, csrf_token=token,
         pool=pool, settings=pool.setting_map(),
+        # The trust state, but never the secret.  The page asks for the value
+        # separately when somebody presses Show, so it is not sitting in the
+        # HTML of every pool page waiting to end up in a cache or a screenshot.
+        trust_json=json.dumps({
+            "enabled": bool(pool.token_enabled),
+            "active": pool.token_active,
+            "header": pool.token_header or "X-Fleet-Token",
+            "rotation_pending": pool.token_rotation_pending,
+            "has_previous": bool(pool.token_previous_encrypted),
+            "rotated_at": pool.token_rotated_at.isoformat() if pool.token_rotated_at else None,
+        }),
     )
     issue_csrf_token(response, token)
     return response

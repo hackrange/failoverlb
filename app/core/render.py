@@ -1149,6 +1149,22 @@ map $cookie_{cookie} $sticky_{_safe_var(pool.name)} {{
         lines.append(f"{pad}proxy_set_header X-Forwarded-Host $host;")
         lines.append(f"{pad}proxy_set_header X-Forwarded-Port $server_port;")
 
+        # The pool token, if this pool has one.  The backend checks it and turns
+        # away anything that did not come through us.
+        #
+        # Two things stop a client from forging this.  We set the header rather
+        # than adding to it, so whatever the client sent is replaced.  And we
+        # clear it on the way back so the value never reaches a browser.
+        if pool is not None and getattr(pool, "token_active", False):
+            token = pool.token
+            if token:
+                header = _safe_header(pool.token_header or "X-Fleet-Token")
+                lines.append("")
+                lines.append(f"{pad}# Proves to the backend that this came through the fleet.")
+                lines.append(f"{pad}# Rotate it from the pool page, never by hand editing here.")
+                lines.append(f"{pad}proxy_set_header {header} {esc(token)};")
+                lines.append(f"{pad}proxy_hide_header {header};")
+
         if cfg.get("websocket_enabled"):
             timeout = cfg.get("websocket_timeout", "3600s")
             lines.append("")
@@ -1311,6 +1327,18 @@ def _safe_var(name: str) -> str:
     """Same idea, but for an nginx variable name, where only word chars work."""
     cleaned = re.sub(r"[^A-Za-z0-9_]", "_", str(name))
     return cleaned[:48] or "unnamed"
+
+
+def _safe_header(name: str) -> str:
+    """
+    Make an HTTP header name safe to write into a directive.
+
+    Header names are letters, digits and dashes, so anything else is somebody
+    either making a mistake or trying something.  We strip rather than quote
+    because a quoted header name is not a header name nginx will accept.
+    """
+    cleaned = re.sub(r"[^A-Za-z0-9-]", "", str(name))
+    return cleaned[:64] or "X-Fleet-Token"
 
 
 def _version_at_least(version: str, target: tuple) -> bool:

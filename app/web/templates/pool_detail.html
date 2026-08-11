@@ -29,6 +29,7 @@
   <button class="tab" data-tab="balancing" role="tab">Load balancing</button>
   <button class="tab" data-tab="health" role="tab">Health checks</button>
   <button class="tab" data-tab="parity" role="tab">Sticky and slow start</button>
+  <button class="tab" data-tab="trust" role="tab">Backend trust</button>
 </div>
 
 {# ============================ members ============================ #}
@@ -394,7 +395,138 @@
   </div>
 </div>
 
+{# ============================ trust ============================ #}
+<div class="tab-panel" data-panel="trust" hidden>
+  <div class="card">
+    <div class="card-head">
+      <h2>Pool token</h2>
+      <button class="help-btn" data-help-static="h-trust"
+              data-help-title="Proving a request came from the fleet" data-help-wide
+              aria-label="Help">?</button>
+    </div>
+    <div class="card-body">
+      <p class="small muted" style="margin-top:0">
+        A shared secret nginx puts on every request it sends to this pool.  Your
+        backend checks it and turns away anything that did not come through the
+        fleet, so somebody who finds the app server's address cannot just talk
+        to it directly.
+      </p>
+
+      <div id="trust-none" hidden>
+        <div class="notice info">
+          <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 3a.9.9 0 1 1 0 1.8A.9.9 0 0 1 8 4zm1.2 8H6.8v-.9h.7V7.9h-.7V7h2.1v4.1h.3V12z"/></svg>
+          <div>
+            This pool has no token.  Right now any box that can reach these
+            backends on their port is treated exactly like nginx is.
+          </div>
+        </div>
+        {% if can('edit_pools') %}
+          <button class="btn primary" id="trust-create">Create a token</button>
+        {% endif %}
+      </div>
+
+      <div id="trust-on" hidden>
+        <div class="kv">
+          <div class="kv-row">
+            <span class="kv-key">Header</span>
+            <span class="kv-val"><code id="trust-header">X-Fleet-Token</code></span>
+          </div>
+          <div class="kv-row">
+            <span class="kv-key">Sending</span>
+            <span class="kv-val" id="trust-state"></span>
+          </div>
+          <div class="kv-row">
+            <span class="kv-key">Last changed</span>
+            <span class="kv-val" id="trust-rotated"></span>
+          </div>
+        </div>
+
+        <div class="notice warn" id="trust-pending" hidden style="margin-top:14px">
+          <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.5 15 14H1L8 1.5zm0 4a.7.7 0 0 0-.7.8l.25 3.2a.45.45 0 0 0 .9 0l.25-3.2A.7.7 0 0 0 8 5.5zm0 5.4a.8.8 0 1 0 0 1.6.8.8 0 0 0 0-1.6z"/></svg>
+          <div>
+            <strong>A rotation is half done.</strong>
+            nginx is still sending the old token, so nothing is broken.  Once
+            every backend accepts the new one, press Activate.
+          </div>
+        </div>
+
+        <div class="btn-row" style="margin-top:16px">
+          {% if can('edit_pools') %}
+            <button class="btn" id="trust-show">Show the token</button>
+            <button class="btn" id="trust-rotate">Rotate</button>
+            <button class="btn primary" id="trust-activate" hidden>Activate the new one</button>
+            <button class="btn" id="trust-cancel" hidden>Cancel the rotation</button>
+            <button class="btn danger" id="trust-remove">Turn off</button>
+          {% endif %}
+        </div>
+
+        <h3 style="font-size:0.92rem; margin:22px 0 8px">Checking it on your backend</h3>
+        <p class="small muted" style="margin-top:0">
+          Pick the one that matches your backend.  Press Show the token to get
+          the value to paste in.
+        </p>
+        <div class="tabs sub" role="tablist" id="snippet-tabs">
+          <button class="tab active" data-snippet="nginx" role="tab">nginx</button>
+          <button class="tab" data-snippet="apache" role="tab">Apache</button>
+          <button class="tab" data-snippet="node" role="tab">Express</button>
+          <button class="tab" data-snippet="python" role="tab">Django</button>
+          <button class="tab" data-snippet="java" role="tab">Spring</button>
+        </div>
+        <pre id="snippet-body" class="snippet"></pre>
+      </div>
+    </div>
+  </div>
+</div>
+
 {# ---- help ---- #}
+<div hidden id="h-trust">
+  <div class="help-section">
+    <p>Your backends sit on a port somewhere.  Anything that can reach that port
+       can talk to them, and as far as the app can tell it looks the same as
+       nginx.  A pool token is how the backend tells the difference.</p>
+  </div>
+  <div class="help-section">
+    <h4>How it works</h4>
+    <p>nginx adds a header holding a shared secret to every request it proxies to
+       this pool.  The backend checks it and returns 403 if it is missing or
+       wrong.  A scanner that finds your app server on port 8080 gets nothing.</p>
+    <p>The header is set, not added, so a client sending that header itself has
+       it thrown away and replaced.  You cannot forge your way in from outside.
+       We also hide the header on the way back, in case the backend echoes it.</p>
+  </div>
+  <div class="help-section">
+    <h4>What it is not</h4>
+    <p>It is a bearer secret.  Anybody holding it can pretend to be the fleet, so
+       it belongs behind a firewall rather than instead of one.  If the hop to
+       your backend crosses a network you do not trust, run that hop over TLS as
+       well, or the token is readable to anybody watching.</p>
+  </div>
+  <div class="help-section">
+    <h4>Rotating without an outage</h4>
+    <p>You cannot change both ends at the same instant, and nginx can only send
+       one value, so it takes two steps.</p>
+    <p><strong>1. Rotate.</strong>  A new token is generated but nginx keeps
+       sending the old one.  Nothing changes on the wire.  Teach your backends
+       to accept either.</p>
+    <p><strong>2. Activate.</strong>  nginx starts sending the new one, which
+       your backends already take.  Apply the config, watch traffic, then delete
+       the old one from your backends.</p>
+    <p>Doing it in one step means every request in the gap gets a 403.</p>
+  </div>
+  <div class="help-section">
+    <h4>Health checks</h4>
+    <p>The manager sends the token on its health checks too.  Without that, the
+       moment your backend started enforcing it every check would come back 403,
+       the pool would be marked down, and it would be pulled out of service
+       while being perfectly healthy.</p>
+  </div>
+  <div class="help-section">
+    <h4>Turning it off</h4>
+    <p>Turn it off here and apply the config <em>first</em>, then stop checking
+       for it on your backends.  The other order locks the fleet out.</p>
+  </div>
+</div>
+
 <div hidden id="h-lb">
   <div class="help-section"><p>How nginx decides which backend gets each request.</p></div>
   <div class="help-section">
@@ -580,9 +712,11 @@ document.addEventListener("DOMContentLoaded", function () {
     document.getElementById("unsaved").hidden = false;
   }
 
-  document.querySelectorAll(".tab").forEach(function (t) {
+  // Scoped to [data-tab] so the snippet sub tabs further down do not get
+  // swept up by this and hide the panel they live in.
+  document.querySelectorAll(".tab[data-tab]").forEach(function (t) {
     t.addEventListener("click", function () {
-      document.querySelectorAll(".tab").forEach(x => x.classList.remove("active"));
+      document.querySelectorAll(".tab[data-tab]").forEach(x => x.classList.remove("active"));
       t.classList.add("active");
       const want = t.getAttribute("data-tab");
       document.querySelectorAll(".tab-panel").forEach(function (p) {
@@ -742,6 +876,173 @@ document.addEventListener("DOMContentLoaded", function () {
       } catch (err) { NFM.toast(err.message, "bad"); }
     });
   });
+
+  // ======================= backend trust =======================
+
+  const TRUST = {{ trust_json|safe }};
+  let shownToken = null;   // only set once somebody presses Show
+
+  function renderTrust() {
+    const on = TRUST.active;
+    document.getElementById("trust-none").hidden = on;
+    document.getElementById("trust-on").hidden = !on;
+    if (!on) return;
+
+    document.getElementById("trust-header").textContent = TRUST.header || "X-Fleet-Token";
+    document.getElementById("trust-state").innerHTML = TRUST.enabled
+      ? '<span class="badge ok">yes</span>'
+      : '<span class="badge warn">turned off, secret kept</span>';
+    document.getElementById("trust-rotated").textContent =
+      TRUST.rotated_at ? new Date(TRUST.rotated_at).toLocaleString() : "never";
+
+    document.getElementById("trust-pending").hidden = !TRUST.rotation_pending;
+    document.getElementById("trust-activate").hidden = !TRUST.rotation_pending;
+    document.getElementById("trust-cancel").hidden = !TRUST.rotation_pending;
+    document.getElementById("trust-rotate").hidden = TRUST.rotation_pending;
+    renderSnippet();
+  }
+
+  // The value only appears here after Show, so a shoulder surfer looking at an
+  // open pool page does not get the secret for free.
+  function tokenForSnippet() {
+    return shownToken || "PRESS-SHOW-THE-TOKEN-TO-SEE-THIS";
+  }
+
+  const SNIPPETS = {
+    nginx: t => `# In the server block on your backend\nif ($http_${(TRUST.header||"X-Fleet-Token").toLowerCase().replace(/-/g,"_")} != "${t}") {\n    return 403;\n}`,
+    apache: t => `# Needs mod_headers and mod_rewrite\nRewriteEngine On\nRewriteCond %{HTTP:${TRUST.header}} !^${t}$\nRewriteRule .* - [F,L]`,
+    node: t => `// Express, mount this before your routes\napp.use((req, res, next) => {\n  if (req.get(${JSON.stringify(TRUST.header)}) !== ${JSON.stringify(t)}) {\n    return res.sendStatus(403);\n  }\n  next();\n});`,
+    python: t => `# Django middleware\nFLEET_TOKEN = ${JSON.stringify(t)}\n\nclass FleetOnly:\n    def __init__(self, get_response):\n        self.get_response = get_response\n\n    def __call__(self, request):\n        sent = request.headers.get(${JSON.stringify(TRUST.header)})\n        if sent != FLEET_TOKEN:\n            return HttpResponseForbidden()\n        return self.get_response(request)`,
+    java: t => `// Spring, a OncePerRequestFilter\n@Component\npublic class FleetOnlyFilter extends OncePerRequestFilter {\n    private static final String TOKEN = ${JSON.stringify(t)};\n\n    @Override\n    protected void doFilterInternal(HttpServletRequest req,\n            HttpServletResponse res, FilterChain chain)\n            throws ServletException, IOException {\n        String sent = req.getHeader(${JSON.stringify(TRUST.header)});\n        if (!TOKEN.equals(sent)) {\n            res.setStatus(403);\n            return;\n        }\n        chain.doFilter(req, res);\n    }\n}`,
+  };
+  let snippetPick = "nginx";
+
+  function renderSnippet() {
+    const body = document.getElementById("snippet-body");
+    if (body) body.textContent = SNIPPETS[snippetPick](tokenForSnippet());
+  }
+
+  document.querySelectorAll("[data-snippet]").forEach(function (t) {
+    t.addEventListener("click", function () {
+      document.querySelectorAll("[data-snippet]").forEach(x => x.classList.remove("active"));
+      t.classList.add("active");
+      snippetPick = t.getAttribute("data-snippet");
+      renderSnippet();
+    });
+  });
+
+  function tokenModal(title, value, note) {
+    NFM.openModal(title, "copy it now", `
+      <div class="help-section"><p>${NFM.escapeHtml(note)}</p></div>
+      <pre>${NFM.escapeHtml(TRUST.header)}: ${NFM.escapeHtml(value)}</pre>
+      <div class="notice warn" style="margin-top:14px">
+        ${NFM.icon("warn")}
+        <div>Treat this like a password.  Anybody holding it can pretend to be
+             the fleet.  It is stored encrypted, and you can see it again from
+             this page, but do not paste it anywhere it will be logged.</div>
+      </div>
+    `, true);
+  }
+
+  const tCreate = document.getElementById("trust-create");
+  if (tCreate) tCreate.addEventListener("click", async function () {
+    try {
+      const r = await NFM.api("/pools/" + POOL_ID + "/token", { method: "POST", body: {} });
+      TRUST.active = true; TRUST.enabled = true; TRUST.header = r.header;
+      TRUST.rotated_at = new Date().toISOString();
+      shownToken = r.value;
+      renderTrust();
+      tokenModal("Token created", r.value, r.next_step);
+    } catch (err) { NFM.toast(err.message, "bad"); }
+  });
+
+  const tShow = document.getElementById("trust-show");
+  if (tShow) tShow.addEventListener("click", async function () {
+    try {
+      const r = await NFM.api("/pools/" + POOL_ID + "/token");
+      shownToken = r.current;
+      renderSnippet();
+      let note = "This is what nginx is sending right now.";
+      let extra = "";
+      if (r.staged) {
+        extra = `<div class="help-section"><h4>Staged, not sent yet</h4>
+                 <p>Add this one to your backends as well, then press Activate.</p></div>
+                 <pre>${NFM.escapeHtml(r.staged)}</pre>`;
+      }
+      if (r.previous) {
+        extra += `<div class="help-section"><h4>The old one</h4>
+                  <p>Safe to delete from your backends once traffic looks normal.</p></div>
+                  <pre>${NFM.escapeHtml(r.previous)}</pre>`;
+      }
+      NFM.openModal("Pool token", TRUST.header, `
+        <div class="help-section"><p>${note}</p></div>
+        <pre>${NFM.escapeHtml(r.current)}</pre>
+        ${extra}
+      `, true);
+    } catch (err) { NFM.toast(err.message, "bad"); }
+  });
+
+  const tRotate = document.getElementById("trust-rotate");
+  if (tRotate) tRotate.addEventListener("click", async function () {
+    NFM.confirmThen(
+      "Rotate this pool's token?\n\nA new one gets generated but nginx keeps sending " +
+      "the old one, so nothing breaks yet.  You add the new one to your backends, " +
+      "then press Activate.",
+      async function () {
+        try {
+          const r = await NFM.api("/pools/" + POOL_ID + "/token", { method: "POST", body: {} });
+          TRUST.rotation_pending = true;
+          renderTrust();
+          tokenModal("New token staged", r.value, r.next_step);
+        } catch (err) { NFM.toast(err.message, "bad"); }
+      });
+  });
+
+  const tAct = document.getElementById("trust-activate");
+  if (tAct) tAct.addEventListener("click", async function () {
+    NFM.confirmThen(
+      "Switch to the new token?\n\nOnly do this once every backend accepts it.  " +
+      "Any backend still checking only for the old one will start returning 403.",
+      async function () {
+        try {
+          const r = await NFM.api("/pools/" + POOL_ID + "/token/activate", { method: "POST", body: {} });
+          TRUST.rotation_pending = false;
+          TRUST.rotated_at = new Date().toISOString();
+          shownToken = null;
+          renderTrust();
+          NFM.toast(r.next_step, "ok");
+        } catch (err) { NFM.toast(err.message, "bad"); }
+      });
+  });
+
+  const tCancel = document.getElementById("trust-cancel");
+  if (tCancel) tCancel.addEventListener("click", async function () {
+    try {
+      const r = await NFM.api("/pools/" + POOL_ID + "/token/cancel", { method: "POST", body: {} });
+      TRUST.rotation_pending = false;
+      renderTrust();
+      NFM.toast(r.message, "ok");
+    } catch (err) { NFM.toast(err.message, "bad"); }
+  });
+
+  const tRemove = document.getElementById("trust-remove");
+  if (tRemove) tRemove.addEventListener("click", function () {
+    NFM.confirmThen(
+      "Turn off the token for this pool?\n\nApply the config first, then stop " +
+      "checking for it on your backends.  The other way round and they will " +
+      "reject the fleet.",
+      async function () {
+        try {
+          const r = await NFM.api("/pools/" + POOL_ID + "/token", { method: "DELETE" });
+          TRUST.active = false; TRUST.enabled = false;
+          TRUST.rotation_pending = false; shownToken = null;
+          renderTrust();
+          NFM.toast(r.message, "ok");
+        } catch (err) { NFM.toast(err.message, "bad"); }
+      });
+  });
+
+  renderTrust();
 
   window.addEventListener("beforeunload", function (e) {
     if (dirty) { e.preventDefault(); e.returnValue = ""; }

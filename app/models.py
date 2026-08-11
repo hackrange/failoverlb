@@ -485,6 +485,31 @@ class Pool(Base):
     # shout instead.  A pool serving errors beats a pool serving nothing.
     min_healthy_members = Column(Integer, default=1)
 
+    # ---- backend trust ------------------------------------------------------
+    # A shared secret nginx puts on every request it proxies to this pool.  The
+    # backend checks it and refuses anything without it, so somebody who finds
+    # the app server's address cannot just talk to it directly.
+    #
+    # This is a bearer secret.  Anybody holding it can pretend to be the fleet,
+    # so if the hop to the backend crosses anything you do not trust, run that
+    # hop over TLS as well.  It is not a replacement for a firewall, it is the
+    # thing that catches what the firewall missed.
+    #
+    # Three slots, because rotating a shared secret safely takes two steps.  You
+    # cannot change both ends at once, and nginx can only send one value:
+    #
+    #   1. Stage a new one.  nginx keeps sending the old one, so nothing breaks.
+    #      Add the new one to your backends so they accept either.
+    #   2. Activate.  nginx starts sending the new one, which the backends
+    #      already take.  The old one moves to previous so you know what to go
+    #      and delete.
+    token_enabled = Column(Boolean, default=False)
+    token_header = Column(String(64), default="X-Fleet-Token")
+    token_encrypted = Column(Text)            # what nginx sends right now
+    token_next_encrypted = Column(Text)       # staged, not sent yet
+    token_previous_encrypted = Column(Text)   # what it was before the last swap
+    token_rotated_at = Column(DateTime)
+
     settings = Column(Text, default="{}")
 
     created_at = Column(DateTime, default=utcnow)
@@ -500,6 +525,48 @@ class Pool(Base):
 
     def setting_map(self):
         return json_get(self.settings, {})
+
+    # ---- backend trust helpers ----------------------------------------------
+    # These decrypt on the way out.  Everything that renders config or sends a
+    # health check goes through here, so the plaintext is never sitting on the
+    # model waiting to be logged by accident.
+
+    def _read_token(self, column_value):
+        if not column_value:
+            return None
+        from app.core.crypto import decrypt
+        try:
+            return decrypt(column_value)
+        except Exception:
+            # A token we cannot decrypt means the secret key changed under us.
+            # Returning None makes the renderer leave the header off, which
+            # fails closed: the backend rejects us and somebody notices, rather
+            # than us shipping a garbage header and calling it fine.
+            return None
+
+    @property
+    def token(self):
+        """The value nginx should be sending right now."""
+        return self._read_token(self.token_encrypted)
+
+    @property
+    def token_next(self):
+        """Staged but not live yet.  Put this on your backends before you activate."""
+        return self._read_token(self.token_next_encrypted)
+
+    @property
+    def token_previous(self):
+        """What we sent before the last activate.  Safe to delete from backends."""
+        return self._read_token(self.token_previous_encrypted)
+
+    @property
+    def token_active(self):
+        """Is this pool actually sending a token?  Both halves have to be true."""
+        return bool(self.token_enabled and self.token_encrypted)
+
+    @property
+    def token_rotation_pending(self):
+        return bool(self.token_next_encrypted)
 
     @property
     def healthy_count(self):

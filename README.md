@@ -170,6 +170,135 @@ wrong at least once.  Switch it in Settings once you have one working.
 If you would rather do it by hand, `install.sh` is the per node half and takes
 the same options.  Run `./install.sh --help`.
 
+## How it fits together
+
+**One manager container per nginx server.**  The container has to be on the same
+box as the nginx it manages, because it talks to a root agent over a unix socket
+on that machine.  There is no central controller to install and nothing to lose
+if a box dies.
+
+It does **not** go on your backend app servers.  Those are just servers in a
+pool, and they never know the manager exists.
+
+```mermaid
+flowchart TB
+    admin["Admin browser<br/>port 7443"]
+
+    subgraph LB1["nginx server 1 &nbsp;&nbsp; ACTIVE"]
+        direction TB
+        M1["Manager container<br/><i>unprivileged, uid 10001</i>"]
+        A1(["Host agent<br/><i>root, fixed verb list</i>"])
+        N1["nginx<br/><i>built from source</i>"]
+        M1 -- "unix socket" --> A1
+        A1 -- "writes config<br/>reloads" --> N1
+    end
+
+    subgraph LB2["nginx server 2 &nbsp;&nbsp; STANDBY"]
+        direction TB
+        M2["Manager container"]
+        A2(["Host agent"])
+        N2["nginx"]
+        M2 -- "unix socket" --> A2
+        A2 --> N2
+    end
+
+    subgraph POOL["Backend pool &nbsp;&nbsp; no manager here"]
+        direction LR
+        B1["app-01:8080"]
+        B2["app-02:8080"]
+        B3["app-03:8080"]
+    end
+
+    admin --> M1
+    admin -.-> M2
+    M1 <== "mTLS + HMAC<br/>port 7444" ==> M2
+
+    N1 --> B1
+    N1 --> B2
+    N1 --> B3
+    N2 -.-> B1
+    N2 -.-> B2
+    N2 -.-> B3
+
+    M1 -. "health checks" .-> B1
+    M2 -. "health checks" .-> B2
+
+    classDef box fill:#fff,stroke:#333,stroke-width:1px,color:#111
+    classDef root fill:#f2f2f2,stroke:#333,stroke-width:1px,color:#111
+    classDef back fill:#fafafa,stroke:#888,stroke-dasharray:3 3,color:#111
+    class admin,M1,M2,N1,N2 box
+    class A1,A2 root
+    class B1,B2,B3 back
+```
+
+Solid lines are live traffic, dotted lines are standby or background work.  Both
+nginx servers can serve, and both check the backends, but only the ACTIVE one
+takes configuration changes.
+
+### Who does what
+
+| Piece | Runs where | Job |
+|---|---|---|
+| Manager container | every nginx server | The GUI, the database, health checks, talking to peers |
+| Host agent | every nginx server | The only root part.  Writes config, tests it, reloads nginx |
+| nginx | every nginx server | Serves the traffic |
+| Your backends | wherever they already are | Nothing.  They do not know this exists |
+
+### Applying a change
+
+Nothing lands anywhere until every node agrees it is valid.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as Admin
+    participant A as Node 1 (active)
+    participant B as Node 2 (standby)
+
+    U->>A: Save and apply
+    Note over A,B: Phase 1, ask before doing
+    A->>A: stage config, nginx -t
+    A->>B: PREPARE, here is the config
+    B->>B: stage config, nginx -t
+    B-->>A: ok, it passes here too
+
+    Note over A,B: Phase 2, only now does anything change
+    A->>B: COMMIT
+    B->>B: swap in, reload nginx
+    B-->>A: done
+    A->>A: swap in, reload nginx
+    A-->>U: applied on both
+
+    Note over A,B: If either one had said no,<br/>nothing would have changed anywhere
+```
+
+A node that is offline does not block the change.  It gets queued and replayed
+when it comes back, so it catches up instead of quietly drifting.
+
+### Certificates
+
+Only the node that currently holds the public address can answer the challenge,
+and that moves when you fail over.  So it is worked out fresh every time.
+
+```mermaid
+flowchart LR
+    S["Renewal due<br/>for shop.example.com"] --> R{"Resolve the name<br/>against public DNS"}
+    R --> M{"Which node has<br/>that address?"}
+    M -->|"node 2 does"| I["Node 2 runs certbot"]
+    I --> P["Challenge token pushed<br/>to <b>every</b> node first"]
+    P --> V["CA connects to<br/>whichever it likes"]
+    V --> C["Certificate issued"]
+    C --> D["Copied to every node<br/><i>key stays 0600 root</i>"]
+
+    classDef box fill:#fff,stroke:#333,color:#111
+    classDef dec fill:#f2f2f2,stroke:#333,color:#111
+    class S,I,P,V,C,D box
+    class R,M dec
+```
+
+The token goes everywhere before validation starts because the CA picks which
+address to connect to and we do not get a say.
+
 ## Adding more nodes
 
 There is a join token.  It is made on a node that is already running, it works
@@ -223,6 +352,49 @@ database does not hand anybody a working one.
 - **Priority decides who goes active.**  Higher wins.  A node will not make
   itself active unless it can see more than half the fleet, so a network split
   cannot leave you with two nodes both taking writes.
+
+## Backend trust
+
+Your app servers sit on a port somewhere.  Anything that can reach that port can
+talk to them, and it looks the same to the app as nginx does.  A pool token is
+how the backend tells the difference.
+
+Turn it on per pool from **Backend trust** on the pool page.  nginx then puts a
+shared secret on every request it proxies there:
+
+```nginx
+proxy_set_header X-Fleet-Token "k7Rm...9wQ2";
+proxy_hide_header X-Fleet-Token;
+```
+
+Your backend checks it and returns 403 to anything else.  The GUI gives you the
+snippet for nginx, Apache, Express, Django or Spring, so it is a paste rather
+than a project.
+
+- The header is **set**, not added, so a client sending that header itself has it
+  thrown away and replaced.  You cannot forge your way in from outside.
+- The health checker sends it too.  Without that, the moment a backend started
+  enforcing it every check would come back 403 and a healthy pool would get
+  marked down and pulled out of service.
+- The secret is stored encrypted, and only shown when you ask for it.
+
+**It is a bearer secret**, so it belongs behind a firewall rather than instead of
+one.  Anybody holding it can pretend to be the fleet.  If the hop to your backend
+crosses a network you do not trust, run that hop over TLS as well.
+
+### Rotating without an outage
+
+You cannot change both ends at the same instant, and nginx can only send one
+value, so it takes two steps.
+
+1. **Rotate.**  A new token is generated but nginx keeps sending the old one, so
+   nothing changes on the wire.  Add the new one to your backends so they accept
+   either.
+2. **Activate.**  nginx starts sending the new one, which your backends already
+   take.  Apply the config, watch traffic, then delete the old one.
+
+Doing it in one step means every request in the gap gets a 403.  Turning it off
+is the same idea in reverse: apply the config first, then stop checking for it.
 
 ## Layout
 

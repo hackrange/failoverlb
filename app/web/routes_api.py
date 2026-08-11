@@ -13,6 +13,7 @@ queries a table by id directly, so there is no route that can forget the check.
 
 import json
 import logging
+import re
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session as DBSession
@@ -26,6 +27,7 @@ from app.core.acme import AcmeError, get_cert_manager, pick_issuing_node, resolv
 from app.core.agent_client import AgentError, get_agent
 from app.core.capabilities import fleet_capabilities, get_local_capabilities
 from app.core.cluster import ClusterError, get_cluster
+from app.core.crypto import encrypt, new_token
 from app.core.nginx_parser import ParseError, extract_settings, parse, quick_check
 from app.core.render import Renderer
 from app.db import get_db, session_scope
@@ -46,6 +48,7 @@ from app.models import (
     StreamServer,
     User,
     VirtualHost,
+    utcnow,
 )
 from app.web.security import (
     ObjectGuard,
@@ -675,6 +678,7 @@ POOL_FIELDS = {
     "health_check_expect_body", "health_check_interval", "health_check_timeout",
     "health_check_rise", "health_check_fall", "health_check_verify_tls",
     "health_check_port", "min_healthy_members", "settings",
+    "token_enabled",
 }
 
 MEMBER_FIELDS = {
@@ -752,6 +756,174 @@ async def delete_pool(pool_id: str, g: ObjectGuard = Depends(changing)):
     return {"ok": True, "deleted": name}
 
 
+# =============================================================================
+# Pool tokens
+#
+# The shared secret nginx puts on requests it sends to a pool, so the backend
+# can turn away anything that did not come through the fleet.
+#
+# Rotating takes two steps on purpose.  You cannot change both ends at the same
+# instant, and nginx can only send one value, so the only safe order is: stage a
+# new one, teach the backends to accept either, then activate.  A single button
+# that swapped it would break every request in the gap.
+# =============================================================================
+
+@router.post("/pools/{pool_id}/token")
+async def create_pool_token(pool_id: str, request: Request,
+                            g: ObjectGuard = Depends(changing)):
+    pool = g.get(Pool, pool_id, "edit_pools")
+    payload = await request.json() if await request.body() else {}
+
+    supplied = str(payload.get("value") or "").strip()
+    if supplied:
+        # Somebody bringing a secret their backends already check.  Keep the bar
+        # high enough that a guessable one cannot be set by accident.
+        if len(supplied) < 16:
+            raise HTTPException(
+                status_code=400,
+                detail="a token needs to be at least 16 characters, longer is better",
+            )
+        if len(supplied) > 256:
+            raise HTTPException(status_code=400, detail="that token is too long, keep it under 256")
+
+        # Hold this to a plain charset rather than blocking a list of bad
+        # characters.  This value gets written into an nginx directive, and a
+        # semicolon in there ends the directive early and turns the rest into
+        # config.  The renderer would catch it and refuse, but by then the whole
+        # fleet's apply is broken over one bad field, so it gets caught here.
+        if not re.fullmatch(r"[A-Za-z0-9._~+/=-]+", supplied):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "a token can only hold letters, digits and . _ ~ + / = -  "
+                    "Anything else can break the nginx config it gets written into."
+                ),
+            )
+        token = supplied
+    else:
+        token = new_token(32)
+
+    if "header" in payload and payload["header"]:
+        header = re.sub(r"[^A-Za-z0-9-]", "", str(payload["header"]))[:64]
+        if not header:
+            raise HTTPException(status_code=400, detail="a header name needs letters, digits or dashes")
+        pool.token_header = header
+
+    staged = bool(pool.token_encrypted)
+    if staged:
+        # Already sending one, so this is a rotation.  Park it in next and leave
+        # what nginx is sending alone until somebody activates.
+        pool.token_next_encrypted = encrypt(token)
+    else:
+        pool.token_encrypted = encrypt(token)
+        pool.token_enabled = True
+        pool.token_rotated_at = utcnow()
+
+    g.session.commit()
+
+    audit.record("pool.token_stage" if staged else "pool.token_create",
+                 user=g.user, object_type="pool", object_name=pool.name,
+                 changes={"header": pool.token_header, "supplied": bool(supplied)})
+
+    return {
+        "ok": True,
+        "staged": staged,
+        "header": pool.token_header,
+        "value": token,
+        "next_step": (
+            "Add this to your backends so they accept it as well as the current one, "
+            "then press Activate."
+            if staged else
+            "Add this to your backends, then apply the config so nginx starts sending it."
+        ),
+    }
+
+
+@router.post("/pools/{pool_id}/token/activate")
+async def activate_pool_token(pool_id: str, g: ObjectGuard = Depends(changing)):
+    pool = g.get(Pool, pool_id, "edit_pools")
+
+    if not pool.token_next_encrypted:
+        raise HTTPException(status_code=400, detail="there is no staged token to activate")
+
+    pool.token_previous_encrypted = pool.token_encrypted
+    pool.token_encrypted = pool.token_next_encrypted
+    pool.token_next_encrypted = None
+    pool.token_rotated_at = utcnow()
+    g.session.commit()
+
+    audit.record("pool.token_activate", user=g.user, object_type="pool",
+                 object_name=pool.name)
+
+    return {
+        "ok": True,
+        "next_step": (
+            "Apply the config so nginx starts sending the new one.  Once that is "
+            "done and traffic looks normal, remove the old token from your backends."
+        ),
+    }
+
+
+@router.post("/pools/{pool_id}/token/cancel")
+async def cancel_pool_token(pool_id: str, g: ObjectGuard = Depends(changing)):
+    pool = g.get(Pool, pool_id, "edit_pools")
+
+    if not pool.token_next_encrypted:
+        raise HTTPException(status_code=400, detail="there is no staged token to cancel")
+
+    pool.token_next_encrypted = None
+    g.session.commit()
+
+    audit.record("pool.token_cancel", user=g.user, object_type="pool", object_name=pool.name)
+    return {"ok": True, "message": "dropped the staged token, nothing on the wire changed"}
+
+
+@router.get("/pools/{pool_id}/token")
+async def reveal_pool_token(pool_id: str, g: ObjectGuard = Depends(guard)):
+    """
+    Hand back the actual values.
+
+    Anybody who can edit this pool can already change the token, so showing it
+    to them gives away nothing they could not get anyway.  It is audited because
+    reading a secret is worth a line in the log even when it is allowed.
+    """
+    pool = g.get(Pool, pool_id, "edit_pools")
+
+    if not pool.token_encrypted:
+        raise HTTPException(status_code=404, detail="this pool has no token")
+
+    audit.record("pool.token_reveal", user=g.user, object_type="pool",
+                 object_name=pool.name)
+
+    return {
+        "header": pool.token_header,
+        "current": pool.token,
+        "staged": pool.token_next,
+        "previous": pool.token_previous,
+    }
+
+
+@router.delete("/pools/{pool_id}/token")
+async def delete_pool_token(pool_id: str, g: ObjectGuard = Depends(changing)):
+    pool = g.get(Pool, pool_id, "edit_pools")
+
+    pool.token_enabled = False
+    pool.token_encrypted = None
+    pool.token_next_encrypted = None
+    pool.token_previous_encrypted = None
+    pool.token_rotated_at = None
+    g.session.commit()
+
+    audit.record("pool.token_delete", user=g.user, object_type="pool", object_name=pool.name)
+    return {
+        "ok": True,
+        "message": (
+            "Token turned off.  Apply the config, then stop checking for it on your "
+            "backends.  Do it in that order or they will reject the fleet."
+        ),
+    }
+
+
 def _apply_pool_fields(pool, payload):
     if "name" in payload:
         pool.name = validate_name(payload["name"], "pool name")
@@ -785,7 +957,11 @@ def _apply_pool_fields(pool, payload):
         if field in payload:
             setattr(pool, field, payload[field] or None)
 
-    for field in ("hash_consistent", "health_check_enabled", "health_check_verify_tls"):
+    # token_enabled can be switched off here, which stops nginx sending the
+    # header without throwing the secret away.  Turning it on does nothing on
+    # its own: there has to be a token as well, which is its own endpoint.
+    for field in ("hash_consistent", "health_check_enabled", "health_check_verify_tls",
+                  "token_enabled"):
         if field in payload:
             setattr(pool, field, bool(payload[field]))
 
@@ -898,6 +1074,18 @@ def _pool_detail(p):
             "fall": p.health_check_fall,
             "verify_tls": p.health_check_verify_tls,
             "port": p.health_check_port,
+        },
+        # What the trust setup looks like, without the secret in it.  The GUI
+        # needs to know there is a token and whether a rotation is half done.
+        # It does not need the value, and putting it in every pool response
+        # would splash it across logs and browser caches for no reason.
+        "trust": {
+            "enabled": bool(p.token_enabled),
+            "active": p.token_active,
+            "header": p.token_header,
+            "rotation_pending": p.token_rotation_pending,
+            "has_previous": bool(p.token_previous_encrypted),
+            "rotated_at": p.token_rotated_at.isoformat() if p.token_rotated_at else None,
         },
         "settings": p.setting_map(),
         "members": [_member_detail(m) for m in p.members],

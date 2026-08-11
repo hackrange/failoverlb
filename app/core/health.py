@@ -206,6 +206,15 @@ class HealthChecker:
 
         headers["User-Agent"] = "nginx-fleet-manager/health-check"
 
+        # Send the pool token if there is one.  Without this, turning on backend
+        # trust would make every health check fail the moment the backend starts
+        # enforcing it, and the manager would mark a perfectly healthy pool down
+        # and pull it out of service.  The check has to look like real traffic.
+        if pool.token_active:
+            token = pool.token
+            if token:
+                headers[pool.token_header or "X-Fleet-Token"] = token
+
         try:
             response = await self._client.request(
                 pool.health_check_method or "GET",
