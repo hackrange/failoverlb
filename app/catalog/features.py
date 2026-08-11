@@ -1774,6 +1774,82 @@ register(
     ),
 
     Feature(
+        key="server_header_mode",
+        label="Server header",
+        category="security",
+        directive="more_clear_headers",
+        contexts=("server",),
+        type="select",
+        default="suppress",
+        module="headers_more",
+        options=[
+            ("suppress", "Remove it completely (recommended)"),
+            ("custom", "Replace it with something of your own"),
+            ("default", "Leave nginx's own header alone"),
+        ],
+        help=HelpText(
+            summary="What goes in the Server header, or whether to send one at all.",
+            detail=(
+                "Turning off server_tokens only hides the version number.  nginx still "
+                "sends 'Server: nginx', which tells anybody scanning exactly what you "
+                "are running, just not which release.\n\n"
+                "Removing the header entirely needs the headers-more module, which the "
+                "installer compiles in.  Then a banner grab gets nothing at all.\n\n"
+                "Be realistic about what this buys you.  Anybody determined can "
+                "fingerprint a web server from how it behaves, and hiding the name will "
+                "not stop them.  What it does stop is the far more common case: a script "
+                "scanning the whole internet for one vulnerable version, reading the "
+                "header, and adding you to a list.  Not being on that list is worth the "
+                "one line."
+            ),
+            use_cases=[
+                "Anything facing the internet, where the default is to remove it",
+                "Replacing it with a node name like lb-01, which is genuinely useful "
+                "when you are chasing which box served a bad response",
+                "Leaving it alone only when something downstream insists on reading it",
+            ],
+            example="Remove it completely, unless you have a reason not to",
+            example_config=(
+                "# gone entirely\n"
+                "more_clear_headers Server;\n\n"
+                "# or replaced with something of your own\n"
+                'more_set_headers "Server: lb-01";'
+            ),
+            docs_url="https://github.com/openresty/headers-more-nginx-module",
+        ),
+    ),
+
+    Feature(
+        key="server_header_value",
+        label="Custom Server header",
+        category="security",
+        directive="more_set_headers",
+        contexts=("server",),
+        type="string",
+        default="",
+        module="headers_more",
+        placeholder="lb-01",
+        depends_on="server_header_mode",
+        help=HelpText(
+            summary="What to put in the Server header when you are replacing it.",
+            detail=(
+                "Anything you like.  A node name is the useful choice, because then a "
+                "response tells you which box produced it without needing to add a "
+                "header of your own.\n\n"
+                "Avoid anything that names real software and a version.  Putting "
+                "'Apache/2.4.1' in there to be clever mostly means somebody wastes an "
+                "afternoon, including possibly you in six months."
+            ),
+            use_cases=[
+                "lb-01 or lb-02, so you can tell which node answered",
+                "A single flat name across the fleet if you would rather not say",
+            ],
+            example="lb-01",
+            example_config='more_set_headers "Server: lb-01";',
+        ),
+    ),
+
+    Feature(
         key="server_tokens",
         label="Show nginx version",
         category="security",

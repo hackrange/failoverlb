@@ -205,6 +205,100 @@ class Capabilities:
 _local_caps = Capabilities()
 
 
+def fleet_capabilities() -> Capabilities:
+    """
+    What every node in the fleet can do, as a set.
+
+    This is what the GUI offers and what the renderer is allowed to emit, and
+    it is the intersection rather than this node's own list.  Two reasons, and
+    both have bitten:
+
+      The config is identical on every node, because that is the whole point.
+      Offer a setting that only three of your four boxes were built with, and
+      the fourth refuses to start on the next apply.  The two phase apply
+      catches it before anything goes live, so nothing breaks, but you are left
+      with a change that will not go out and no obvious reason why.
+
+      The module list is read back out of nginx -V and kept in the database
+      against each node.  Reading it from there rather than a variable in this
+      process means every worker, and every background job, renders exactly the
+      same config.  A process global is only filled in by startup, so a job
+      running in a different context would quietly render with no modules at
+      all and drop every gated feature.
+
+    A node we have never heard from is not counted.  It has told us nothing, so
+    treating its silence as "supports nothing" would empty the set the moment a
+    box went down.
+    """
+    from app.db import session_scope
+    from app.models import Node
+
+    with session_scope() as session:
+        infos = [
+            n.nginx_build_info for n in session.query(Node).all()
+            if n.nginx_build_info
+        ]
+
+    if not infos:
+        # Nothing known yet, so fall back to whatever this node worked out for
+        # itself.  Better than claiming nothing is available.
+        return _local_caps
+
+    common = common_capabilities(infos)
+
+    # Version and OpenSSL come from this node, since they are only used for
+    # display and for the post quantum check, which is per build anyway.
+    merged = Capabilities()
+    merged.modules = common
+    merged.nginx_version = _local_caps.nginx_version
+    merged.openssl_version = _local_caps.openssl_version
+    merged.third_party = [t for t in _local_caps.third_party if t in common]
+    merged.has_stream = "stream" in common
+    merged.has_mail = "mail" in common
+    merged.has_http3 = "http_v3_module" in common
+    merged.configure_args = _local_caps.configure_args
+    return merged
+
+
+def module_differences() -> dict:
+    """
+    Which nodes are missing which modules.
+
+    Shown on the cluster page.  A node built from a different module list is
+    the sort of thing that goes unnoticed until a setting mysteriously will not
+    apply, so it is worth saying out loud.
+    """
+    from app.db import session_scope
+    from app.models import Node
+
+    with session_scope() as session:
+        nodes = [
+            (n.name, n.nginx_build_info, n.nginx_version)
+            for n in session.query(Node).all() if n.nginx_build_info
+        ]
+
+    if len(nodes) < 2:
+        return {"consistent": True, "nodes": {}, "missing": {}}
+
+    per_node = {name: parse_build_info(info)["modules"] for name, info, _ in nodes}
+    everything = set().union(*per_node.values())
+    common = set.intersection(*per_node.values())
+
+    missing = {}
+    for name, mods in per_node.items():
+        gap = everything - mods
+        if gap:
+            missing[name] = sorted(gap)
+
+    return {
+        "consistent": not missing,
+        "nodes": {n: len(m) for n, m in per_node.items()},
+        "versions": {name: ver for name, _, ver in nodes},
+        "common_count": len(common),
+        "missing": missing,
+    }
+
+
 def get_local_capabilities() -> Capabilities:
     return _local_caps
 

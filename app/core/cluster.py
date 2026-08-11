@@ -886,6 +886,8 @@ class ClusterManager:
                     node.nginx_active = answer.get("nginx_active", False)
                     node.nginx_config_ok = answer.get("nginx_config_ok", False)
                     node.nginx_version = answer.get("nginx_version") or node.nginx_version
+                    if answer.get("nginx_build_info"):
+                        node.nginx_build_info = answer["nginx_build_info"][:65536]
                     node.load_average = answer.get("load_average")
                     node.disk_free_bytes = answer.get("disk_free")
                     if answer.get("public_ip"):

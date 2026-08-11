@@ -526,9 +526,12 @@ async def cluster_page(request: Request, db: DBSession = Depends(get_db)):
     user = require_page_user(request, db)
     latest = db.query(ConfigVersion).order_by(ConfigVersion.version.desc()).first()
 
+    from app.core.capabilities import module_differences
+
     token = ensure_csrf_token(request)
     response = render(
         request, "cluster.html", user, csrf_token=token,
+        modules=module_differences(),
         nodes=db.query(Node).order_by(Node.priority.desc()).all(),
         pending=get_cluster().pending_summary(db),
         latest_version=latest.version if latest else 0,

@@ -104,6 +104,12 @@ async def heartbeat(request: Request):
             "nginx_active": me.nginx_active if me else False,
             "nginx_config_ok": me.nginx_config_ok if me else False,
             "nginx_version": me.nginx_version if me else None,
+            # The whole configure line, so the other nodes can work out which
+            # modules this box was actually built with.  Without it a node that
+            # was built from a different module list looks identical to every
+            # other one, and the first anybody knows is a setting that will not
+            # apply for no visible reason.
+            "nginx_build_info": me.nginx_build_info if me else None,
             "public_ip": me.public_ip if me else None,
             "local_addresses": me.local_address_list() if me else [],
             "load_average": me.load_average if me else None,

@@ -648,6 +648,26 @@ map $cookie_{cookie} $sticky_{_safe_var(pool.name)} {{
         if cfg.get("server_tokens") is not None:
             lines.append(f"    server_tokens {'on' if cfg.get('server_tokens') else 'off'};")
 
+        # The Server header itself.
+        #
+        # server_tokens above only takes the version off, leaving "Server: nginx".
+        # Getting rid of it altogether needs headers-more, so this only appears
+        # when the module is actually compiled in.
+        mode = cfg.get("server_header_mode", "suppress")
+        if mode != "default" and self.has_module("headers_more"):
+            if mode == "custom" and cfg.get("server_header_value"):
+                lines.append(
+                    f"    more_set_headers \"Server: {esc(cfg['server_header_value']).strip(chr(34))}\";"
+                )
+            else:
+                lines.append("    more_clear_headers Server;")
+        elif mode != "default" and not self.has_module("headers_more"):
+            lines.append(
+                "    # Cannot remove the Server header: this nginx was built without\n"
+                "    # the headers-more module.  server_tokens off above still hides\n"
+                "    # the version number."
+            )
+
         lines.append("")
 
         # ---- security headers ----

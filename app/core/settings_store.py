@@ -59,6 +59,16 @@ EDITABLE = {
         "env": None,
         "label": "DNS provider credentials",
     },
+    "acme_directory_url": {
+        "type": "string",
+        "env": None,
+        "label": "ACME directory URL",
+    },
+    "acme_ca_bundle": {
+        "type": "string",
+        "env": None,
+        "label": "CA certificate for that ACME server",
+    },
     "management_networks": {
         "type": "list",
         "env": None,

@@ -342,10 +342,18 @@ class CertificateManager:
         )
 
         # ---- run it ----------------------------------------------------------
+        directory = (settings_store.get("acme_directory_url") or "").strip()
+        ca_bundle = settings_store.get("acme_ca_bundle")
+
         request = {
             "domains": domains,
+            # Send our own name for it, so certbot files it under the same name
+            # we will look it up by afterwards.
+            "cert_name": cert_name,
             "email": email,
             "staging": staging,
+            "acme_server": directory or None,
+            "ca_bundle": ca_bundle or None,
             "challenge": challenge_type,
             "key_type": key_type,
             "force_renewal": force,
@@ -645,13 +653,75 @@ def _explain_certbot_error(output: str) -> str:
         )
 
     if "unauthorized" in text and "challenge" in text:
+        # Dig the address the CA actually connected to out of the output.  It
+        # is the single most useful thing in there and it is buried in a wall
+        # of text, so pull it to the front.
+        import re as _re
+
+        hit_ip = None
+        m = _re.search(r"Detail:\s*([0-9a-fA-F:.]+):\s*Invalid response", output or "")
+        if m:
+            hit_ip = m.group(1)
+
+        # If the hook reported success, the token really was written.  That
+        # changes the diagnosis completely: this is not a distribution problem,
+        # it is a reachability one, and saying so saves somebody an hour of
+        # looking at the wrong half.
+        hook_worked = '"ok":true' in (output or "") or '"ok": true' in (output or "")
+
+        lines = []
+        if hook_worked:
+            lines.append(
+                "The challenge token was written to every node, the hook says so, "
+                "so the cluster side worked.  What failed is the certificate "
+                "authority reaching it."
+            )
+        else:
+            lines.append("The challenge file was not served correctly.")
+
+        if hit_ip:
+            lines.append(
+                f"\nThe certificate authority connected to {hit_ip} and got a 404.  "
+                f"So something is answering port 80 for this domain, but it is not "
+                f"the nginx this manager is driving."
+            )
+
+        lines.append(
+            "\nThe usual causes, in the order worth checking:\n"
+            "\n"
+            "  Something else owns port 80 on that address.  Another nginx, a "
+            "cloud load balancer, a CDN.  The manager can only answer on the "
+            "boxes it runs on.\n"
+            "\n"
+            "  The domain points somewhere other than these nodes.  Check the "
+            "certificate's placement, which shows what DNS says next to what "
+            "each node reports its own address to be.\n"
+            "\n"
+            "  The http site is redirecting /.well-known/acme-challenge/ to "
+            "https.  The generated config never does this, but a hand written "
+            "server block in front might.\n"
+            "\n"
+            "If the domain genuinely points at something else and always will, "
+            "use a dns-01 challenge instead.  It needs no inbound connection at "
+            "all, and it is the only way to get a wildcard."
+        )
+
+        return "\n".join(lines) + "\n\n" + output[-1200:]
+
+    if "account" in text and "not found" in text:
         return (
-            "The challenge file was not served correctly.  Usually this means the "
-            "request landed on a different server than the one that wrote the "
-            "file, or something in front is redirecting /.well-known/ somewhere.\n\n"
-            "Check that the http site for this domain is not redirecting the "
-            "acme-challenge path to https.\n\n"
-            + output[-1500:]
+            "The certificate authority does not recognise the account this node "
+            "registered with.\n\n"
+            "certbot keeps its account details in /etc/letsencrypt/accounts, and "
+            "the authority has to have a matching record.  They can fall out of "
+            "step when the account was deactivated at their end, or when the box "
+            "was restored from a backup taken before it registered, or when you "
+            "are pointed at a test server that has been restarted.\n\n"
+            "The fix is to let it register again:\n"
+            "  rm -rf /etc/letsencrypt/accounts/<the server>\n\n"
+            "Nothing else is lost by doing that.  Existing certificates keep "
+            "working, it only affects how the next renewal authenticates.\n\n"
+            + output[-1000:]
         )
 
     if "invalid contact" in text or "invalid email" in text:

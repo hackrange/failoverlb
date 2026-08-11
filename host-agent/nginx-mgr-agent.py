@@ -227,7 +227,7 @@ def check_read_path(path_str):
 # Running things
 # ==============================================================================
 
-def run(cmd, timeout=DEFAULT_TIMEOUT, input_text=None):
+def run(cmd, timeout=DEFAULT_TIMEOUT, input_text=None, env_extra=None):
     """
     Run a command and hand back what happened.
 
@@ -236,6 +236,12 @@ def run(cmd, timeout=DEFAULT_TIMEOUT, input_text=None):
     turn into command injection.
     """
     log.debug("running: %s", " ".join(cmd))
+
+    env = None
+    if env_extra:
+        env = os.environ.copy()
+        env.update(env_extra)
+
     try:
         proc = subprocess.run(
             cmd,
@@ -244,6 +250,7 @@ def run(cmd, timeout=DEFAULT_TIMEOUT, input_text=None):
             timeout=timeout,
             input=input_text,
             shell=False,
+            env=env,
         )
     except subprocess.TimeoutExpired:
         raise AgentError(f"{cmd[0]} ran longer than {timeout}s and got killed", "timeout")
@@ -846,6 +853,13 @@ def v_certbot(req):
     dns_credentials = req.get("dns_credentials")
     force = bool(req.get("force_renewal", False))
 
+    # Somewhere other than Lets Encrypt.  Two real uses: an internal CA like
+    # step-ca or Smallstep, which plenty of places run for internal names, and
+    # a local test server so the whole path can be exercised without spending
+    # a public rate limit.
+    acme_server = req.get("acme_server")
+    ca_bundle = req.get("ca_bundle")
+
     if not domains or not isinstance(domains, list):
         raise AgentError("send a list of domains", "bad_request")
     if len(domains) > 100:
@@ -868,7 +882,18 @@ def v_certbot(req):
     if key_type not in ("ecdsa", "rsa"):
         raise AgentError("key_type has to be ecdsa or rsa", "bad_request")
 
-    cert_name = domains[0].replace("*.", "")
+    # The name the manager calls this certificate, falling back to the first
+    # domain when it did not say.
+    #
+    # This has to match, and getting it wrong is quiet.  certbot puts the files
+    # in a folder named after --cert-name, and the manager later looks them up
+    # by the name in its own database.  Guess the name here and the two disagree
+    # the moment somebody calls a certificate anything other than its first
+    # domain.  Issuing then works, and the copy to the other nodes fails with
+    # "no cert called ...", so one box has a certificate and the rest do not.
+    cert_name = req.get("cert_name") or domains[0].replace("*.", "")
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,253}", str(cert_name)):
+        raise AgentError("that certificate name is not valid", "bad_request")
 
     cmd = [
         "certbot", "certonly",
@@ -886,6 +911,14 @@ def v_certbot(req):
         # told outright that you meant it.  The flag name is dramatic, but all
         # it means is nobody gets an expiry warning by mail.
         cmd.append("--register-unsafely-without-email")
+
+    if acme_server:
+        if not re.fullmatch(r"https://[A-Za-z0-9._:-]{1,253}(/[A-Za-z0-9._~/-]*)?", str(acme_server)):
+            raise AgentError("that acme server url is not valid", "bad_request")
+        cmd += ["--server", acme_server]
+        # A custom directory and --staging together makes no sense, since
+        # staging is just Lets Encrypt's own other directory.
+        staging = False
 
     if staging:
         cmd.append("--staging")
@@ -930,7 +963,19 @@ def v_certbot(req):
     for d in domains:
         cmd += ["-d", d]
 
-    result = run(cmd, timeout=CERTBOT_TIMEOUT)
+    # An internal or test ACME server signs with a CA nothing trusts by
+    # default, so certbot needs pointing at it.  Written to our own folder, not
+    # somewhere that would change what the rest of the box trusts.
+    env_extra = None
+    if ca_bundle:
+        if not isinstance(ca_bundle, str) or "BEGIN CERTIFICATE" not in ca_bundle:
+            raise AgentError("that ca bundle does not look like a certificate", "bad_request")
+        bundle_path = Path("/usr/local/lib/nginx-fleet-manager/acme-ca.pem")
+        bundle_path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write(bundle_path, ca_bundle, mode=0o644)
+        env_extra = {"REQUESTS_CA_BUNDLE": str(bundle_path)}
+
+    result = run(cmd, timeout=CERTBOT_TIMEOUT, env_extra=env_extra)
     return {
         "ok": result["rc"] == 0,
         "cert_name": cert_name,

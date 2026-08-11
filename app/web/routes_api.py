@@ -24,7 +24,7 @@ from app.config import get_settings
 from app.core import audit, settings_store
 from app.core.acme import AcmeError, get_cert_manager, pick_issuing_node, resolve_domain
 from app.core.agent_client import AgentError, get_agent
-from app.core.capabilities import get_local_capabilities
+from app.core.capabilities import fleet_capabilities, get_local_capabilities
 from app.core.cluster import ClusterError, get_cluster
 from app.core.nginx_parser import ParseError, extract_settings, parse, quick_check
 from app.core.render import Renderer
@@ -127,7 +127,7 @@ def render_current(session) -> tuple:
                 node_addresses.append(addr)
 
     renderer = Renderer(
-        capabilities=get_local_capabilities(),
+        capabilities=fleet_capabilities(),
         node_addresses=sorted(set(node_addresses)),
         settings={
             "node_name": settings.node_name,
@@ -235,7 +235,10 @@ async def catalog(request: Request, context: str = "server",
     the help can never end up describing something the form does not do.
     """
     get_user(request, db)
-    caps = get_local_capabilities()
+    # The fleet view, not this node's.  Offering something only some of your
+    # boxes were built with produces a change that will not apply and no
+    # obvious reason why.
+    caps = fleet_capabilities()
 
     out = []
     for feature in all_features().values():
@@ -461,7 +464,7 @@ def _validate_settings(raw, context: str) -> dict:
     if not isinstance(raw, dict):
         raise HTTPException(status_code=400, detail="settings has to be an object")
 
-    caps = get_local_capabilities()
+    caps = fleet_capabilities()
     cleaned = {}
     problems = []
 
