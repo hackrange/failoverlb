@@ -243,6 +243,22 @@ else
         info "Make any missing folder above, then: systemctl restart nginx-mgr-agent"
     fi
 
+    # signal=SYS means seccomp shot it.  The message never says which syscall,
+    # so point at the two settings that cause it rather than leaving somebody
+    # reading "code=dumped, signal=SYS" and guessing.
+    if systemctl show nginx-mgr-agent -p Result --value 2>/dev/null | grep -q 'core-dump' \
+       || journalctl -u nginx-mgr-agent -n 20 --no-pager 2>/dev/null | grep -q 'signal=SYS'; then
+        warn "That is SIGSYS: the syscall filter killed it, not the agent crashing."
+        info "The two settings in the unit that cause this are:"
+        info "    MemoryDenyWriteExecute=yes"
+        info "    SystemCallFilter=~...  (the deny list)"
+        info ""
+        info "Both ship in a form Python is happy with, so if you are seeing this"
+        info "on a stock install please report it.  To get moving now, comment"
+        info "them out in ${AGENT_UNIT} and:"
+        info "    systemctl daemon-reload && systemctl restart nginx-mgr-agent"
+    fi
+
     fail "The agent will not start.  See above."
 fi
 

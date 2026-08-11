@@ -108,13 +108,30 @@ RestrictRealtime=yes
 RestrictSUIDSGID=yes
 LockPersonality=yes
 
-# Block the memory-write-and-execute trick that most injected shellcode needs.
-MemoryDenyWriteExecute=yes
+# Blocking write-then-execute memory stops most injected shellcode, and it is a
+# nice thing to have.  It is off because CPython will not reliably start under
+# it: the interpreter and some of the modules it loads map memory writable and
+# then execute it, which is normal for them and indistinguishable from the thing
+# we are trying to block.  Under systemd that shows up as the service dying with
+# signal=SYS and no explanation of which syscall was refused.
+#
+# Turn it back on if you are confident about the exact Python build on your
+# boxes, and test a restart before you rely on it.
+# MemoryDenyWriteExecute=yes
 
-# Only let it call the syscalls a normal service uses.  @privileged and
-# @resources are the groups with the sharp edges in them.
+# Only let it call the syscalls a normal service uses.
+#
+# @resources and @debug used to be in the deny list.  They came out because
+# Python trips over them at startup on some builds and the failure is a bare
+# SIGSYS, which tells you nothing about what was denied.  A hardening rule
+# nobody can debug gets deleted by whoever is on call at 3am, so it is better to
+# ship one that works.  The groups left below are the ones with the sharp edges
+# and none of them are on the agent's path.
+#
+# The real limits here are CapabilityBoundingSet and ProtectSystem, further up.
+# Those do the heavy lifting.  This is one more layer, not the only one.
 SystemCallFilter=@system-service
-SystemCallFilter=~@privileged @resources @obsolete @cpu-emulation @debug @mount @swap
+SystemCallFilter=~@privileged @obsolete @cpu-emulation @mount @swap
 SystemCallArchitectures=native
 
 # Drop every capability except the ones we actually use.  Even as root the
