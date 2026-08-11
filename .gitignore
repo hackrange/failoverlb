@@ -108,3 +108,14 @@ Thumbs.db
 # ==============================================================================
 docker-compose.override.yml
 test/.secrets
+
+# Editor and tooling scratch files.  The settings writer leaves these behind
+# and one of them got committed once.
+.claude/settings.local.json
+.claude/*.tmp.*
+*.tmp.*
+
+# The docker test rig.  It served its purpose finding bugs early, but real
+# testing happens on real servers now, so it does not ship.  Still on disk if
+# you want it: git log will show where it went.
+test/

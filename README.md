@@ -4,10 +4,10 @@ A web GUI for running two or more nginx boxes as one unit.  Sites, backend
 pools with real health checks, and Lets Encrypt certificates that work properly
 in a cluster.
 
-It is built to sit on top of nginx built from source by
-`../nginx_installer/nginx-installer.sh`, and it follows that layout: sites in
-their own files, certbot in webroot mode, no distro nginx package anywhere near
-the binary.
+It is built to sit on top of nginx built from source by `nginx-installer.sh`,
+which ships in this folder, and it follows that layout: sites in their own
+files, certbot in webroot mode, no distro nginx package anywhere near the
+binary.
 
 ## What it does
 
@@ -45,7 +45,7 @@ where there is a free way to get the same result, the help text says what it is.
 
 This is a work in progress.  Being straight about where it is:
 
-### Done and tested
+### Built
 
 | Piece | File | What it is |
 |---|---|---|
@@ -58,8 +58,14 @@ This is a work in progress.  Being straight about where it is:
 | Health checker | `app/core/health.py` | Active checks, slow start, adaptive weighting. |
 | Cluster | `app/core/cluster.py` | Trust group, election with quorum, two phase apply, change queue. |
 | Certificates | `app/core/acme.py` | Issuer selection, cluster wide challenge, replication, renewal scheduling. |
+| nginx rebuild | `app/core/upgrade.py` | Drives the installer remotely.  Standbys first, active last, stops on the first failure. |
 | Crypto | `app/core/crypto.py` | Cluster CA, node certs, secrets at rest, message signing. |
+| Auth | `app/auth/` | Local break glass accounts with mandatory TOTP, plus OIDC with PKCE. |
+| Web GUI and API | `app/web/` | Server rendered pages, JSON API, help modals, no build step. |
+| nginx from source | `nginx-installer.sh` | Builds nginx with the modules, sets up certbot, keeps a rollback. |
 | Docker setup | `docker_setup.sh` | Docker CE on Ubuntu 22.04+, done properly. |
+| Per node install | `install.sh` | Agent, group, systemd unit, `.env`, container, cluster join. |
+| One shot setup | `nginx-gui-mgmt_setup.sh` | Clone from git into `/data/docker/nginx-gui-mgmt` and hand off. |
 | Plus parity notes | `docs/plus-parity.md` | Every paid feature, and what we built instead. |
 
 The config parser has been run against realistic nginx config and correctly
@@ -67,41 +73,41 @@ handles the things that break naive parsers: `server` meaning two different
 things depending on context, braces and semicolons inside quoted strings, and
 round tripping without losing hand written directives.
 
-| Auth | `app/auth/` | Local break glass accounts with mandatory TOTP, plus OIDC with PKCE. |
-| Web GUI and API | `app/web/` | Server rendered pages, JSON API, help modals, no build step. |
-| Test harness | `test/` | Two Ubuntu 26.04 nodes with nginx built from source, plus the managers. |
-
-**It runs.**  `test/run-test-cluster.sh up` brings up a working two node cluster
-and 75 end to end tests pass against it.
+GUI pages: Dashboard, Sites with a full editor, Backend Pools with an editor,
+Zones and Access Lists, Certificates, Cluster, nginx Build, Open Source Parity,
+Audit Log, My Account, Users, Settings.
 
 ### Still to come
 
 | Piece | Notes |
 |---|---|
-| `install.sh` | Per node installer that lays down the agent and starts the container. |
-| `nginx-gui-mgmt_setup.sh` | One shot install from the git repo into `/data/docker/nginx-gui-mgmt`. |
-| nginx version upgrade | Driving the installer script remotely, one node at a time. |
-| ACME against a real server | The flow is written.  It has not been run against Lets Encrypt or Pebble yet. |
-| Editing pages | Sites and pools can be created and changed through the API.  The GUI has create forms but not full edit forms yet. |
+| Real server testing | The big one.  Both installers exist but have never been run end to end. |
+| Locations UI | The model and renderer already do path routing.  There is no UI for it. |
+| Stream UI | Same story for TCP and UDP proxying. |
+| Certificate upload | You can issue one from the GUI but not upload one you already have. |
+| Monitoring dashboard | The log parsing dashboard in `docs/plus-parity.md` is not built. |
+| Maps UI | Model and renderer support it, no UI. |
 
 ## Testing
 
+The docker test rig this was developed against has been retired.  It was two
+Ubuntu containers with nginx really built from source, and it found about twenty
+real bugs, but there are things it could never reach: systemd, real ACME, real
+host permissions, separate machines, reboots.  Testing happens on real servers
+now.
+
+It is still in git history if it is ever wanted back:
+
 ```bash
-./test/run-test-cluster.sh up      # two nginx nodes plus two managers, isolated
-docker cp test/e2e_test.py nfm-gui-1:/tmp/
-docker exec -e E2E_PASSWORD=<the password from the log> nfm-gui-1 python /tmp/e2e_test.py
-./test/run-test-cluster.sh down
+git log --diff-filter=D -- test/
 ```
 
-Nothing in the harness touches the host's nginx.  It runs on its own bridge
-network, publishes no ports, and mounts no host paths.
-
-The tests are worth reading before you trust them.  An earlier version passed
-while the login page was completely broken in a browser, because the test read
-the CSRF token from the cookie instead of from the rendered form and was
-helpfully supplying something the page never sent.  The suite now scrapes tokens
-out of the HTML the way a browser does, and it covers both the first login and
-the repeat login, which are different code paths.
+The old tests are worth reading before trusting anything similar.  One version
+passed while the login page was completely broken in a browser, because the test
+read the CSRF token from the cookie instead of from the rendered form, and was
+helpfully supplying something the page never sent.  Read tokens out of the HTML
+the way a browser does, and cover the first login and the repeat login
+separately.  They are different code paths.
 
 ## How the security works
 
@@ -129,21 +135,40 @@ nothing.
 
 ## Getting started
 
+On a fresh box, all of it in one go:
+
 ```bash
-# 1. Docker, if it is not already there
-sudo bash docker_setup.sh
-
-# 2. Settings
-cp .env.example .env
-$EDITOR .env          # node name, address, and a secret key
-
-# 3. Make a secret key
-openssl rand -base64 48
+sudo ./nginx-installer.sh install      # build nginx from source
+sudo ./nginx-gui-mgmt_setup.sh         # docker, clone, install, start
 ```
 
-Do not run this on a box with an nginx you care about until the install script
-exists.  The compose file uses host networking and bind mounts `/etc/nginx`, and
-the agent reloads the nginx service.
+The setup script clones into `/data/docker/nginx-gui-mgmt`, sets up docker if it
+is missing, and hands off to `install.sh`.  Run it again any time to pull the
+latest code and rebuild.  Your `.env` and your database are left alone.
+
+The first admin password is printed to the log once:
+
+```bash
+docker compose logs | grep -A3 "Made the first admin"
+```
+
+To add a second node, log into the first one, go to Cluster, press Add a node,
+and copy the token it gives you:
+
+```bash
+sudo ./nginx-gui-mgmt_setup.sh --join node-one:7444 --token <token>
+```
+
+Set `NFM_ADMIN_ALLOWLIST` in `.env` to your management networks before you put
+this anywhere interesting.  Without it, anybody who can reach 7443 gets the
+login page.
+
+Certificates start pointed at the Lets Encrypt staging service on purpose.  The
+real one locks you out for a week after five failures, and everybody gets it
+wrong at least once.  Switch it in Settings once you have one working.
+
+If you would rather do it by hand, `install.sh` is the per node half and takes
+the same options.  Run `./install.sh --help`.
 
 ## Layout
 
