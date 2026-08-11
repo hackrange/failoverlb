@@ -116,6 +116,10 @@ test/.secrets
 *.tmp.*
 
 # The docker test rig.  It served its purpose finding bugs early, but real
-# testing happens on real servers now, so it does not ship.  Still on disk if
-# you want it: git log will show where it went.
+# testing happens on real servers now, so it does not ship.  It is gone from
+# disk too.  To get it back:
+#
+#   git checkout 0ed4630^ -- test/
+#
+# This line stays so a scratch test/ folder never gets committed by accident.
 test/
