@@ -244,16 +244,31 @@ document.addEventListener("DOMContentLoaded", function () {
       const result = await NFM.api("/cluster/join-token", { method: "POST", body: {} });
       NFM.openModal("Add a node to the cluster", "single use, expires in 2 hours", `
         <div class="help-section">
-          <p>Run this on the new box.  It installs the agent, starts the
-             container, and joins it to this cluster.</p>
+          <p>Build nginx on the new box first if you have not already, then run
+             this.  It gets the code, sets up docker if it is missing, installs
+             the agent, starts the container, and joins it to this cluster.</p>
         </div>
         <pre>${NFM.escapeHtml(result.command)}</pre>
+
+        <div class="help-section" style="margin-top:14px">
+          <p>Already have the project folder on that box?  Cd into it and run
+             this instead.  No git access needed.</p>
+        </div>
+        <pre>${NFM.escapeHtml(result.command_have_code)}</pre>
+
+        <div class="help-section" style="margin-top:14px">
+          <p>The new node comes up as a standby.  It pulls the current config
+             from the cluster, so you do not have to set anything up on it
+             twice.  Make sure it can reach this node on port
+             ${NFM.escapeHtml(String(result.sponsor).split(":").pop())}.</p>
+        </div>
+
         <div class="notice warn" style="margin-top:14px">
           ${NFM.icon("warn")}
           <div>
-            Treat this like a password.  Anybody holding it can get a signed
-            cluster certificate and become a member.  It only works once and it
-            expires in 2 hours.
+            Treat this token like a password.  Anybody holding it can get a
+            signed cluster certificate and become a member.  It only works once
+            and it expires in 2 hours.
           </div>
         </div>
       `, true);

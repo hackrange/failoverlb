@@ -170,6 +170,60 @@ wrong at least once.  Switch it in Settings once you have one working.
 If you would rather do it by hand, `install.sh` is the per node half and takes
 the same options.  Run `./install.sh --help`.
 
+## Adding more nodes
+
+There is a join token.  It is made on a node that is already running, it works
+once, and it expires in two hours.
+
+On the running node, go to **Cluster** and press **Add a node**.  You get a
+command to paste on the new box:
+
+```bash
+sudo git clone https://git.hackrange.com/trice/nginx-gui-mgmt.git /data/docker/nginx-gui-mgmt \
+  && sudo /data/docker/nginx-gui-mgmt/nginx-gui-mgmt_setup.sh \
+       --join 10.0.0.10:7444 --token <token>
+```
+
+If the code is already on that box, cd into the folder and run:
+
+```bash
+sudo ./nginx-gui-mgmt_setup.sh --join 10.0.0.10:7444 --token <token>
+```
+
+Build nginx on the new box first with `nginx-installer.sh install`.  The manager
+manages an nginx, it does not bring its own.
+
+### What actually happens
+
+1. The new node makes a key pair and a signing request.  **The private key never
+   leaves that box.**
+2. It sends the request and the token to the node you pointed it at.
+3. That node checks the token, signs the request, and sends back the new node's
+   certificate, the cluster CA, and a shared key for signing messages.
+4. The new node asks for the rest of the roster, so it learns about every other
+   member and not just the one it joined through.
+
+After that, three separate things have to line up on every peer call: a client
+certificate signed by this cluster's own CA, a source address on the roster, and
+an HMAC signature made with a key only that node holds.
+
+Only the token is a shared secret, and only for those two hours.  There is no
+long lived cluster password to leak.  Tokens are stored hashed, so a copy of the
+database does not hand anybody a working one.
+
+### Things worth knowing
+
+- **The new node joins as a standby** and pulls the current config from the
+  cluster.  You do not set your sites up twice.
+- **Port 7444 has to be open between nodes**, and should be open nowhere else.
+- **Every node needs its own `.env`.**  Do not copy one between boxes.  The
+  secret key in it encrypts that node's TOTP seeds and peer keys.
+- **A node that already has its own cluster will refuse to join another one**
+  rather than silently throw your config away.
+- **Priority decides who goes active.**  Higher wins.  A node will not make
+  itself active unless it can see more than half the fleet, so a network split
+  cannot leave you with two nodes both taking writes.
+
 ## Layout
 
 ```

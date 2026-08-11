@@ -27,8 +27,31 @@ REPO_URL="${NFM_REPO_URL:-https://git.hackrange.com/trice/nginx-gui-mgmt.git}"
 INSTALL_DIR="${NFM_INSTALL_DIR:-/data/docker/nginx-gui-mgmt}"
 BRANCH="${NFM_BRANCH:-master}"
 
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || echo /nonexistent)"
+
+GIT_USER="${NFM_GIT_USER:-}"
+GIT_TOKEN="${NFM_GIT_TOKEN:-}"
+
 PASSTHROUGH=()
 SKIP_DOCKER=false
+
+# The files that say "yes, this really is the project and not some other folder
+# that happens to exist".
+looks_like_project() {
+    [[ -f "$1/docker-compose.yml" && -f "$1/install.sh" && -d "$1/app" ]]
+}
+
+# Build a clone URL with credentials in it, if we were given any.  Kept in a
+# function so the token never ends up in a log line or in the process list of
+# anything except git itself.
+clone_url() {
+    if [[ -n "$GIT_TOKEN" ]]; then
+        local user="${GIT_USER:-oauth2}"
+        echo "${REPO_URL/https:\/\//https://${user}:${GIT_TOKEN}@}"
+    else
+        echo "$REPO_URL"
+    fi
+}
 
 c_reset=$'\033[0m'; c_red=$'\033[31m'; c_grn=$'\033[32m'
 c_ylw=$'\033[33m'; c_cyn=$'\033[36m'
@@ -48,8 +71,14 @@ Usage: sudo ./nginx-gui-mgmt_setup.sh [options]
   -d, --dir <path>      Where to install.  Default ${INSTALL_DIR}.
   -b, --branch <name>   Branch to check out.  Default ${BRANCH}.
   -r, --repo <url>      Where to clone from.
+      --git-user <name> Username for a private repo.
+      --git-token <tok> Access token for a private repo.  NFM_GIT_TOKEN works too.
       --skip-docker     Do not touch docker, it is already sorted.
   -h, --help            This.
+
+You do not need git access at all if you already have the code on the box.
+Copy the folder over, cd into it, and run this script from inside it.  It will
+use what is already there.
 
 Anything else is handed straight to install.sh, so these work:
 
@@ -71,6 +100,8 @@ while [[ $# -gt 0 ]]; do
         -d|--dir)     INSTALL_DIR="$2"; shift 2 ;;
         -b|--branch)  BRANCH="$2"; shift 2 ;;
         -r|--repo)    REPO_URL="$2"; shift 2 ;;
+        --git-user)   GIT_USER="$2"; shift 2 ;;
+        --git-token)  GIT_TOKEN="$2"; shift 2 ;;
         --skip-docker) SKIP_DOCKER=true; shift ;;
         -h|--help)    usage; exit 0 ;;
         *)            PASSTHROUGH+=("$1"); shift ;;
@@ -107,15 +138,16 @@ else
     header "Docker"
     log "docker is missing or has no compose plugin, setting it up"
 
-    # docker_setup.sh lives beside this script if we are running from a clone,
-    # otherwise we grab it from the repo we are about to pull anyway.
-    SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    # docker_setup.sh lives beside this script if we are running from a copy of
+    # the project, otherwise we grab it from the repo we are about to pull.
     if [[ -f "$SELF_DIR/docker_setup.sh" ]]; then
         bash "$SELF_DIR/docker_setup.sh"
     else
         TMP_CLONE="$(mktemp -d)"
-        git clone --depth 1 --branch "$BRANCH" "$REPO_URL" "$TMP_CLONE/repo" >/dev/null 2>&1 \
-            || fail "Could not clone ${REPO_URL} to get docker_setup.sh."
+        GIT_TERMINAL_PROMPT=0 git clone --quiet --depth 1 --branch "$BRANCH" \
+            "$(clone_url)" "$TMP_CLONE/repo" >/dev/null 2>&1 \
+            || fail "Could not clone ${REPO_URL} to get docker_setup.sh.  Run
+        docker_setup.sh yourself first, then rerun this with --skip-docker."
         bash "$TMP_CLONE/repo/docker_setup.sh"
         rm -rf "$TMP_CLONE"
     fi
@@ -126,9 +158,13 @@ fi
 # ============================================================== the code
 header "Code"
 
-if [[ -d "$INSTALL_DIR/.git" ]]; then
-    log "already installed at ${INSTALL_DIR}, pulling the latest"
+# Four ways to end up with the project in place, tried in this order.  The point
+# is that you should not need git access just to install this, because plenty of
+# boxes cannot reach the git server and plenty of people just copy a folder over.
 
+if [[ -d "$INSTALL_DIR/.git" ]]; then
+    # 1. Already a clone.  Update it.
+    log "already installed at ${INSTALL_DIR}, pulling the latest"
     cd "$INSTALL_DIR"
 
     # Refuse to clobber local edits.  Somebody hand patching a live box and
@@ -140,29 +176,73 @@ if [[ -d "$INSTALL_DIR/.git" ]]; then
     fi
 
     BEFORE="$(git rev-parse --short HEAD)"
-    git fetch --quiet origin "$BRANCH"
-    git checkout --quiet "$BRANCH"
-    git merge --quiet --ff-only "origin/$BRANCH" || \
-        fail "Could not fast forward.  This clone has diverged from origin."
-    AFTER="$(git rev-parse --short HEAD)"
-
-    if [[ "$BEFORE" == "$AFTER" ]]; then
-        log "already up to date at ${AFTER}"
+    if git fetch --quiet origin "$BRANCH" 2>/dev/null; then
+        git checkout --quiet "$BRANCH"
+        git merge --quiet --ff-only "origin/$BRANCH" || \
+            fail "Could not fast forward.  This clone has diverged from origin."
+        AFTER="$(git rev-parse --short HEAD)"
+        if [[ "$BEFORE" == "$AFTER" ]]; then
+            log "already up to date at ${AFTER}"
+        else
+            log "updated ${BEFORE} to ${AFTER}"
+        fi
     else
-        log "updated ${BEFORE} to ${AFTER}"
+        warn "Could not reach the git server, carrying on with what is here (${BEFORE})."
     fi
+
+elif looks_like_project "$INSTALL_DIR"; then
+    # 2. The code is already there but is not a clone.  Somebody copied it in.
+    log "found the project already at ${INSTALL_DIR}, using it as is"
+    info "It is not a git clone, so this script will not try to update it."
+    cd "$INSTALL_DIR"
+
+elif looks_like_project "$SELF_DIR"; then
+    # 3. We are being run from inside a copy of the project.  This is the case
+    #    when somebody copied the folder onto the box, which is the easiest way
+    #    to do this on a server with no route to the git server.
+    if [[ "$SELF_DIR" == "$INSTALL_DIR" ]]; then
+        log "running from ${INSTALL_DIR} already"
+        cd "$INSTALL_DIR"
+    else
+        log "running from a copy of the project at ${SELF_DIR}"
+        log "copying it to ${INSTALL_DIR}"
+        mkdir -p "$INSTALL_DIR"
+        # Leave .env, the database and any certs alone if this is a reinstall.
+        tar -C "$SELF_DIR" --exclude=.env --exclude=.git -cf - . \
+            | tar -C "$INSTALL_DIR" -xf -
+        cd "$INSTALL_DIR"
+    fi
+
 else
+    # 4. Nothing local, so clone it.
     if [[ -d "$INSTALL_DIR" ]] && [[ -n "$(ls -A "$INSTALL_DIR" 2>/dev/null)" ]]; then
-        fail "${INSTALL_DIR} already has things in it but is not a git clone.  Move it aside first."
+        fail "${INSTALL_DIR} already has things in it but is not the project.  Move it aside first."
     fi
 
     mkdir -p "$(dirname "$INSTALL_DIR")"
-    log "cloning into ${INSTALL_DIR}"
-    git clone --branch "$BRANCH" "$REPO_URL" "$INSTALL_DIR" \
-        || fail "Clone failed.  Check the URL and that this box can reach it."
+    log "cloning ${REPO_URL}"
+
+    if ! GIT_TERMINAL_PROMPT=0 git clone --quiet --branch "$BRANCH" \
+            "$(clone_url)" "$INSTALL_DIR" 2>/tmp/nfm-clone-err.$$; then
+        CLONE_ERR="$(cat /tmp/nfm-clone-err.$$ 2>/dev/null || true)"
+        rm -f /tmp/nfm-clone-err.$$
+        echo "${CLONE_ERR}" | sed 's/^/        /'
+
+        if echo "$CLONE_ERR" | grep -qi "could not read Username\|Authentication failed\|terminal prompts disabled"; then
+            fail "That repository wants credentials.  Either pass --git-user and
+        --git-token, or copy the project folder onto this box and run this
+        script from inside it, which needs no git access at all."
+        fi
+        fail "Clone failed.  Check the URL and that this box can reach it."
+    fi
+    rm -f /tmp/nfm-clone-err.$$
+
     cd "$INSTALL_DIR"
     log "checked out $(git rev-parse --short HEAD)"
 fi
+
+looks_like_project "$INSTALL_DIR" || \
+    fail "${INSTALL_DIR} does not look like the project.  Expected docker-compose.yml, install.sh and app/."
 
 chmod 0750 "$INSTALL_DIR"
 chmod +x "$INSTALL_DIR"/*.sh 2>/dev/null || true

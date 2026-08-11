@@ -1337,12 +1337,26 @@ async def make_join_token(request: Request, g: ObjectGuard = Depends(changing)):
                  object_name="join token issued")
 
     settings = get_settings()
+    sponsor = f"{settings.node_address}:{settings.peer_port}"
+
+    # The new box does not have the project on it yet, so the command has to get
+    # the code there first.  Handing somebody a command that starts with the
+    # name of a script they do not have is a good way to waste their afternoon.
+    repo = settings.repo_url
+    target = settings.install_dir
+
     return {
         "token": token,
         "expires_in_hours": 2,
+        "sponsor": sponsor,
+        "repo_url": repo,
+        "install_dir": target,
         "command": (
-            f"sudo bash nginx-gui-mgmt_setup.sh --join {settings.node_address}:{settings.peer_port} "
-            f"--token {token}"
+            f"sudo git clone {repo} {target} \\\n"
+            f"  && sudo {target}/nginx-gui-mgmt_setup.sh --join {sponsor} --token {token}"
+        ),
+        "command_have_code": (
+            f"sudo ./nginx-gui-mgmt_setup.sh --join {sponsor} --token {token}"
         ),
         "note": "single use, expires in 2 hours, treat it like a password",
     }
