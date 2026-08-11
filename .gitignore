@@ -115,11 +115,7 @@ test/.secrets
 .claude/*.tmp.*
 *.tmp.*
 
-# The docker test rig.  It served its purpose finding bugs early, but real
-# testing happens on real servers now, so it does not ship.  It is gone from
-# disk too.  To get it back:
-#
-#   git checkout 0ed4630^ -- test/
-#
-# This line stays so a scratch test/ folder never gets committed by accident.
+# Testing scratch.  The old docker rig lived here and was never meant to ship,
+# so it was taken out of the history as well, not just the current tree.  This
+# line keeps a scratch test/ folder from getting committed by accident.
 test/

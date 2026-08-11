@@ -96,11 +96,8 @@ real bugs, but there are things it could never reach: systemd, real ACME, real
 host permissions, separate machines, reboots.  Testing happens on real servers
 now.
 
-It is still in git history if it is ever wanted back:
-
-```bash
-git log --diff-filter=D -- test/
-```
+It was never meant to ship, so it is out of the history too rather than just
+the current tree.
 
 The old tests are worth reading before trusting anything similar.  One version
 passed while the login page was completely broken in a browser, because the test
