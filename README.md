@@ -181,29 +181,26 @@ It does **not** go on your backend app servers.  Those are just servers in a
 pool, and they never know the manager exists.
 
 ```mermaid
-flowchart TB
+graph TB
     admin["Admin browser<br/>port 7443"]
 
-    subgraph LB1["nginx server 1 &nbsp;&nbsp; ACTIVE"]
-        direction TB
-        M1["Manager container<br/><i>unprivileged, uid 10001</i>"]
-        A1(["Host agent<br/><i>root, fixed verb list</i>"])
-        N1["nginx<br/><i>built from source</i>"]
-        M1 -- "unix socket" --> A1
-        A1 -- "writes config<br/>reloads" --> N1
+    subgraph LB1["nginx server 1 - ACTIVE"]
+        M1["Manager container<br/>unprivileged, uid 10001"]
+        A1("Host agent<br/>root, fixed verb list")
+        N1["nginx<br/>built from source"]
+        M1 -->|"unix socket"| A1
+        A1 -->|"writes config, reloads"| N1
     end
 
-    subgraph LB2["nginx server 2 &nbsp;&nbsp; STANDBY"]
-        direction TB
+    subgraph LB2["nginx server 2 - STANDBY"]
         M2["Manager container"]
-        A2(["Host agent"])
+        A2("Host agent")
         N2["nginx"]
-        M2 -- "unix socket" --> A2
+        M2 -->|"unix socket"| A2
         A2 --> N2
     end
 
-    subgraph POOL["Backend pool &nbsp;&nbsp; no manager here"]
-        direction LR
+    subgraph POOL["Backend pool - no manager here"]
         B1["app-01:8080"]
         B2["app-02:8080"]
         B3["app-03:8080"]
@@ -211,7 +208,7 @@ flowchart TB
 
     admin --> M1
     admin -.-> M2
-    M1 <== "mTLS + HMAC<br/>port 7444" ==> M2
+    M1 ---|"mTLS + HMAC, port 7444"| M2
 
     N1 --> B1
     N1 --> B2
@@ -220,12 +217,12 @@ flowchart TB
     N2 -.-> B2
     N2 -.-> B3
 
-    M1 -. "health checks" .-> B1
-    M2 -. "health checks" .-> B2
+    M1 -.->|"health checks"| B1
+    M2 -.->|"health checks"| B2
 
-    classDef box fill:#fff,stroke:#333,stroke-width:1px,color:#111
-    classDef root fill:#f2f2f2,stroke:#333,stroke-width:1px,color:#111
-    classDef back fill:#fafafa,stroke:#888,stroke-dasharray:3 3,color:#111
+    classDef box fill:#ffffff,stroke:#333333,stroke-width:1px,color:#111111
+    classDef root fill:#f2f2f2,stroke:#333333,stroke-width:1px,color:#111111
+    classDef back fill:#fafafa,stroke:#888888,stroke-width:1px,color:#111111
     class admin,M1,M2,N1,N2 box
     class A1,A2 root
     class B1,B2,B3 back
@@ -281,17 +278,17 @@ Only the node that currently holds the public address can answer the challenge,
 and that moves when you fail over.  So it is worked out fresh every time.
 
 ```mermaid
-flowchart LR
-    S["Renewal due<br/>for shop.example.com"] --> R{"Resolve the name<br/>against public DNS"}
+graph LR
+    S["Renewal due for<br/>shop.example.com"] --> R{"Resolve the name<br/>against public DNS"}
     R --> M{"Which node has<br/>that address?"}
     M -->|"node 2 does"| I["Node 2 runs certbot"]
-    I --> P["Challenge token pushed<br/>to <b>every</b> node first"]
+    I --> P["Challenge token pushed<br/>to every node first"]
     P --> V["CA connects to<br/>whichever it likes"]
     V --> C["Certificate issued"]
-    C --> D["Copied to every node<br/><i>key stays 0600 root</i>"]
+    C --> D["Copied to every node<br/>key stays 0600 root"]
 
-    classDef box fill:#fff,stroke:#333,color:#111
-    classDef dec fill:#f2f2f2,stroke:#333,color:#111
+    classDef box fill:#ffffff,stroke:#333333,stroke-width:1px,color:#111111
+    classDef dec fill:#f2f2f2,stroke:#333333,stroke-width:1px,color:#111111
     class S,I,P,V,C,D box
     class R,M dec
 ```
