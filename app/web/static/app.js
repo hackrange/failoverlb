@@ -165,11 +165,13 @@
         }
 
         if (!feature.available) {
+            let why = escapeHtml(feature.unavailable_reason || "not available on this build");
+            let fix = feature.min_version
+                ? "Upgrade the oldest node, or leave this setting alone until you do."
+                : "Add it to the module list at the top of nginx-installer.sh and run " +
+                  "the install again on the nodes that are missing it.";
             parts.push('<div class="notice bad">' + icon("warn") +
-                "<div>This nginx was not built with the <code>" +
-                escapeHtml(feature.module) +
-                "</code> module, so this setting is not available on this box.  " +
-                "Add it to the module list in the installer script and rebuild.</div></div>");
+                "<div><strong>Not available: </strong>" + why + "<br>" + fix + "</div></div>");
         }
 
         if (help.docs_url) {

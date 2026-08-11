@@ -239,6 +239,7 @@ async def catalog(request: Request, context: str = "server",
     # boxes were built with produces a change that will not apply and no
     # obvious reason why.
     caps = fleet_capabilities()
+    version = caps.version_tuple
 
     out = []
     for feature in all_features().values():
@@ -259,8 +260,13 @@ async def catalog(request: Request, context: str = "server",
             "advanced": feature.advanced,
             "depends_on": feature.depends_on,
             "directive": feature.directive,
-            "available": feature.is_available(caps.modules),
+            "available": feature.is_available(caps.modules, version),
+            "unavailable_reason": feature.unavailable_reason(caps.modules, version),
             "module": feature.module,
+            "min_version": (
+                ".".join(str(p) for p in feature.min_version)
+                if feature.min_version else None
+            ),
             "help": {
                 "summary": feature.help.summary,
                 "detail": feature.help.detail,
@@ -479,11 +485,8 @@ def _validate_settings(raw, context: str) -> dict:
         if context not in feature.contexts:
             problems.append(f"{feature.label} cannot go in a {context} block")
             continue
-        if not feature.is_available(caps.modules):
-            problems.append(
-                f"{feature.label} needs the {feature.module} module, "
-                f"which this nginx was not built with"
-            )
+        if not feature.is_available(caps.modules, caps.version_tuple):
+            problems.append(f"{feature.label} {feature.unavailable_reason(caps.modules, caps.version_tuple)}")
             continue
 
         error = validate_value(feature, value)
@@ -493,10 +496,97 @@ def _validate_settings(raw, context: str) -> dict:
 
         cleaned[key] = value
 
+    problems.extend(_cross_check(cleaned))
+
     if problems:
         raise HTTPException(status_code=400, detail="; ".join(problems[:8]))
 
     return cleaned
+
+
+def _parse_size(value) -> int:
+    """Turn an nginx size like 16k or 1m into bytes.  None if it is not one."""
+    import re as _re
+
+    m = _re.fullmatch(r"(\d+)([kKmMgG]?)", str(value).strip())
+    if not m:
+        return None
+    n = int(m.group(1))
+    return n * {"": 1, "k": 1024, "m": 1024 ** 2, "g": 1024 ** 3}[m.group(2).lower()]
+
+
+def _cross_check(settings: dict) -> list:
+    """
+    Settings that are each fine alone and wrong together.
+
+    Checking values one at a time is not enough, because nginx has rules about
+    how some of them relate.  The proxy buffer one below is the worst of them:
+    it is easy to hit, and the error nginx gives is
+
+      "proxy_busy_buffers_size" must be less than the size of all
+      "proxy_buffers" minus one buffer
+
+    which mentions a directive you never set, and does not say what to do.
+    Catching it here with an explanation beats letting somebody meet that.
+    """
+    problems = []
+
+    buffer_size = settings.get("proxy_buffer_size")
+    buffers = settings.get("proxy_buffers")
+
+    if buffer_size and buffers:
+        import re as _re
+
+        m = _re.fullmatch(r"(\d+)\s+(\S+)", str(buffers).strip())
+        head = _parse_size(buffer_size)
+        if m and head:
+            count = int(m.group(1))
+            one = _parse_size(m.group(2))
+            if one and count:
+                total = count * one
+                # nginx works out proxy_busy_buffers_size for you when you do
+                # not set it, as twice the bigger of the header buffer and one
+                # body buffer.  That figure then has to fit inside everything
+                # except one buffer.
+                busy = 2 * max(head, one)
+                if busy > total - one:
+                    need = busy + one
+                    problems.append(
+                        f"the proxy buffer sizes do not fit together.  With a header "
+                        f"buffer of {buffer_size} and buffers of {buffers}, nginx works "
+                        f"out an internal limit of {busy // 1024}k which has to fit in "
+                        f"{(total - one) // 1024}k, and it does not.  Either raise the "
+                        f"buffers to about {need // 1024}k in total, for example "
+                        f"\"{max(count, (need // one) + 1)} {m.group(2)}\", or lower the "
+                        f"header buffer"
+                    )
+
+    # Caching a page for a logged in user and handing it to somebody else is a
+    # real data leak, and it is an easy one to set up by accident.
+    if settings.get("proxy_cache_zone"):
+        bypass = settings.get("proxy_cache_bypass") or []
+        no_cache = settings.get("proxy_no_cache") or []
+        if bypass and not no_cache:
+            problems.append(
+                "caching is set to skip the cache for some requests but not to stop "
+                "storing them.  That means a logged in user gets a fresh page and "
+                "their copy still lands in the cache for the next visitor.  Set "
+                "\"never store when\" to the same list as \"skip the cache when\""
+            )
+
+    # * with credentials is refused by browsers, and working around the refusal
+    # opens the API to every site on the internet.
+    if settings.get("cors_allow_credentials"):
+        origins = settings.get("cors_allow_origin") or []
+        if "*" in origins:
+            problems.append(
+                "CORS is set to allow credentials with an origin of *.  Browsers "
+                "refuse that combination on purpose, because it would let any site "
+                "make authenticated calls as your logged in users.  List the real "
+                "origins instead"
+            )
+
+    return problems
 
 
 def _host_summary(h):

@@ -45,12 +45,31 @@ from app.models import Certificate, Node, NodeState, utcnow
 
 log = logging.getLogger("nfm.acme")
 
-# Public DNS servers we use to look a domain up.  Deliberately not the box's own
-# resolver.  An internal resolver very often has a split horizon answer that
-# points at a private address, and that is not what Lets Encrypt will see.  We
-# need the public answer, because that is the one that decides which node gets
-# the challenge.
-PUBLIC_RESOLVERS = ["1.1.1.1", "8.8.8.8", "9.9.9.9"]
+# Where to look a domain up, when nobody has said otherwise.
+#
+# Public resolvers on purpose, not the box's own.  An internal resolver very
+# often has a split horizon answer pointing at a private address, and that is
+# not what the certificate authority will see.  We want the public answer,
+# because that is the one that decides which node can answer the challenge.
+#
+# This is only the default.  Plenty of places cannot reach these at all, or run
+# their own resolvers they would rather use, so it is a setting.  See
+# dns_resolvers on the settings page.
+DEFAULT_RESOLVERS = ["1.1.1.1", "8.8.8.8", "9.9.9.9"]
+
+
+def configured_resolvers() -> list:
+    """
+    Which DNS servers to ask.
+
+    Falls back to the public ones when nothing is set, which is right for a box
+    on the internet and wrong for one that is not, hence the setting.
+    """
+    from app.core import settings_store
+
+    chosen = settings_store.get("dns_resolvers") or []
+    chosen = [r.strip() for r in chosen if r and r.strip()]
+    return chosen or DEFAULT_RESOLVERS
 
 DNS_TIMEOUT = 8
 
@@ -77,7 +96,21 @@ async def resolve_domain(domain: str) -> dict:
     found_v6 = set()
     errors = []
 
-    for server in PUBLIC_RESOLVERS:
+    resolvers = list(configured_resolvers())
+
+    # Optionally ask this box's own resolver too.  Useful on a split horizon
+    # network where the internal answer is the one that matters, and harmless
+    # elsewhere because we merge the answers rather than trusting one.
+    from app.core import settings_store
+
+    if settings_store.get("dns_use_system_resolver"):
+        try:
+            system = dns.resolver.Resolver()
+            resolvers.extend(str(ns) for ns in system.nameservers)
+        except Exception:
+            pass
+
+    for server in resolvers:
         resolver = dns.asyncresolver.Resolver(configure=False)
         resolver.nameservers = [server]
         resolver.timeout = DNS_TIMEOUT

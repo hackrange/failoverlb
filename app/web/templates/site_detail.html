@@ -464,8 +464,8 @@ document.addEventListener("DOMContentLoaded", function () {
            '<label for="' + id + '">' + NFM.escapeHtml(f.label) + help(f) + "</label>" +
            input +
            (f.directive ? '<div class="hint mono">' + NFM.escapeHtml(f.directive) + "</div>" : "") +
-           (f.available ? "" : '<div class="hint" style="color:var(--bad)">needs the ' +
-              NFM.escapeHtml(f.module) + " module, which this nginx was not built with</div>") +
+           (f.available ? "" : '<div class="hint" style="color:var(--bad)">' +
+              NFM.escapeHtml(f.unavailable_reason || "not available on this build") + "</div>") +
            "</div>";
   }
 

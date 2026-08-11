@@ -162,6 +162,16 @@ class Capabilities:
         self.configure_args = parsed["configure_args"]
         self.raw = build_info
 
+    @property
+    def version_tuple(self) -> tuple:
+        """The nginx version as numbers, for comparing against a minimum."""
+        if not self.nginx_version:
+            return None
+        try:
+            return tuple(int(p) for p in str(self.nginx_version).split(".")[:3])
+        except (ValueError, AttributeError):
+            return None
+
     def has(self, module: str) -> bool:
         if module in ("core", "", None):
             return True
@@ -257,6 +267,24 @@ def fleet_capabilities() -> Capabilities:
     merged.has_mail = "mail" in common
     merged.has_http3 = "http_v3_module" in common
     merged.configure_args = _local_caps.configure_args
+
+    # The oldest nginx in the fleet is what decides which directives can be
+    # used, for the same reason as the module set: the config is identical
+    # everywhere, so it has to work on the oldest box you have.
+    versions = []
+    with session_scope() as session:
+        for n in session.query(Node).all():
+            if not n.nginx_version:
+                continue
+            try:
+                versions.append(tuple(int(p) for p in str(n.nginx_version).split(".")[:3]))
+            except ValueError:
+                continue
+
+    if versions:
+        oldest = min(versions)
+        merged.nginx_version = ".".join(str(p) for p in oldest)
+
     return merged
 
 

@@ -83,6 +83,38 @@
 
 <div class="card">
   <div class="card-head">
+    <h2>DNS</h2>
+    <button class="help-btn" data-help-static="h-dns"
+            data-help-title="DNS servers for domain checks" data-help-wide
+            aria-label="Help">?</button>
+  </div>
+  <div class="card-body">
+    <div class="field">
+      <label for="dns_resolvers">DNS servers to ask</label>
+      <textarea id="dns_resolvers" name="dns_resolvers" rows="3"
+                placeholder="1.1.1.1&#10;8.8.8.8&#10;9.9.9.9">{{ values.dns_resolvers.value|join('
+') if values.dns_resolvers.value else '' }}</textarea>
+      <div class="hint">
+        One per line.  Leave it empty to use 1.1.1.1, 8.8.8.8 and 9.9.9.9.
+        These decide which node gets to ask for a certificate, so they should
+        see the same answer the certificate authority will.
+      </div>
+    </div>
+    <div class="checkline">
+      <input type="checkbox" id="dns_use_system_resolver" name="dns_use_system_resolver"
+             value="true" {{ 'checked' if values.dns_use_system_resolver.value }}>
+      <label for="dns_use_system_resolver">Ask this box's own resolver as well</label>
+    </div>
+    <div class="hint" style="margin:-4px 0 0 23px">
+      Worth having on a split horizon network, where the internal answer is the
+      one that matters.  Answers from every server are merged, so a resolver
+      that disagrees adds a possibility rather than overriding anything.
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head">
     <h2>Management networks</h2>
     <button class="help-btn" data-help-static="h-mgmt"
             data-help-title="Management networks" data-help-wide
@@ -206,6 +238,41 @@ it working there, then turn this off and do it for real.</p>
     <h4>Switching to real certificates</h4>
     <p>Turn this off and issue again.  The staging certificate gets replaced.
        Nothing else needs changing.</p>
+  </div>
+</div>
+
+<div hidden id="h-dns">
+  <div class="help-section">
+    <p>Which DNS servers the manager asks when it needs to know where a domain
+       points.</p>
+  </div>
+  <div class="help-section">
+    <h4>What this decides</h4>
+    <p>Before asking for a certificate, the manager looks the domain up and
+       compares the answer against what each node reports its own public address
+       to be.  Whichever node matches is the one that runs certbot, because it
+       is the only one the certificate authority will actually reach.
+
+Ask the wrong resolver and you get the wrong answer, and the job goes to a node
+that cannot possibly answer the challenge.</p>
+  </div>
+  <div class="help-section">
+    <h4>Why the default is public resolvers</h4>
+    <p>An internal resolver very often has a split horizon answer, pointing at a
+       private address for a name that is public.  That is useful for your own
+       traffic and actively wrong here, because the certificate authority is out
+       on the internet and will see the public answer.
+
+If your boxes cannot reach 1.1.1.1 and friends, put your own resolvers here.
+Just make sure they give the public answer for names you want certificates for.</p>
+  </div>
+  <div class="help-section">
+    <h4>Not the same as nginx's resolver</h4>
+    <p>This is the manager deciding which node should ask for a certificate.
+       nginx has its own separate resolver setting, for looking up backend
+       hostnames while it is running, and that is per site under Advanced.
+
+They are unrelated and you may well want different values in each.</p>
   </div>
 </div>
 

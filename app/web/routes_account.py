@@ -615,6 +615,8 @@ async def save_settings(request: Request, db: DBSession = Depends(get_db),
                         acme_staging: str = Form(None),
                         acme_renew_days_before: str = Form("30"),
                         management_networks: str = Form(""),
+                        dns_resolvers: str = Form(""),
+                        dns_use_system_resolver: str = Form(None),
                         health_check_interval: str = Form("10")):
     await check_csrf(request)
     user = require_page_user(request, db)
@@ -669,12 +671,28 @@ async def save_settings(request: Request, db: DBSession = Depends(get_db),
             status_code=303,
         )
 
+    resolvers = []
+    for line in dns_resolvers.replace(",", "\n").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ipaddress.ip_address(line)
+        except ValueError:
+            return RedirectResponse(
+                _p(f"/settings?error={quote(f'{line} is not an IP address.  DNS servers are addresses, not names.')}"),
+                status_code=303,
+            )
+        resolvers.append(line)
+
     before = settings_store.all_visible()
 
     settings_store.set("acme_email", email, user.username)
     settings_store.set("acme_staging", bool(acme_staging), user.username)
     settings_store.set("acme_renew_days_before", days, user.username)
     settings_store.set("management_networks", networks, user.username)
+    settings_store.set("dns_resolvers", resolvers, user.username)
+    settings_store.set("dns_use_system_resolver", bool(dns_use_system_resolver), user.username)
     settings_store.set("health_check_interval", interval, user.username)
 
     audit.record("settings.update", user=user, source_ip=client_ip(request),

@@ -203,6 +203,7 @@ register(
 
     Feature(
         key="keepalive_requests",
+        min_version=(1, 15, 3),
         label="Requests per connection",
         category="limits",
         directive="keepalive_requests",
@@ -234,6 +235,7 @@ register(
         contexts=("server",),
         type="string",
         default="4 8k",
+        multi_arg=True,
         advanced=True,
         placeholder="4 8k",
         help=HelpText(
@@ -667,6 +669,7 @@ register(
         contexts=("server", "location"),
         type="string",
         default="8 4k",
+        multi_arg=True,
         advanced=True,
         depends_on="proxy_buffering",
         help=HelpText(
@@ -1167,6 +1170,7 @@ register(
 
     Feature(
         key="proxy_cache_background_update",
+        min_version=(1, 11, 10),
         label="Refresh stale entries in the background",
         category="cache",
         directive="proxy_cache_background_update",
@@ -2169,6 +2173,7 @@ register(
 
     Feature(
         key="ssl_post_quantum",
+        min_version=(1, 19, 4),
         label="Post-quantum key exchange",
         category="tls",
         directive="ssl_conf_command",
@@ -2421,6 +2426,7 @@ register(
         contexts=("location",),
         type="string",
         default="",
+        multi_arg=True,
         placeholder="$uri $uri/ /index.html",
         help=HelpText(
             summary="Try each of these in order and serve the first one that exists.",
@@ -2794,8 +2800,13 @@ register(
         contexts=("server",),
         type="string",
         default="",
+        multi_arg=True,
         placeholder="1.1.1.1 8.8.8.8 valid=300s",
-        advanced=True,
+        # Not filed under advanced.  It looks like an obscure setting and it is
+        # not: without it nginx resolves a backend hostname once at startup and
+        # then never again, so a backend whose address moves silently stops
+        # working until somebody reloads.  People should be able to find this.
+        advanced=False,
         help=HelpText(
             summary="Which DNS servers nginx uses when it has to look something up at runtime.",
             detail=(

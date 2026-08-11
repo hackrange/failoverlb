@@ -98,6 +98,23 @@ class Feature:
     # Which module has to be compiled in.  "core" means it is always there.
     module: str = "core"
 
+    # The nginx version this directive first appeared in, as a tuple.
+    #
+    # Offering a directive an older nginx has never heard of gets you
+    # "unknown directive", and the whole config fails to load.  The two phase
+    # apply catches that before anything goes live, so nothing breaks, but you
+    # are left with a change that will not go out and an error that does not
+    # say which setting caused it.
+    #
+    # None means it has been there long enough that nobody is running an nginx
+    # without it.
+    min_version: tuple = None
+
+    # The version where this stopped being the right way to write it.  Usually
+    # it still works and logs a warning on every start, which is its own kind
+    # of annoying.
+    deprecated_version: tuple = None
+
     # oss or plus.  Anything marked plus never renders a control.
     edition: str = "oss"
 
@@ -114,6 +131,16 @@ class Feature:
     min_value: Optional[int] = None
     max_value: Optional[int] = None
 
+    # This directive takes several space separated arguments rather than one
+    # value.  large_client_header_buffers wants "4 8k", proxy_buffers wants
+    # "8 4k", try_files wants a list of paths.
+    #
+    # It matters because the renderer quotes anything with a space in it, which
+    # is right for a header value and completely wrong here: nginx sees
+    # large_client_header_buffers "4 8k" as one argument and refuses to start
+    # with "invalid number of arguments".
+    multi_arg: bool = False
+
     # Hidden behind the "show advanced" toggle so the normal page stays short.
     advanced: bool = False
 
@@ -129,13 +156,39 @@ class Feature:
             return " ".join(str(v) for v in value)
         return str(value)
 
-    def is_available(self, modules: set) -> bool:
-        """Can this box actually do it."""
+    def is_available(self, modules: set, version: tuple = None) -> bool:
+        """
+        Can the fleet actually do this.
+
+        Both halves matter.  A module has to be compiled in, and the nginx has
+        to be new enough to know the directive.  Either one missing means the
+        config will not load.
+        """
         if self.edition != "oss":
             return False
-        if self.module == "core":
-            return True
-        return self.module in modules
+        if self.module != "core" and self.module not in modules:
+            return False
+        if self.min_version and version and version < self.min_version:
+            return False
+        return True
+
+    def unavailable_reason(self, modules: set, version: tuple = None) -> str:
+        """Why not, in words somebody can act on."""
+        if self.edition != "oss":
+            return "only in the paid nginx"
+        if self.module != "core" and self.module not in modules:
+            return (
+                f"needs the {self.module} module, which is not compiled into every "
+                f"node's nginx"
+            )
+        if self.min_version and version and version < self.min_version:
+            want = ".".join(str(p) for p in self.min_version)
+            have = ".".join(str(p) for p in version) if version else "unknown"
+            return (
+                f"needs nginx {want} or newer, and the oldest node in the fleet is "
+                f"running {have}"
+            )
+        return ""
 
 
 # ==============================================================================
@@ -163,7 +216,8 @@ def all_features() -> dict:
     return dict(_REGISTRY)
 
 
-def features_for_context(context: str, modules: set = None, include_plus: bool = False):
+def features_for_context(context: str, modules: set = None, include_plus: bool = False,
+                         version: tuple = None):
     """
     Every feature you can set in this context.
 
@@ -177,7 +231,7 @@ def features_for_context(context: str, modules: set = None, include_plus: bool =
             continue
         if f.edition != "oss" and not include_plus:
             continue
-        if modules is not None and not f.is_available(modules) and f.edition == "oss":
+        if modules is not None and not f.is_available(modules, version) and f.edition == "oss":
             continue
         out.append(f)
     return out
@@ -291,6 +345,19 @@ def validate_value(feature: Feature, value) -> Optional[str]:
             return f"does not match the expected format: {feature.pattern}"
         if t == "string" and not SAFE_TEXT_RE.match(str(value)):
             return "has characters in it we will not put in a config file"
+
+        # For a multi argument directive, check each piece on its own.  The
+        # whole string goes into the config unquoted, so every token has to be
+        # something we are happy to write there.
+        if feature.multi_arg:
+            tokens = str(value).split()
+            if not tokens:
+                return "needs at least one value"
+            if len(tokens) > 16:
+                return "that is far more arguments than any of these directives take"
+            for token in tokens:
+                if not SAFE_TEXT_RE.match(token):
+                    return f"{token!r} has characters we will not put in a config file"
         return None
 
     if feature.validator:

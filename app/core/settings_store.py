@@ -69,6 +69,16 @@ EDITABLE = {
         "env": None,
         "label": "CA certificate for that ACME server",
     },
+    "dns_resolvers": {
+        "type": "list",
+        "env": None,
+        "label": "DNS servers for domain checks",
+    },
+    "dns_use_system_resolver": {
+        "type": "bool",
+        "env": None,
+        "label": "Use this box's own resolver as well",
+    },
     "management_networks": {
         "type": "list",
         "env": None,
