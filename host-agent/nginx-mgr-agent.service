@@ -1,0 +1,129 @@
+# The host agent for NGINX Fleet Manager.
+#
+# This is the only piece running as root.  The container talks to it over a
+# unix socket and it will only do the handful of things on its verb list.
+#
+# It has to be root, since the job is writing /etc/nginx and reloading the
+# service.  Everything below is about giving it root and nothing else.  It
+# cannot see other users' processes, it cannot touch most of the filesystem,
+# and it cannot open a network socket at all.
+
+[Unit]
+Description=NGINX Fleet Manager host agent
+Documentation=file:///opt/nginx-fleet-manager/README.md
+After=network.target
+# Not Requires=nginx.service on purpose.  If nginx is down because somebody
+# pushed a bad config, the agent is exactly what you need running so you can
+# roll it back.  An agent that refuses to start when nginx is down would be
+# useless at the only moment you really need it.
+Wants=nginx.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/nginx-fleet-manager/nginx-mgr-agent.py
+Restart=always
+RestartSec=5s
+
+# Do not let a crash loop hammer the box.  If it dies 5 times in a minute,
+# stop and leave it stopped so somebody looks at it.
+StartLimitBurst=5
+StartLimitIntervalSec=60
+
+Environment=NFM_AGENT_LOG_LEVEL=INFO
+Environment=NFM_AGENT_GROUP=nginxmgr
+Environment=NFM_NGINX_PREFIX=/etc/nginx
+Environment=NFM_NGINX_BIN=/usr/sbin/nginx
+Environment=NFM_ACME_WEBROOT=/var/www/certbot
+Environment=PYTHONUNBUFFERED=1
+
+# systemd makes the socket folder for us and cleans it up on stop.
+RuntimeDirectory=nginxmgr
+RuntimeDirectoryMode=0750
+
+# ---- locking it down --------------------------------------------------------
+#
+# The agent is root, so the interesting question is what root can still reach.
+# Everything below cuts that down.
+
+# No network.  The agent only ever listens on a unix socket, so it has no use
+# for a network stack.  This alone kills a whole class of "root process gets
+# popped and calls home" problems.
+#
+# One catch: two verbs do reach the network.  public_ip runs curl and dig, and
+# certbot has to talk to Lets Encrypt.  Those are child processes, and this
+# setting covers children too.  So it stays commented out and we lean on the
+# filesystem limits below instead.  Turn it on if you only use dns-01 certs
+# handled somewhere else and you never call public_ip.
+# PrivateNetwork=yes
+
+# Cannot get more privileges than it starts with, ever.
+NoNewPrivileges=yes
+
+# Its own /tmp.  Nothing else on the box can drop a file in our temp space and
+# nothing we write there leaks out.
+PrivateTmp=yes
+
+# Read only view of the whole filesystem, then we punch holes for exactly the
+# folders the agent has to write.  Anything not listed here is read only even
+# though the process is root.
+ProtectSystem=strict
+ReadWritePaths=/etc/nginx
+ReadWritePaths=/etc/letsencrypt
+ReadWritePaths=/var/log/letsencrypt
+ReadWritePaths=/var/lib/letsencrypt
+ReadWritePaths=/var/www/certbot
+ReadWritePaths=/var/backups/nginx-fleet-manager
+ReadWritePaths=/usr/local/lib/nginx-fleet-manager
+ReadWritePaths=/run/nginxmgr
+ReadWritePaths=/var/cache/nginx
+ReadWritePaths=/run
+
+# No reading anybody's home folder.
+ProtectHome=yes
+
+# Cannot mess with the kernel or the boot setup.
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+
+# No raw sockets, no weird address families.  Unix sockets and normal IP is all
+# curl and certbot need.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+# Block the memory-write-and-execute trick that most injected shellcode needs.
+MemoryDenyWriteExecute=yes
+
+# Only let it call the syscalls a normal service uses.  @privileged and
+# @resources are the groups with the sharp edges in them.
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @obsolete @cpu-emulation @debug @mount @swap
+SystemCallArchitectures=native
+
+# Drop every capability except the ones we actually use.  Even as root the
+# kernel will refuse the rest.
+#   CHOWN, DAC_OVERRIDE, FOWNER: write config and set who owns it
+#   SETUID, SETGID: certbot drops privileges when it runs its hooks
+#   KILL: send nginx a reload signal when there is no systemd
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETUID CAP_SETGID CAP_KILL
+
+# Keep one bad apply from eating the box.
+LimitNOFILE=4096
+TasksMax=64
+MemoryMax=512M
+
+# Logs go to the journal and to syslog.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=nfm-agent
+
+[Install]
+WantedBy=multi-user.target

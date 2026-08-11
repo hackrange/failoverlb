@@ -1,0 +1,109 @@
+# ==============================================================================
+# Secrets.  Nothing in here should ever reach the repo.
+# ==============================================================================
+
+# Real settings files.  .env.example is the one that gets committed, and it has
+# placeholders in it, not real values.
+.env
+.env.*
+!.env.example
+
+# Keys and certs.  The cluster CA, node key pairs, anything certbot made.
+*.pem
+*.key
+*.crt
+*.csr
+*.p12
+*.pfx
+*.jks
+secrets/
+certs/
+ca/
+
+# Join tokens.  These let a box into the cluster, so treat them like passwords.
+*.join-token
+join-token*
+
+# ==============================================================================
+# Runtime data
+# ==============================================================================
+
+# The database and everything that lives beside it
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# Config we generated, and the backups the agent keeps
+generated/
+staging/
+backups/
+*.tar.gz
+
+# Logs
+*.log
+logs/
+
+# ==============================================================================
+# Python
+# ==============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+.python-version
+
+# Test and lint leftovers
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+
+# ==============================================================================
+# Editors and operating systems
+# ==============================================================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+*.bak
+*.orig
+*.rej
+
+# ==============================================================================
+# Docker
+# ==============================================================================
+docker-compose.override.yml

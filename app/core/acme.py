@@ -1,0 +1,653 @@
+"""
+Certificates.
+
+This is the part that solves the problem that makes clustered nginx annoying.
+
+Lets Encrypt proves you own a domain by connecting to whatever address that
+domain points at.  In a two node setup only one of those boxes is on the end of
+that address at any given moment.  Run certbot on the other one and the
+challenge fails, every single time, and the failure looks like a DNS problem
+even though DNS is fine.
+
+Worse, the node holding that address is not fixed.  Failover moves it.  A cert
+issued from lb-01 three months ago may need to renew from lb-02 today.  So we
+work out who owns the address at renewal time, every time, and never assume the
+node that got it last time can get it again.
+
+Two things make this reliable:
+
+  Pick the issuer fresh.  Look up the domain, ask each node what its public
+  address is, and give the job to whichever node matches.
+
+  Answer from everywhere.  When certbot asks for a token, we push it to every
+  node before telling Lets Encrypt to go look.  Round robin DNS, an address
+  that just moved, a stale cache, none of it matters if every box can answer.
+
+Once a cert is issued it gets copied to every node, because they all have to
+serve it.
+"""
+
+import asyncio
+import json
+import logging
+import re
+from datetime import datetime, timezone
+
+import dns.asyncresolver
+import dns.resolver
+
+from app.config import get_settings
+from app.core.agent_client import AgentError, get_agent
+from app.core.cluster import NodeUnreachable, PeerClient, get_cluster
+from app.core.crypto import decrypt, parse_certificate
+from app.db import session_scope
+from app.models import Certificate, Node, NodeState, utcnow
+
+log = logging.getLogger("nfm.acme")
+
+# Public DNS servers we use to look a domain up.  Deliberately not the box's own
+# resolver.  An internal resolver very often has a split horizon answer that
+# points at a private address, and that is not what Lets Encrypt will see.  We
+# need the public answer, because that is the one that decides which node gets
+# the challenge.
+PUBLIC_RESOLVERS = ["1.1.1.1", "8.8.8.8", "9.9.9.9"]
+
+DNS_TIMEOUT = 8
+
+
+class AcmeError(Exception):
+    pass
+
+
+# ==============================================================================
+# Working out who should get the cert
+# ==============================================================================
+
+async def resolve_domain(domain: str) -> dict:
+    """
+    Look a domain up the way Lets Encrypt will.
+
+    We ask more than one public resolver and merge the answers.  DNS changes
+    take time to spread, so during a failover different resolvers legitimately
+    give different answers for a while.  Taking the union means we consider
+    every node that any resolver currently points at, which is the safe way
+    round.
+    """
+    found_v4 = set()
+    found_v6 = set()
+    errors = []
+
+    for server in PUBLIC_RESOLVERS:
+        resolver = dns.asyncresolver.Resolver(configure=False)
+        resolver.nameservers = [server]
+        resolver.timeout = DNS_TIMEOUT
+        resolver.lifetime = DNS_TIMEOUT
+
+        for rdtype, bucket in (("A", found_v4), ("AAAA", found_v6)):
+            try:
+                answer = await resolver.resolve(domain, rdtype)
+                for record in answer:
+                    bucket.add(str(record))
+            except dns.resolver.NoAnswer:
+                continue
+            except dns.resolver.NXDOMAIN:
+                errors.append(f"{server} says {domain} does not exist")
+                break
+            except Exception as exc:
+                errors.append(f"{server}: {type(exc).__name__}")
+
+    return {
+        "domain": domain,
+        "a": sorted(found_v4),
+        "aaaa": sorted(found_v6),
+        "all": sorted(found_v4 | found_v6),
+        "errors": errors,
+        "resolved": bool(found_v4 or found_v6),
+    }
+
+
+async def pick_issuing_node(domain: str) -> dict:
+    """
+    Decide which node should ask for this cert.
+
+    In order of preference:
+
+      1. A node whose detected public address is one the domain resolves to.
+         This is the right answer and it is the one that will actually work.
+      2. A node that has that address on one of its own interfaces.  Covers a
+         floating VIP, where the address is on the box but its outbound path
+         goes somewhere else.
+      3. The active node, as a last resort, with a warning.  Better to try and
+         get a clear error than to refuse and do nothing.
+    """
+    dns_result = await resolve_domain(domain)
+
+    with session_scope() as session:
+        nodes = session.query(Node).all()
+        online = [n for n in nodes if n.state == NodeState.ONLINE or n.is_self]
+
+        if not dns_result["resolved"]:
+            active = next((n for n in online if n.role.value == "active"), None)
+            return {
+                "node": active.name if active else None,
+                "reason": "dns_failed",
+                "confidence": "none",
+                "dns": dns_result,
+                "warning": (
+                    f"{domain} does not resolve at all right now.  Check the DNS "
+                    f"record exists and has spread before trying again."
+                ),
+            }
+
+        wanted = set(dns_result["all"])
+
+        # Best case, a node's public address is one the domain points at.
+        for node in online:
+            if node.public_ip and node.public_ip in wanted:
+                return {
+                    "node": node.name,
+                    "reason": "public_ip_match",
+                    "confidence": "high",
+                    "matched_ip": node.public_ip,
+                    "dns": dns_result,
+                }
+
+        # Next, the address is sitting on one of its interfaces.  This is the
+        # floating VIP case, where the box holds the address but its own traffic
+        # goes out through something else, so its detected public address does
+        # not match even though it is the right box.
+        for node in online:
+            local = {a.get("address") for a in node.local_address_list()}
+            overlap = local & wanted
+            if overlap:
+                return {
+                    "node": node.name,
+                    "reason": "local_interface_match",
+                    "confidence": "high",
+                    "matched_ip": sorted(overlap)[0],
+                    "dns": dns_result,
+                }
+
+        # Nothing matched.  Usually means the domain points at something in
+        # front, like a cloud load balancer or a CDN, and the challenge will
+        # never reach any of these boxes over http.
+        active = next((n for n in online if n.role.value == "active"), None)
+        return {
+            "node": active.name if active else (online[0].name if online else None),
+            "reason": "no_match",
+            "confidence": "low",
+            "dns": dns_result,
+            "warning": (
+                f"{domain} points at {', '.join(dns_result['all'])}, and none of "
+                f"your nodes report that address.  If there is a load balancer or "
+                f"a CDN in front, an http-01 challenge cannot work.  Use dns-01 "
+                f"for this one."
+            ),
+        }
+
+
+# ==============================================================================
+# Answering the challenge on every node
+# ==============================================================================
+
+class ChallengeCoordinator:
+    """
+    Puts the challenge token on every node, not just the one asking.
+
+    This is what makes issuance reliable rather than lucky.  Lets Encrypt picks
+    which address to connect to and does not tell us in advance.  With round
+    robin DNS, or an address that just moved, or a resolver holding a stale
+    answer, the request can easily land on a node that is not the one running
+    certbot.  If only that node had the file, the challenge fails and the error
+    tells you nothing useful.
+
+    Put the token everywhere and it does not matter which one they hit.
+    """
+
+    def __init__(self):
+        self.cluster = get_cluster()
+        self.settings = get_settings()
+
+    async def publish(self, token: str, key_auth: str) -> dict:
+        results = {"ok": [], "failed": []}
+
+        try:
+            await get_agent().acme_token_write(token=token, value=key_auth)
+            results["ok"].append(self.settings.node_name)
+        except AgentError as exc:
+            results["failed"].append({"node": self.settings.node_name, "error": str(exc)})
+
+        with session_scope() as session:
+            peers = [
+                {"id": p.id, "name": p.name}
+                for p in self.cluster.peers(session)
+                if p.state == NodeState.ONLINE
+            ]
+
+        for info in peers:
+            try:
+                with session_scope() as session:
+                    node = session.query(Node).filter(Node.id == info["id"]).first()
+                    if not node:
+                        continue
+                    client = PeerClient(node, self.cluster.ca)
+                await client.call(
+                    "/peer/acme/token",
+                    {"action": "write", "token": token, "value": key_auth},
+                )
+                results["ok"].append(info["name"])
+            except Exception as exc:
+                # One node failing is not fatal.  As long as the node the
+                # validation server actually hits has the file, it works.
+                log.warning("could not put the token on %s: %s", info["name"], exc)
+                results["failed"].append({"node": info["name"], "error": str(exc)})
+
+        log.info("challenge token is on %s of %s nodes",
+                 len(results["ok"]), len(results["ok"]) + len(results["failed"]))
+        return results
+
+    async def cleanup(self, token: str):
+        try:
+            await get_agent().acme_token_delete(token=token)
+        except AgentError:
+            pass
+
+        with session_scope() as session:
+            peers = [
+                {"id": p.id, "name": p.name}
+                for p in self.cluster.peers(session)
+                if p.state == NodeState.ONLINE
+            ]
+
+        for info in peers:
+            try:
+                with session_scope() as session:
+                    node = session.query(Node).filter(Node.id == info["id"]).first()
+                    if not node:
+                        continue
+                    client = PeerClient(node, self.cluster.ca)
+                await client.call("/peer/acme/token", {"action": "delete", "token": token})
+            except Exception:
+                # A leftover token file is harmless.  It is a random name in a
+                # folder that only serves challenge files.
+                pass
+
+
+# ==============================================================================
+# The certificate manager
+# ==============================================================================
+
+class CertificateManager:
+    def __init__(self):
+        self.settings = get_settings()
+        self.cluster = get_cluster()
+        self.challenges = ChallengeCoordinator()
+
+    # -------------------------------------------------------------------------
+
+    async def issue(self, cert_id: int, force: bool = False, actor: str = "system") -> dict:
+        """
+        Get or renew a certificate, from whichever node can actually do it.
+
+        Every time.  Not from whoever did it last time.  That is the whole
+        point, because the node that owns the public address moves.
+        """
+        with session_scope() as session:
+            cert = session.query(Certificate).filter(Certificate.id == cert_id).first()
+            if not cert:
+                raise AcmeError("no such certificate")
+            if cert.source != "letsencrypt":
+                raise AcmeError("that certificate was uploaded, so there is nothing to renew")
+
+            domains = cert.domain_list()
+            challenge_type = cert.challenge_type
+            dns_plugin = cert.dns_plugin
+            dns_creds = decrypt(cert.dns_credentials_encrypted) if cert.dns_credentials_encrypted else None
+            key_type = cert.key_type
+            cert_name = cert.name
+            propagation = cert.dns_propagation_seconds
+
+            cert.last_renewal_attempt = utcnow()
+            session.commit()
+
+        if not domains:
+            raise AcmeError("that certificate has no domains on it")
+
+        email = self.settings.acme_email
+        if not email:
+            raise AcmeError("no ACME email is set.  Put one in Settings first.")
+
+        # ---- pick the node ---------------------------------------------------
+        if challenge_type == "dns-01":
+            # dns-01 does not need any inbound connection, so any node can do
+            # it.  Use the active one and keep it simple.
+            with session_scope() as session:
+                me = self.cluster.self_node(session)
+                issuer = self.settings.node_name if me and me.role.value == "active" else None
+            selection = {"node": issuer or self.settings.node_name,
+                         "reason": "dns01_any_node", "confidence": "high"}
+        else:
+            selection = await pick_issuing_node(domains[0])
+
+        issuing_node = selection.get("node")
+        if not issuing_node:
+            raise AcmeError("could not work out which node should ask for this cert")
+
+        log.info(
+            "issuing %s from %s (%s, confidence %s)",
+            cert_name, issuing_node, selection.get("reason"), selection.get("confidence"),
+        )
+
+        # ---- run it ----------------------------------------------------------
+        request = {
+            "domains": domains,
+            "email": email,
+            "staging": self.settings.acme_staging,
+            "challenge": challenge_type,
+            "key_type": key_type,
+            "force_renewal": force,
+        }
+        if challenge_type == "dns-01":
+            request["dns_plugin"] = dns_plugin
+            request["dns_credentials"] = dns_creds
+            request["dns_propagation"] = propagation
+        else:
+            # The hooks are what make the token land on every node.  certbot
+            # calls them, they call our local API, and that pushes the token out
+            # to the cluster before certbot tells Lets Encrypt to go and look.
+            request["auth_hook"] = "/usr/local/lib/nginx-fleet-manager/acme-auth-hook.sh"
+            request["cleanup_hook"] = "/usr/local/lib/nginx-fleet-manager/acme-cleanup-hook.sh"
+
+        try:
+            if issuing_node == self.settings.node_name:
+                result = await get_agent().certbot(**request)
+            else:
+                result = await self._issue_on_peer(issuing_node, request)
+        except (AgentError, NodeUnreachable) as exc:
+            self._record_failure(cert_id, str(exc))
+            raise AcmeError(f"the certificate request failed: {exc}")
+
+        if not result.get("ok"):
+            output = result.get("output", "")
+            self._record_failure(cert_id, output)
+            raise AcmeError(_explain_certbot_error(output))
+
+        # ---- record it and copy it around -----------------------------------
+        with session_scope() as session:
+            cert = session.query(Certificate).filter(Certificate.id == cert_id).first()
+            cert.issued_by_node = issuing_node
+            cert.issued_from_ip = selection.get("matched_ip")
+            cert.resolved_ips = json.dumps(selection.get("dns", {}).get("all", []))
+            cert.last_renewal_success = utcnow()
+            cert.last_renewal_error = None
+            cert.renewal_failures = 0
+            session.commit()
+
+        await self.refresh_metadata(cert_id, issuing_node)
+        sync = await self.replicate(cert_id)
+
+        return {
+            "ok": True,
+            "issued_by": issuing_node,
+            "selection": selection,
+            "synced_to": sync.get("ok", []),
+            "sync_failed": sync.get("failed", []),
+        }
+
+    async def _issue_on_peer(self, node_name: str, request: dict) -> dict:
+        with session_scope() as session:
+            node = session.query(Node).filter(Node.name == node_name).first()
+            if not node:
+                raise AcmeError(f"{node_name} is not on the roster")
+            client = PeerClient(node, self.cluster.ca)
+
+        # Long timeout.  Waiting on Lets Encrypt plus DNS propagation on a
+        # dns-01 challenge can genuinely take minutes.
+        return await client.call("/peer/acme/issue", request, timeout=600)
+
+    # -------------------------------------------------------------------------
+
+    async def replicate(self, cert_id: int) -> dict:
+        """
+        Copy a cert to every other node.
+
+        They all serve the same sites, so they all need the same cert.  Only one
+        of them could get it, so the rest have to be handed a copy.
+
+        The private key goes over the wire here.  That is unavoidable and it is
+        fine: the channel is mutual TLS between two nodes that already hold
+        certificates from the same private CA, and the key lands at 0600 owned
+        by root on the far side.
+        """
+        with session_scope() as session:
+            cert = session.query(Certificate).filter(Certificate.id == cert_id).first()
+            if not cert:
+                raise AcmeError("no such certificate")
+            name = cert.name
+            source_node = cert.issued_by_node
+            peers = [
+                {"id": p.id, "name": p.name}
+                for p in self.cluster.peers(session)
+            ]
+
+        # Get the files from whichever node holds them.
+        if source_node == self.settings.node_name or not source_node:
+            try:
+                export = await get_agent().cert_export(name=name)
+            except AgentError as exc:
+                raise AcmeError(f"could not read the cert files: {exc}")
+        else:
+            with session_scope() as session:
+                node = session.query(Node).filter(Node.name == source_node).first()
+                if not node:
+                    raise AcmeError(f"{source_node} is not on the roster")
+                client = PeerClient(node, self.cluster.ca)
+            export = await client.call("/peer/cert/export", {"name": name}, timeout=60)
+
+        bundle = export.get("bundle", {})
+        if "fullchain.pem" not in bundle:
+            raise AcmeError("the exported cert is missing its chain")
+
+        import hashlib
+        checksum = hashlib.sha256(bundle["fullchain.pem"].encode()).hexdigest()[:16]
+
+        results = {"ok": [], "failed": []}
+
+        # Put a copy on this node too, unless this node is where it came from,
+        # in which case certbot already owns the real files.
+        if source_node != self.settings.node_name:
+            try:
+                await get_agent().cert_import(name=name, bundle=bundle)
+                results["ok"].append(self.settings.node_name)
+            except AgentError as exc:
+                results["failed"].append({"node": self.settings.node_name, "error": str(exc)})
+
+        for info in peers:
+            if info["name"] == source_node:
+                results["ok"].append(info["name"])
+                continue
+            try:
+                with session_scope() as session:
+                    node = session.query(Node).filter(Node.id == info["id"]).first()
+                    if not node:
+                        continue
+                    client = PeerClient(node, self.cluster.ca)
+                await client.call(
+                    "/peer/cert/import", {"name": name, "bundle": bundle}, timeout=60
+                )
+                results["ok"].append(info["name"])
+            except Exception as exc:
+                log.error("could not copy %s to %s: %s", name, info["name"], exc)
+                results["failed"].append({"node": info["name"], "error": str(exc)})
+
+        with session_scope() as session:
+            cert = session.query(Certificate).filter(Certificate.id == cert_id).first()
+            if cert:
+                sync_map = {n: checksum for n in results["ok"]}
+                cert.synced_nodes = json.dumps(sync_map)
+                session.commit()
+
+        log.info("copied %s to %s of %s nodes",
+                 name, len(results["ok"]), len(results["ok"]) + len(results["failed"]))
+        return results
+
+    # -------------------------------------------------------------------------
+
+    async def refresh_metadata(self, cert_id: int, node_name: str = None) -> dict:
+        """Read the dates and names back off the real file."""
+        with session_scope() as session:
+            cert = session.query(Certificate).filter(Certificate.id == cert_id).first()
+            if not cert:
+                raise AcmeError("no such certificate")
+            name = cert.name
+            holder = node_name or cert.issued_by_node or self.settings.node_name
+
+        try:
+            if holder == self.settings.node_name:
+                export = await get_agent().cert_export(name=name)
+            else:
+                with session_scope() as session:
+                    node = session.query(Node).filter(Node.name == holder).first()
+                    if not node:
+                        return {}
+                    client = PeerClient(node, self.cluster.ca)
+                export = await client.call("/peer/cert/export", {"name": name}, timeout=60)
+        except Exception as exc:
+            log.warning("could not read the cert files for %s: %s", name, exc)
+            return {}
+
+        try:
+            info = parse_certificate(export["bundle"]["fullchain.pem"])
+        except Exception as exc:
+            log.warning("could not parse the cert for %s: %s", name, exc)
+            return {}
+
+        with session_scope() as session:
+            cert = session.query(Certificate).filter(Certificate.id == cert_id).first()
+            if cert:
+                cert.not_before = info["not_before"]
+                cert.not_after = info["not_after"]
+                cert.issuer = info["issuer"][:255]
+                cert.serial = info["serial"][:128]
+                cert.fingerprint = info["fingerprint"]
+                if info.get("domains"):
+                    cert.domains = json.dumps(info["domains"])
+                session.commit()
+
+        return info
+
+    # -------------------------------------------------------------------------
+
+    async def check_renewals(self):
+        """
+        Renew anything that is getting close to expiry.
+
+        This is the manager's own scheduler, and it replaces the certbot timer
+        on purpose.  The stock timer runs on every box, and on a node that does
+        not own the public address the renewal fails every time it fires.  You
+        end up with a mailbox full of failures from two of your three nodes and
+        the real problem buried in there somewhere.
+
+        Doing it here means the decision about which node runs certbot gets made
+        fresh each time, with current DNS.
+
+        install.sh turns certbot.timer off for exactly this reason.
+        """
+        with session_scope() as session:
+            if not self.cluster.is_active(session):
+                # Only the active node drives renewals.  Otherwise every node
+                # tries at once and they race each other into the rate limits.
+                return
+
+            due = [
+                c.id for c in session.query(Certificate).filter(
+                    Certificate.source == "letsencrypt",
+                    Certificate.auto_renew == True,  # noqa: E712
+                ).all()
+                if c.needs_renewal
+            ]
+
+        for cert_id in due:
+            try:
+                log.info("renewing certificate %s", cert_id)
+                await self.issue(cert_id)
+            except AcmeError as exc:
+                log.error("renewal of cert %s failed: %s", cert_id, exc)
+            # Space them out.  Lets Encrypt rate limits are real, and hammering
+            # them with ten renewals at once is a good way to get blocked for a
+            # week, which is much worse than these taking a couple of minutes.
+            await asyncio.sleep(5)
+
+    def _record_failure(self, cert_id: int, error: str):
+        with session_scope() as session:
+            cert = session.query(Certificate).filter(Certificate.id == cert_id).first()
+            if cert:
+                cert.last_renewal_error = error[:2000]
+                cert.renewal_failures = (cert.renewal_failures or 0) + 1
+                session.commit()
+
+
+# ==============================================================================
+# Making certbot errors readable
+# ==============================================================================
+
+def _explain_certbot_error(output: str) -> str:
+    """
+    Turn certbot's output into something you can act on.
+
+    certbot's errors are accurate and almost useless if you have not seen them
+    before.  These are the ones that actually come up, with what to do about
+    them.
+    """
+    text = (output or "").lower()
+
+    if "too many certificates" in text or "rate limit" in text:
+        return (
+            "Lets Encrypt rate limited you.  There is a cap of 5 certificates per "
+            "week for the same set of domains.  Wait it out, and use the staging "
+            "setting while you are testing so this does not happen again.\n\n"
+            + output[-1500:]
+        )
+
+    if "timeout during connect" in text or "connection refused" in text:
+        return (
+            "Lets Encrypt could not reach your server on port 80.  Check that port "
+            "80 is open from the internet, that DNS points at one of your nodes, "
+            "and that nothing in front is blocking /.well-known/acme-challenge/.\n\n"
+            "Note that port 80 has to stay open even for an https only site, "
+            "because that is where the challenge happens.\n\n"
+            + output[-1500:]
+        )
+
+    if "nxdomain" in text or "dns problem" in text:
+        return (
+            "DNS lookup failed for that domain.  Check the record exists and has "
+            "had time to spread.  A record added in the last few minutes may not "
+            "be visible to Lets Encrypt yet.\n\n"
+            + output[-1500:]
+        )
+
+    if "unauthorized" in text and "challenge" in text:
+        return (
+            "The challenge file was not served correctly.  Usually this means the "
+            "request landed on a different server than the one that wrote the "
+            "file, or something in front is redirecting /.well-known/ somewhere.\n\n"
+            "Check that the http site for this domain is not redirecting the "
+            "acme-challenge path to https.\n\n"
+            + output[-1500:]
+        )
+
+    if "invalid contact" in text or "invalid email" in text:
+        return "Lets Encrypt did not accept the contact email.  Check it in Settings."
+
+    return output[-2000:] if output else "certbot failed and said nothing useful"
+
+
+_manager = None
+
+
+def get_cert_manager() -> CertificateManager:
+    global _manager
+    if _manager is None:
+        _manager = CertificateManager()
+    return _manager
