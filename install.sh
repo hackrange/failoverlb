@@ -57,6 +57,25 @@ success() { echo "${c_grn}$*${c_reset}"; }
 fail()    { echo "${c_red}[error]${c_reset} $*" >&2; exit 1; }
 header()  { echo; echo "${c_cyn}== $* ==${c_reset}"; }
 
+# Things that went wrong but are not worth stopping over.
+#
+# Most of what this script does is independent.  The agent not starting has
+# nothing to do with whether the container will run, and the manager is built to
+# come up without it and say so.  So a problem gets written down and repeated at
+# the end with the fix next to it, rather than killing the install halfway and
+# leaving somebody with a half configured box and no GUI.
+#
+# Only a handful of things are actually fatal: not being root, not being in the
+# project folder, no docker, and the image not building.  Everything else is a
+# note.
+PROBLEMS=()
+problem() {
+    # problem "<short title>" "<what to do about it>"
+    PROBLEMS+=("$1"$'\n'"$2")
+    warn "$1"
+    while IFS= read -r line; do [[ -n "$line" ]] && info "$line"; done <<< "$2"
+}
+
 usage() {
     cat <<USAGE
 NGINX Management installer
@@ -116,15 +135,26 @@ command -v docker >/dev/null 2>&1 || \
 docker compose version >/dev/null 2>&1 || \
     fail "The docker compose plugin is missing.  Run docker_setup.sh first."
 
-[[ -d /run/systemd/system ]] || \
-    fail "No systemd here.  The agent runs as a systemd service, so this needs a normal Linux box."
-
-if [[ ! -x /usr/sbin/nginx ]]; then
-    fail "No nginx at /usr/sbin/nginx.  Build it first with nginx-installer.sh."
+HAVE_SYSTEMD=true
+if [[ ! -d /run/systemd/system ]]; then
+    HAVE_SYSTEMD=false
+    problem "No systemd on this box, so the agent cannot run as a service." \
+"The GUI will still come up and you can look around, but nothing can be
+applied to nginx until the agent is running.  Start it by hand with:
+    python3 ${AGENT_DIR}/nginx-mgr-agent.py"
 fi
 
-NGINX_VERSION="$(/usr/sbin/nginx -v 2>&1 | sed 's|.*nginx/||')"
-log "nginx ${NGINX_VERSION}"
+HAVE_NGINX=true
+if [[ ! -x /usr/sbin/nginx ]]; then
+    HAVE_NGINX=false
+    problem "No nginx at /usr/sbin/nginx." \
+"The manager manages an nginx, it does not bring its own.  Install it with:
+    sudo ./nginx-installer.sh install
+You can do that after this finishes.  The GUI comes up either way."
+else
+    NGINX_VERSION="$(/usr/sbin/nginx -v 2>&1 | sed 's|.*nginx/||')"
+    log "nginx ${NGINX_VERSION}"
+fi
 
 # The manager drives the installer script when you rebuild nginx from the GUI,
 # so it needs a copy somewhere predictable.  nginx-installer.sh ships in this
@@ -213,6 +243,11 @@ if [[ -f "$INSTALLER_PATH" ]]; then
     fi
 fi
 
+AGENT_OK=false
+
+if ! $HAVE_SYSTEMD; then
+    info "skipping the service setup, there is no systemd here"
+else
 systemctl daemon-reload
 systemctl enable nginx-mgr-agent >/dev/null 2>&1
 systemctl restart nginx-mgr-agent
@@ -220,6 +255,7 @@ systemctl restart nginx-mgr-agent
 sleep 2
 if systemctl is-active --quiet nginx-mgr-agent; then
     success "      agent is running"
+    AGENT_OK=true
 else
     echo
     systemctl status nginx-mgr-agent --no-pager -l | head -12
@@ -259,15 +295,30 @@ else
         info "    systemctl daemon-reload && systemctl restart nginx-mgr-agent"
     fi
 
-    fail "The agent will not start.  See above."
+    problem "The host agent will not start." \
+"Carrying on anyway.  The GUI comes up without it and tells you the same
+thing, you just cannot apply anything to nginx until it is fixed.  See the
+log above, then:
+    systemctl restart nginx-mgr-agent
+    journalctl -u nginx-mgr-agent -f"
+fi
 fi
 
-for _ in $(seq 1 15); do
-    [[ -S /run/nginxmgr/agent.sock ]] && break
-    sleep 1
-done
-[[ -S /run/nginxmgr/agent.sock ]] || fail "The agent started but its socket never appeared."
-log "socket is at /run/nginxmgr/agent.sock"
+if $AGENT_OK; then
+    for _ in $(seq 1 15); do
+        [[ -S /run/nginxmgr/agent.sock ]] && break
+        sleep 1
+    done
+    if [[ -S /run/nginxmgr/agent.sock ]]; then
+        log "socket is at /run/nginxmgr/agent.sock"
+    else
+        AGENT_OK=false
+        problem "The agent started but its socket never turned up." \
+"Expected /run/nginxmgr/agent.sock.  Check RuntimeDirectory in
+${AGENT_UNIT} and the agent log:
+    journalctl -u nginx-mgr-agent -n 50"
+    fi
+fi
 
 # ============================================================== .env
 header "Settings"
@@ -368,7 +419,12 @@ if [[ -n "$JOIN_TARGET" ]]; then
         sleep 6
         success "      this node is part of the cluster"
     else
-        fail "The join failed.  See above.  Tokens are single use and expire in two hours."
+        problem "Joining the cluster did not work." \
+"The node is installed and the GUI is up, it is just on its own for now.
+Tokens are single use and expire after two hours, so make a fresh one on
+the Cluster page of a node that is already running, then:
+    docker compose exec nginx-fleet-manager python -m app.join ${JOIN_TARGET} <token>
+    docker compose restart"
     fi
 fi
 
@@ -408,11 +464,28 @@ info "Peers: ${NODE_ADDRESS}:7444  (firewall this to your other nodes)"
 echo
 
 if [[ -z "$JOIN_TARGET" ]]; then
+    # Dig the first login out of the log rather than telling somebody to go and
+    # grep for it.  It is printed once and once only, so the moment it scrolls
+    # off you are into resetting the account instead.
+    ADMIN_PW="$(docker compose logs 2>/dev/null \
+        | grep -A3 'Made the first admin' | grep 'password:' \
+        | sed 's/.*password: //' | tr -d '\r' | tail -1)"
+
+    if [[ -n "$ADMIN_PW" ]]; then
+        info "First login, shown once and never again:"
+        echo
+        echo "        username: admin"
+        echo "        password: ${ADMIN_PW}"
+        echo
+        info "You have to change it and set up an authenticator on the way in."
+    else
+        info "The first login password was printed once in the log:"
+        info "    docker compose logs | grep -A3 'Made the first admin'"
+        info "If it is gone already, make a new one with:"
+        info "    docker compose exec nginx-fleet-manager python -m app.reset_admin"
+    fi
+    echo
     info "This node started a new cluster and holds its certificate authority."
-    info "The first login password was printed once in the log:"
-    info ""
-    info "  docker compose logs | grep -A3 'Made the first admin'"
-    info ""
     info "To add another node, log in, go to Cluster, and press Add a node."
 else
     info "Sign in with an account from the cluster you joined."
@@ -421,6 +494,25 @@ fi
 echo
 info "Logs:    docker compose logs -f"
 info "Agent:   journalctl -u nginx-mgr-agent -f"
+
+# ---- anything that went wrong on the way through --------------------------
+if [[ ${#PROBLEMS[@]} -gt 0 ]]; then
+    echo
+    echo "${c_ylw}== ${#PROBLEMS[@]} thing(s) to come back to ==${c_reset}"
+    echo
+    n=1
+    for p in "${PROBLEMS[@]}"; do
+        echo "  ${n}. $(head -1 <<< "$p")"
+        tail -n +2 <<< "$p" | while IFS= read -r line; do
+            [[ -n "$line" ]] && echo "     $line"
+        done
+        echo
+        n=$((n + 1))
+    done
+    info "None of these stop you logging in and looking around."
+    info "Fix them, then run this script again.  It is safe to re-run."
+fi
+
 echo
 
 }

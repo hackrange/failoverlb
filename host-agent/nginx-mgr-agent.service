@@ -119,19 +119,36 @@ LockPersonality=yes
 # boxes, and test a restart before you rely on it.
 # MemoryDenyWriteExecute=yes
 
-# Only let it call the syscalls a normal service uses.
+# Syscall filtering is off, and that is a deliberate retreat rather than an
+# oversight.
 #
-# @resources and @debug used to be in the deny list.  They came out because
-# Python trips over them at startup on some builds and the failure is a bare
-# SIGSYS, which tells you nothing about what was denied.  A hardening rule
-# nobody can debug gets deleted by whoever is on call at 3am, so it is better to
-# ship one that works.  The groups left below are the ones with the sharp edges
-# and none of them are on the agent's path.
+# It went through three rounds of "narrow the deny list and try again" on a
+# fresh Ubuntu 24.04 box and killed the agent with SIGSYS every time.  systemd
+# does not say which syscall it refused, so each round was a guess, and guessing
+# at somebody else's install is not a way to build software.
 #
-# The real limits here are CapabilityBoundingSet and ProtectSystem, further up.
-# Those do the heavy lifting.  This is one more layer, not the only one.
-SystemCallFilter=@system-service
-SystemCallFilter=~@privileged @obsolete @cpu-emulation @mount @swap
+# The honest position is that this was never tested.  The old test rig ran in
+# containers, containers have no systemd, so this unit file had never been
+# started even once before somebody tried it for real.  Shipping a setting in
+# that state is worse than not shipping it.
+#
+# If you want it back, work out what your Python actually needs first:
+#
+#   sudo systemd-run --pty --property=SystemCallFilter=@system-service \
+#        /usr/bin/python3 /opt/nginx-fleet-manager/nginx-mgr-agent.py
+#
+# then add the filter through a drop-in so an upgrade does not overwrite it:
+#
+#   /etc/systemd/system/nginx-mgr-agent.service.d/seccomp.conf
+#
+# What actually contains this process is above and below: a read only
+# filesystem, six capabilities instead of forty, no access to home folders, no
+# new privileges, and a fixed verb list with a path allow list inside the agent
+# itself.  Seccomp was one more layer on top of that, not the thing holding the
+# door shut.
+#
+# SystemCallFilter=@system-service
+# SystemCallFilter=~@privileged @obsolete @cpu-emulation @mount @swap
 SystemCallArchitectures=native
 
 # Drop every capability except the ones we actually use.  Even as root the
