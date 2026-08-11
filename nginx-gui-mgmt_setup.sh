@@ -169,7 +169,13 @@ if [[ -d "$INSTALL_DIR/.git" ]]; then
 
     # Refuse to clobber local edits.  Somebody hand patching a live box and
     # losing it to a git pull is a bad afternoon.
-    if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
+    #
+    # core.fileMode=false on purpose.  This script chmods the scripts executable
+    # further down, and git counts a changed permission bit as a modified file.
+    # So without this, running the script once was enough to make every later
+    # run refuse, complaining about a change it had made itself.  We care about
+    # content here, not permissions.
+    if [[ -n "$(git -c core.fileMode=false status --porcelain --untracked-files=no)" ]]; then
         warn "There are local changes here:"
         git status --short --untracked-files=no | sed 's/^/        /'
         fail "Commit them, stash them, or move them out of the way, then run again."

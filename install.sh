@@ -189,8 +189,18 @@ mkdir -p "$AGENT_DIR"
 install -m 0750 "$SCRIPT_DIR/host-agent/nginx-mgr-agent.py" "$AGENT_DIR/nginx-mgr-agent.py"
 log "installed the agent to ${AGENT_DIR}"
 
+# Everything the unit file lists under ReadWritePaths has to exist before the
+# agent will start.  ProtectSystem=strict makes systemd bail out with a bare
+# 226/NAMESPACE if even one of them is missing, and it does not say which.
+#
+# The letsencrypt folders normally turn up the first time certbot runs, which
+# on a new box has not happened yet.  Making them here is cheap and saves a
+# confusing failure.  The unit also marks the optional ones with a dash, so
+# this is belt and braces.
 mkdir -p /var/backups/nginx-fleet-manager /var/lib/nginx-fleet-manager \
-         /usr/local/lib/nginx-fleet-manager /var/www/certbot
+         /usr/local/lib/nginx-fleet-manager /var/www/certbot \
+         /etc/letsencrypt /var/log/letsencrypt /var/lib/letsencrypt \
+         /var/cache/nginx
 chmod 0750 /usr/local/lib/nginx-fleet-manager
 
 install -m 0644 "$SCRIPT_DIR/host-agent/nginx-mgr-agent.service" "$AGENT_UNIT"
@@ -211,7 +221,28 @@ sleep 2
 if systemctl is-active --quiet nginx-mgr-agent; then
     success "      agent is running"
 else
-    systemctl status nginx-mgr-agent --no-pager -l | head -20
+    echo
+    systemctl status nginx-mgr-agent --no-pager -l | head -12
+    echo
+    info "The last few log lines:"
+    journalctl -u nginx-mgr-agent -n 15 --no-pager 2>/dev/null | sed 's/^/        /'
+    echo
+
+    # 226/NAMESPACE means systemd could not build the sandbox, which nearly
+    # always means a folder in ReadWritePaths is missing.  The bare number tells
+    # you nothing, so spell it out and point at the likely one.
+    if systemctl show nginx-mgr-agent -p ExecMainStatus --value 2>/dev/null | grep -q '^226$'; then
+        warn "That is 226/NAMESPACE: systemd could not set up the agent's sandbox."
+        info "Nearly always a folder the unit wants to write does not exist."
+        info "Checking the ones it needs:"
+        for d in /etc/nginx /var/www/certbot /var/backups/nginx-fleet-manager \
+                 /usr/local/lib/nginx-fleet-manager; do
+            [[ -d "$d" ]] && info "    ok      $d" || warn "    MISSING $d"
+        done
+        info ""
+        info "Make any missing folder above, then: systemctl restart nginx-mgr-agent"
+    fi
+
     fail "The agent will not start.  See above."
 fi
 

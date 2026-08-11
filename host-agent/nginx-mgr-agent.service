@@ -66,16 +66,25 @@ PrivateTmp=yes
 # Read only view of the whole filesystem, then we punch holes for exactly the
 # folders the agent has to write.  Anything not listed here is read only even
 # though the process is root.
+# A leading dash means "skip this one if it is not there".  Without it, systemd
+# refuses to start the unit at all when a path is missing, and it fails with
+# 226/NAMESPACE, which tells you nothing about which path was the problem.
+#
+# The letsencrypt folders do not exist until certbot has run once, and
+# /var/cache/nginx depends on how nginx was built.  So on a box that has not
+# issued a certificate yet, the agent would not start.  Anything the agent
+# genuinely cannot work without is left undashed on purpose, so a real missing
+# folder still fails loudly instead of quietly.
 ProtectSystem=strict
 ReadWritePaths=/etc/nginx
-ReadWritePaths=/etc/letsencrypt
-ReadWritePaths=/var/log/letsencrypt
-ReadWritePaths=/var/lib/letsencrypt
+ReadWritePaths=-/etc/letsencrypt
+ReadWritePaths=-/var/log/letsencrypt
+ReadWritePaths=-/var/lib/letsencrypt
 ReadWritePaths=/var/www/certbot
 ReadWritePaths=/var/backups/nginx-fleet-manager
 ReadWritePaths=/usr/local/lib/nginx-fleet-manager
 ReadWritePaths=/run/nginxmgr
-ReadWritePaths=/var/cache/nginx
+ReadWritePaths=-/var/cache/nginx
 ReadWritePaths=/run
 
 # No reading anybody's home folder.
