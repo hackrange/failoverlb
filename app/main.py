@@ -405,6 +405,7 @@ async def lifespan(app: FastAPI):
 
 
 def create_gui_app() -> FastAPI:
+    from app.web.routes_account import router as account_router
     from app.web.routes_api import router as api_router
     from app.web.routes_pages import router as pages_router
     from app.web.security import (
@@ -441,6 +442,7 @@ def create_gui_app() -> FastAPI:
         app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
     app.include_router(pages_router)
+    app.include_router(account_router)
     app.include_router(api_router, prefix="/api")
 
     @app.get("/healthz", include_in_schema=False)

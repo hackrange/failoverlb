@@ -199,7 +199,12 @@ async def do_login(request: Request, db: DBSession = Depends(get_db),
     log.info("%s signed in from %s", result.user.username, ip)
 
     target = "/change-password" if result.user.must_change_password else "/"
-    response = RedirectResponse(target, status_code=303)
+    # _p, not the bare path.  This one held a variable rather than a literal, so
+    # an earlier sweep that prefixed every redirect walked straight past it.
+    # The result was that signing in sent you to / on whatever hostname this is
+    # served under, which when something else owns that root means you land on
+    # a completely different application and think the login failed.
+    response = RedirectResponse(_p(target), status_code=303)
     _set_session_cookie(response, token)
     issue_csrf_token(response, token)
     return response
@@ -384,7 +389,7 @@ async def do_change_password(request: Request, db: DBSession = Depends(get_db),
         from urllib.parse import quote
 
         return RedirectResponse(
-            f"/change-password?error={quote('; '.join(problems))}", status_code=303
+            _p(f"/change-password?error={quote('; '.join(problems))}"), status_code=303
         )
 
     user.password_hash = hash_password(new_password)
