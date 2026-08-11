@@ -1354,6 +1354,93 @@ async def resync(g: ObjectGuard = Depends(changing)):
 
 
 # ==============================================================================
+# Rebuilding nginx
+# ==============================================================================
+
+@router.get("/upgrade/plan")
+async def upgrade_plan(request: Request, nginx_version: str = None,
+                       openssl_version: str = None,
+                       g: ObjectGuard = Depends(guard)):
+    """What a rebuild would do, before anybody commits to forty minutes of it."""
+    g.require("upgrade_nginx")
+    from app.core.upgrade import get_upgrade_runner
+
+    return await get_upgrade_runner().plan(nginx_version, openssl_version)
+
+
+@router.get("/upgrade/status")
+async def upgrade_status(g: ObjectGuard = Depends(guard)):
+    g.require("upgrade_nginx")
+    from app.core.upgrade import get_upgrade_runner
+
+    return dict(get_upgrade_runner().state)
+
+
+@router.post("/upgrade/start")
+async def upgrade_start(request: Request, g: ObjectGuard = Depends(changing)):
+    g.require("upgrade_nginx")
+    from app.core.upgrade import UpgradeError, get_upgrade_runner
+
+    payload = await request.json() if await request.body() else {}
+
+    try:
+        result = await get_upgrade_runner().start(
+            nginx_version=(payload.get("nginx_version") or "").strip() or None,
+            openssl_version=(payload.get("openssl_version") or "").strip() or None,
+            actor=g.user.username,
+            force=bool(payload.get("force")),
+        )
+    except UpgradeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    audit.record("nginx.upgrade.requested", user=g.user, object_type="fleet",
+                 changes={"nginx": payload.get("nginx_version"),
+                          "openssl": payload.get("openssl_version")})
+    return result
+
+
+@router.post("/upgrade/revert")
+async def upgrade_revert(request: Request, g: ObjectGuard = Depends(changing)):
+    g.require("upgrade_nginx")
+    from app.core.upgrade import UpgradeError, get_upgrade_runner
+
+    payload = await request.json()
+    node = payload.get("node")
+    if not node:
+        raise HTTPException(status_code=400, detail="which node")
+
+    try:
+        return await get_upgrade_runner().revert(node)
+    except UpgradeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get("/upgrade/modules")
+async def upgrade_modules(g: ObjectGuard = Depends(guard)):
+    """
+    What each node was built with, and where they differ.
+
+    Adding a module means rebuilding, so this sits next to the upgrade page
+    rather than off on its own.
+    """
+    g.require("view")
+    from app.core.capabilities import fleet_capabilities, module_differences
+
+    caps = fleet_capabilities()
+    diff = module_differences()
+
+    return {
+        "common": sorted(caps.modules),
+        "common_count": len(caps.modules),
+        "third_party": caps.third_party,
+        "differences": diff,
+        "nginx_version": caps.nginx_version,
+        "openssl_version": caps.openssl_version,
+        "post_quantum": caps.supports_post_quantum(),
+    }
+
+
+# ==============================================================================
 # Certificates
 # ==============================================================================
 

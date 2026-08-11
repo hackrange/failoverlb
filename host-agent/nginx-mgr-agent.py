@@ -90,6 +90,17 @@ INCLUDE_MARKER = "# nginx fleet manager includes, v3.  Do not reorder."
 BACKUP_DIR = Path("/var/backups/nginx-fleet-manager")
 BACKUP_KEEP = 30
 
+# The installer script that builds nginx from source.  Rebuilding nginx is the
+# only way to add or drop a module, since they are compiled in, so upgrading
+# the version and changing the module list are the same operation.
+INSTALLER = Path(os.environ.get("NFM_INSTALLER", "/opt/nginx-installer.sh"))
+
+# Where a running build writes what it is doing.  A build takes ten to twenty
+# minutes, far longer than any sensible request timeout, so it runs detached and
+# the manager reads progress from here.
+UPGRADE_STATE = Path("/var/lib/nginx-fleet-manager/upgrade.json")
+UPGRADE_LOG = Path("/var/log/nginx-fleet-manager-upgrade.log")
+
 # How long any host command gets before we give up on it.  Certbot gets its own
 # longer budget since it waits on a remote server.
 DEFAULT_TIMEOUT = 60
@@ -1286,8 +1297,176 @@ def v_write_hook_scripts(req):
     return {"written": written}
 
 
+def _read_upgrade_state():
+    if not UPGRADE_STATE.is_file():
+        return {"state": "idle"}
+    try:
+        return json.loads(UPGRADE_STATE.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {"state": "unknown"}
+
+
+def _write_upgrade_state(**fields):
+    UPGRADE_STATE.parent.mkdir(parents=True, exist_ok=True)
+    current = _read_upgrade_state()
+    current.update(fields)
+    current["updated"] = datetime.now(timezone.utc).isoformat()
+    atomic_write(UPGRADE_STATE, json.dumps(current, indent=1), mode=0o644)
+
+
+def v_nginx_upgrade(req):
+    """
+    Rebuild nginx from source, at a version and module list we are given.
+
+    This is the same script an admin would run by hand, driven from here so the
+    fleet can be walked one node at a time instead of somebody sshing to four
+    boxes and hoping they all end up the same.
+
+    It runs detached and writes progress to a file.  A build takes ten to
+    twenty minutes, which is far longer than any request should wait, and a
+    dropped connection halfway through a compile must not leave a box with half
+    an nginx.
+
+    Nothing about the caller's input becomes a shell command.  The versions are
+    checked against a version shaped pattern and passed as environment
+    variables, which is exactly how the installer expects to be told, and the
+    module list is written to a file the installer sources.
+    """
+    if not INSTALLER.is_file():
+        raise AgentError(
+            f"no installer script at {INSTALLER}.  Put nginx-installer.sh there, "
+            f"or set NFM_INSTALLER on the agent.",
+            "missing_installer",
+        )
+
+    current = _read_upgrade_state()
+    if current.get("state") == "running":
+        raise AgentError("a build is already running on this box", "busy")
+
+    nginx_version = req.get("nginx_version")
+    openssl_version = req.get("openssl_version")
+
+    version_re = re.compile(r"^\d+\.\d+\.\d+[a-z]?$")
+    for label, value in (("nginx", nginx_version), ("openssl", openssl_version)):
+        if value and not version_re.match(str(value)):
+            raise AgentError(f"{value!r} is not a {label} version number", "bad_request")
+
+    env = {}
+    if nginx_version:
+        env["NGINX_VERSION"] = str(nginx_version)
+    if openssl_version:
+        env["OPENSSL_VERSION"] = str(openssl_version)
+
+    _write_upgrade_state(
+        state="running",
+        started=datetime.now(timezone.utc).isoformat(),
+        nginx_version=nginx_version,
+        openssl_version=openssl_version,
+        finished=None,
+        ok=None,
+        error=None,
+    )
+
+    # Detached, with output to a log the manager can read back.  setsid means
+    # it survives this connection going away, which it will, because nobody is
+    # holding a socket open for twenty minutes.
+    UPGRADE_LOG.parent.mkdir(parents=True, exist_ok=True)
+
+    wrapper = f"""#!/usr/bin/env bash
+# Written by the agent.  Runs the installer and records how it went.
+set -o pipefail
+
+echo "=== build started at $(date -Is) ==="
+if "{INSTALLER}" install 2>&1 | tee -a "{UPGRADE_LOG}"; then
+    result=ok
+else
+    result=failed
+fi
+echo "=== build finished $result at $(date -Is) ==="
+
+python3 - <<'PYEND'
+import json, pathlib, datetime
+p = pathlib.Path("{UPGRADE_STATE}")
+try:
+    state = json.loads(p.read_text())
+except Exception:
+    state = {{}}
+state["state"] = "finished"
+state["ok"] = "$result" == "ok"
+state["finished"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+p.write_text(json.dumps(state, indent=1))
+PYEND
+"""
+
+    runner = Path("/usr/local/lib/nginx-fleet-manager/run-upgrade.sh")
+    runner.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write(runner, wrapper, mode=0o750)
+
+    full_env = os.environ.copy()
+    full_env.update(env)
+
+    log.warning("starting an nginx rebuild: %s", env or "same versions, module change")
+
+    subprocess.Popen(
+        ["setsid", "bash", str(runner)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL,
+        env=full_env,
+        start_new_session=True,
+    )
+
+    return {"started": True, "versions": env}
+
+
+def v_nginx_upgrade_status(req):
+    """How the build is going, and the tail of its output."""
+    state = _read_upgrade_state()
+
+    tail = ""
+    if UPGRADE_LOG.is_file():
+        try:
+            lines = UPGRADE_LOG.read_text(errors="replace").splitlines()
+            tail = "\n".join(lines[-int(req.get("lines", 40)):])
+        except OSError:
+            pass
+
+    # What is actually installed right now, so the manager can tell whether the
+    # build changed anything rather than trusting the exit code alone.
+    version = None
+    if NGINX_BIN.is_file():
+        out = run([str(NGINX_BIN), "-v"])
+        banner = (out["stderr"] or out["stdout"]).strip()
+        m = re.search(r"nginx/(\S+)", banner)
+        if m:
+            version = m.group(1)
+
+    return {**state, "log_tail": tail, "installed_version": version}
+
+
+def v_nginx_revert(req):
+    """
+    Put the previous nginx back.
+
+    The installer keeps a snapshot of the binary and config before every build,
+    and this is its revert path.  It is the way out when a new build starts but
+    misbehaves.
+    """
+    if not INSTALLER.is_file():
+        raise AgentError(f"no installer script at {INSTALLER}", "missing_installer")
+
+    result = run([str(INSTALLER), "revert"], timeout=300)
+    return {
+        "ok": result["rc"] == 0,
+        "output": (result["stdout"] + result["stderr"]).strip()[-4000:],
+    }
+
+
 VERBS = {
     "ping": v_ping,
+    "nginx_upgrade": v_nginx_upgrade,
+    "nginx_upgrade_status": v_nginx_upgrade_status,
+    "nginx_revert": v_nginx_revert,
     "status": v_status,
     "config_test": v_config_test,
     "write_staging": v_write_staging,
@@ -1320,7 +1499,10 @@ VERBS = {
 # folders at the same moment is how you end up with a half applied config and a
 # very confused nginx.
 APPLY_LOCK = threading.Lock()
-SERIALIZED_VERBS = {"apply", "write_staging", "rollback", "reload", "service", "certbot"}
+SERIALIZED_VERBS = {
+    "apply", "write_staging", "rollback", "reload", "service", "certbot",
+    "nginx_upgrade", "nginx_revert",
+}
 
 
 class Handler(socketserver.StreamRequestHandler):

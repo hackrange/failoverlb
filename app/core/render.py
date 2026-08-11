@@ -562,7 +562,7 @@ map $cookie_{cookie} $sticky_{_safe_var(pool.name)} {{
 
         # ---- the plain http server ------------------------------------------
         if host.listen_http:
-            lines.append(self._render_http_block(host, names, cfg))
+            lines.append(self._render_http_block(host, names, cfg, cert))
 
         # ---- the https server -----------------------------------------------
         if host.listen_https and cert:
@@ -576,7 +576,7 @@ map $cookie_{cookie} $sticky_{_safe_var(pool.name)} {{
 
         return "\n".join(lines)
 
-    def _render_http_block(self, host, names, cfg) -> str:
+    def _render_http_block(self, host, names, cfg, cert=None) -> str:
         default = " default_server" if host.default_server else ""
         lines = [
             "server {",
@@ -600,11 +600,26 @@ map $cookie_{cookie} $sticky_{_safe_var(pool.name)} {{
         lines.append("    }")
         lines.append("")
 
-        if host.force_https and host.listen_https:
+        # Only redirect to https if there is going to be an https server to
+        # land on.  A site set to force https with no certificate attached has
+        # no https block at all, because nginx refuses to start with an ssl
+        # listener and no certificate.  Redirecting anyway sends every visitor
+        # to a port nothing is listening on, and the site is simply down with
+        # no error in any log to explain it.
+        #
+        # Without a certificate we serve over http instead and say so in the
+        # config, which is the least surprising thing to do while somebody is
+        # still in the middle of setting the site up.
+        if host.force_https and host.listen_https and cert:
             lines.append("    location / {")
             lines.append("        return 301 https://$host$request_uri;")
             lines.append("    }")
         else:
+            if host.force_https and host.listen_https and not cert:
+                lines.append("    # Set to redirect to https, but no certificate is attached yet, so")
+                lines.append("    # there is no https server to redirect to.  Serving over http until")
+                lines.append("    # one is issued, rather than sending everybody to a dead port.")
+                lines.append("")
             lines.extend(self._render_body(host, cfg, tls=False))
 
         lines.append("}")

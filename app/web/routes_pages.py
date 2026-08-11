@@ -543,6 +543,15 @@ async def cluster_page(request: Request, db: DBSession = Depends(get_db)):
     return response
 
 
+@router.get("/upgrade", response_class=HTMLResponse)
+async def upgrade_page(request: Request, db: DBSession = Depends(get_db)):
+    user = require_page_user(request, db)
+    token = ensure_csrf_token(request)
+    response = render(request, "upgrade.html", user, csrf_token=token)
+    issue_csrf_token(response, token)
+    return response
+
+
 @router.get("/parity", response_class=HTMLResponse)
 async def parity_page(request: Request, db: DBSession = Depends(get_db)):
     """

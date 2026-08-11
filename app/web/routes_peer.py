@@ -320,6 +320,58 @@ async def cert_import(request: Request):
 
 
 # ==============================================================================
+# Running a build on a peer
+# ==============================================================================
+
+# Verbs another node is allowed to ask this one to run.
+#
+# Deliberately a short list, not "whatever the caller names".  A peer being
+# able to invoke any verb would make one compromised node as good as root on
+# every other one, which is exactly the thing the agent's own verb list exists
+# to prevent.  Forwarding everything would hand that away one level up.
+#
+# These four are what a fleet wide rebuild needs and nothing more.
+PEER_AGENT_VERBS = {
+    "nginx_upgrade",
+    "nginx_upgrade_status",
+    "nginx_revert",
+    "status",
+    "config_test",
+}
+
+
+@router.post("/peer/agent")
+async def peer_agent(request: Request):
+    """
+    Let the node running an upgrade drive a build on this one.
+
+    A rebuild has to be walked one node at a time from somewhere, and that
+    somewhere is whichever node the admin clicked on.  This is how it reaches
+    the others.
+    """
+    node, payload = await authenticate(request)
+
+    verb = payload.get("verb")
+    if verb not in PEER_AGENT_VERBS:
+        log.warning("%s asked us to run %r, which is not on the list", node.name, verb)
+        raise HTTPException(
+            status_code=403,
+            detail=f"{verb} is not something a peer may ask for",
+        )
+
+    args = payload.get("payload") or {}
+    if not isinstance(args, dict):
+        raise HTTPException(status_code=400, detail="payload has to be an object")
+
+    log.info("%s asked us to run %s", node.name, verb)
+
+    try:
+        return await get_agent().call(verb, timeout=120, **args)
+    except AgentError as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+# ==============================================================================
 # Joining
 # ==============================================================================
 
