@@ -241,6 +241,24 @@ async def catalog(request: Request, context: str = "server",
     caps = fleet_capabilities()
     version = caps.version_tuple
 
+    # The zone pickers have no fixed choices, they are whatever you have made.
+    # Filling them here means the site editor offers real zones rather than an
+    # empty dropdown nobody can use.
+    zone_options = {
+        "limit_req_zone_name": [("", "no rate limit")] + [
+            (z.name, f"{z.name} ({z.rate})")
+            for z in db.query(RateLimitZone).order_by(RateLimitZone.name).all()
+        ],
+        "limit_conn_zone_name": [("", "no connection limit")] + [
+            (z.name, z.name)
+            for z in db.query(ConnLimitZone).order_by(ConnLimitZone.name).all()
+        ],
+        "proxy_cache_zone": [("", "no caching")] + [
+            (z.name, f"{z.name} ({z.max_size} max)")
+            for z in db.query(CacheZone).order_by(CacheZone.name).all()
+        ],
+    }
+
     out = []
     for feature in all_features().values():
         if feature.edition != "oss":
@@ -248,13 +266,15 @@ async def catalog(request: Request, context: str = "server",
         if context not in feature.contexts:
             continue
 
+        options = zone_options.get(feature.key, feature.options)
+
         out.append({
             "key": feature.key,
             "label": feature.label,
             "category": feature.category,
             "type": feature.type,
             "default": feature.default,
-            "options": feature.options,
+            "options": options,
             "unit": feature.unit,
             "placeholder": feature.placeholder,
             "advanced": feature.advanced,
@@ -1351,6 +1371,406 @@ async def resync(g: ObjectGuard = Depends(changing)):
     await get_cluster().drain_pending()
     audit.record("cluster.resync", user=g.user, object_type="cluster")
     return {"ok": True}
+
+
+# ==============================================================================
+# Zones and access lists
+# ==============================================================================
+#
+# These are the shared pieces sites point at.  nginx wants them declared once at
+# the http level and then used further down, which is why they are their own
+# objects rather than settings on a site.  It also means several sites can share
+# one bucket, which is usually what you want for something like a login limit.
+
+ZONE_MODELS = {
+    "rate": RateLimitZone,
+    "conn": ConnLimitZone,
+    "cache": CacheZone,
+}
+
+
+@router.get("/zones")
+async def list_zones(g: ObjectGuard = Depends(guard)):
+    return {
+        "rate": [
+            {"id": z.id, "name": z.name, "description": z.description,
+             "key": z.key, "zone_size": z.zone_size, "rate": z.rate,
+             "used_by": _zone_users(g.session, "limit_req_zone_name", z.name)}
+            for z in g.session.query(RateLimitZone).order_by(RateLimitZone.name).all()
+        ],
+        "conn": [
+            {"id": z.id, "name": z.name, "description": z.description,
+             "key": z.key, "zone_size": z.zone_size,
+             "used_by": _zone_users(g.session, "limit_conn_zone_name", z.name)}
+            for z in g.session.query(ConnLimitZone).order_by(ConnLimitZone.name).all()
+        ],
+        "cache": [
+            {"id": z.id, "name": z.name, "description": z.description,
+             "path": z.path, "levels": z.levels,
+             "keys_zone_size": z.keys_zone_size, "max_size": z.max_size,
+             "inactive": z.inactive,
+             "used_by": _zone_users(g.session, "proxy_cache_zone", z.name)}
+            for z in g.session.query(CacheZone).order_by(CacheZone.name).all()
+        ],
+        "access_lists": [
+            {"id": a.id, "name": a.name, "description": a.description,
+             "allow": a.allows(), "deny": a.denies(),
+             "default_action": a.default_action,
+             "include_management": a.include_management,
+             "basic_auth_enabled": a.basic_auth_enabled,
+             "basic_auth_realm": a.basic_auth_realm,
+             "basic_auth_users": [u.get("username") for u in a.auth_users()],
+             "use_real_ip": a.use_real_ip,
+             "real_ip_header": a.real_ip_header,
+             "real_ip_from": a.trusted_proxies(),
+             "used_by": [h.name for h in g.session.query(VirtualHost)
+                         .filter(VirtualHost.access_list_id == a.id).all()]}
+            for a in g.session.query(AccessList).order_by(AccessList.name).all()
+        ],
+    }
+
+
+def _zone_users(session, setting_key: str, zone_name: str) -> list:
+    """Which sites point at this zone.  Stops somebody deleting one still in use."""
+    users = []
+    for host in session.query(VirtualHost).all():
+        if host.setting_map().get(setting_key) == zone_name:
+            users.append(host.name)
+        for loc in host.locations:
+            if loc.setting_map().get(setting_key) == zone_name:
+                users.append(f"{host.name}{loc.path}")
+    return sorted(set(users))
+
+
+@router.post("/zones/{kind}")
+async def create_zone(kind: str, request: Request, g: ObjectGuard = Depends(changing)):
+    g.require("edit_sites")
+
+    model = ZONE_MODELS.get(kind)
+    if not model:
+        raise HTTPException(status_code=404, detail="not found")
+
+    payload = await request.json()
+    name = validate_name(payload.get("name"), "zone name")
+
+    if g.session.query(model).filter(model.name == name).first():
+        raise HTTPException(status_code=409, detail=f"there is already a zone called {name}")
+
+    zone = model(name=name, description=(payload.get("description") or "")[:500] or None)
+    _apply_zone_fields(kind, zone, payload)
+
+    g.session.add(zone)
+    g.session.commit()
+
+    audit.record(f"zone.{kind}.create", user=g.user, object_type="zone",
+                 object_name=name, changes=payload)
+    return {"id": zone.id, "name": zone.name}
+
+
+@router.put("/zones/{kind}/{zone_id}")
+async def update_zone(kind: str, zone_id: str, request: Request,
+                      g: ObjectGuard = Depends(changing)):
+    model = ZONE_MODELS.get(kind)
+    if not model:
+        raise HTTPException(status_code=404, detail="not found")
+
+    zone = g.get(model, zone_id, "edit_sites")
+    payload = await request.json()
+
+    if "name" in payload:
+        new_name = validate_name(payload["name"], "zone name")
+        if new_name != zone.name:
+            # Renaming a zone a site still points at would break that site's
+            # config, because the name is what links the two.
+            users = _zone_users(g.session, _setting_for(kind), zone.name)
+            if users:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"{zone.name} is still used by: {', '.join(users)}.  "
+                        f"Point those at something else before renaming it."
+                    ),
+                )
+            zone.name = new_name
+
+    if "description" in payload:
+        zone.description = (payload.get("description") or "")[:500] or None
+
+    _apply_zone_fields(kind, zone, payload)
+    g.session.commit()
+
+    audit.record(f"zone.{kind}.update", user=g.user, object_type="zone",
+                 object_name=zone.name, changes=payload)
+    return {"ok": True}
+
+
+@router.delete("/zones/{kind}/{zone_id}")
+async def delete_zone(kind: str, zone_id: str, g: ObjectGuard = Depends(changing)):
+    model = ZONE_MODELS.get(kind)
+    if not model:
+        raise HTTPException(status_code=404, detail="not found")
+
+    zone = g.get(model, zone_id, "edit_sites")
+    users = _zone_users(g.session, _setting_for(kind), zone.name)
+    if users:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"{zone.name} is still used by: {', '.join(users)}.  "
+                f"nginx will not load a config that points at a zone which is "
+                f"not declared, so those have to be changed first."
+            ),
+        )
+
+    name = zone.name
+    g.session.delete(zone)
+    g.session.commit()
+
+    audit.record(f"zone.{kind}.delete", user=g.user, object_type="zone", object_name=name)
+    return {"ok": True, "deleted": name}
+
+
+def _setting_for(kind: str) -> str:
+    return {
+        "rate": "limit_req_zone_name",
+        "conn": "limit_conn_zone_name",
+        "cache": "proxy_cache_zone",
+    }[kind]
+
+
+def _apply_zone_fields(kind: str, zone, payload: dict):
+    import re as _re
+
+    if "key" in payload and kind in ("rate", "conn"):
+        key = str(payload["key"]).strip()
+        # An nginx variable, possibly a couple joined together.  Anything else
+        # would end up written straight into a directive.
+        if not _re.fullmatch(r"[$A-Za-z0-9_]{1,120}", key):
+            raise HTTPException(
+                status_code=400,
+                detail="the key has to be an nginx variable like $binary_remote_addr",
+            )
+        zone.key = key
+
+    for field in ("zone_size", "keys_zone_size", "max_size"):
+        if field in payload and hasattr(zone, field):
+            value = str(payload[field]).strip()
+            if not _re.fullmatch(r"\d+[kKmMgG]?", value):
+                raise HTTPException(status_code=400,
+                                    detail=f"{field} should look like 10m or 1g")
+            setattr(zone, field, value)
+
+    if "rate" in payload and kind == "rate":
+        value = str(payload["rate"]).strip()
+        if not _re.fullmatch(r"\d+r/[sm]", value):
+            raise HTTPException(
+                status_code=400,
+                detail="the rate should look like 10r/s or 30r/m, requests per second or minute",
+            )
+        zone.rate = value
+
+    if "inactive" in payload and kind == "cache":
+        value = str(payload["inactive"]).strip()
+        if not _re.fullmatch(r"\d+[smhd]?", value):
+            raise HTTPException(status_code=400, detail="inactive should look like 60m")
+        zone.inactive = value
+
+    if "levels" in payload and kind == "cache":
+        value = str(payload["levels"]).strip()
+        if not _re.fullmatch(r"[12](:[12]){0,2}", value):
+            raise HTTPException(status_code=400,
+                                detail="levels should look like 1:2")
+        zone.levels = value
+
+    if "path" in payload and kind == "cache":
+        path = str(payload["path"]).strip()
+        if not path.startswith("/") or _re.search(r"[;{}\s]", path):
+            raise HTTPException(status_code=400, detail="that is not a valid path")
+        # Somewhere sensible, not anywhere on the disk.  A cache path pointed at
+        # the wrong place fills a partition somebody was relying on.
+        if not path.startswith(("/var/cache/", "/srv/", "/data/")):
+            raise HTTPException(
+                status_code=400,
+                detail="cache paths have to be under /var/cache, /srv or /data",
+            )
+        zone.path = path
+
+
+# ---- access lists ------------------------------------------------------------
+
+@router.post("/access-lists")
+async def create_access_list(request: Request, g: ObjectGuard = Depends(changing)):
+    g.require("edit_access_lists")
+    payload = await request.json()
+
+    name = validate_name(payload.get("name"), "access list name")
+    if g.session.query(AccessList).filter(AccessList.name == name).first():
+        raise HTTPException(status_code=409, detail=f"there is already a list called {name}")
+
+    acl = AccessList(name=name)
+    _apply_acl_fields(acl, payload)
+    g.session.add(acl)
+    g.session.commit()
+
+    audit.record("access_list.create", user=g.user, object_type="access_list",
+                 object_name=name, changes=payload)
+    return {"id": acl.id, "name": acl.name}
+
+
+@router.put("/access-lists/{acl_id}")
+async def update_access_list(acl_id: str, request: Request,
+                             g: ObjectGuard = Depends(changing)):
+    acl = g.get(AccessList, acl_id, "edit_access_lists")
+    payload = await request.json()
+
+    if "name" in payload:
+        acl.name = validate_name(payload["name"], "access list name")
+    _apply_acl_fields(acl, payload)
+    g.session.commit()
+
+    audit.record("access_list.update", user=g.user, object_type="access_list",
+                 object_name=acl.name, changes=payload)
+    return {"ok": True}
+
+
+@router.delete("/access-lists/{acl_id}")
+async def delete_access_list(acl_id: str, g: ObjectGuard = Depends(changing)):
+    acl = g.get(AccessList, acl_id, "edit_access_lists")
+
+    users = g.session.query(VirtualHost).filter(VirtualHost.access_list_id == acl.id).all()
+    if users:
+        raise HTTPException(
+            status_code=409,
+            detail=f"still used by: {', '.join(h.name for h in users)}",
+        )
+
+    name = acl.name
+    g.session.delete(acl)
+    g.session.commit()
+    audit.record("access_list.delete", user=g.user, object_type="access_list",
+                 object_name=name)
+    return {"ok": True, "deleted": name}
+
+
+def _apply_acl_fields(acl, payload: dict):
+    for field, attr in (("allow", "allow_entries"), ("deny", "deny_entries")):
+        if field in payload:
+            entries = payload[field]
+            if isinstance(entries, str):
+                entries = [e.strip() for e in entries.replace(",", "\n").splitlines() if e.strip()]
+            for entry in entries:
+                validate_cidr(entry)
+            setattr(acl, attr, json.dumps(entries))
+
+    if "default_action" in payload:
+        if payload["default_action"] not in ("allow", "deny"):
+            raise HTTPException(status_code=400, detail="default action is allow or deny")
+        acl.default_action = payload["default_action"]
+
+    for field in ("include_management", "basic_auth_enabled", "use_real_ip"):
+        if field in payload:
+            setattr(acl, field, bool(payload[field]))
+
+    if "basic_auth_realm" in payload:
+        realm = str(payload["basic_auth_realm"])[:255]
+        import re as _re
+
+        if _re.search(r'["\n\r;{}]', realm):
+            raise HTTPException(status_code=400, detail="that realm has characters we cannot use")
+        acl.basic_auth_realm = realm or "Restricted"
+
+    if "real_ip_header" in payload:
+        if payload["real_ip_header"] not in ("X-Forwarded-For", "X-Real-IP", "CF-Connecting-IP"):
+            raise HTTPException(status_code=400, detail="that real ip header is not one we write")
+        acl.real_ip_header = payload["real_ip_header"]
+
+    if "real_ip_from" in payload:
+        proxies = payload["real_ip_from"]
+        if isinstance(proxies, str):
+            proxies = [p.strip() for p in proxies.replace(",", "\n").splitlines() if p.strip()]
+        for proxy in proxies:
+            validate_cidr(proxy)
+        acl.real_ip_from = json.dumps(proxies)
+
+    # Basic auth users.  The password is hashed here and the plain one never
+    # stored, same as any other password in this tool.
+    if "add_user" in payload:
+        entry = payload["add_user"] or {}
+        username = str(entry.get("username", "")).strip()
+        password = entry.get("password") or ""
+
+        import re as _re
+
+        if not _re.fullmatch(r"[A-Za-z0-9._@-]{1,64}", username):
+            raise HTTPException(status_code=400, detail="that username is not valid")
+        if len(password) < 8:
+            raise HTTPException(status_code=400,
+                                detail="a basic auth password should be at least 8 characters")
+
+        users = acl.auth_users()
+        users = [u for u in users if u.get("username") != username]
+        users.append({"username": username, "hash": _htpasswd_hash(password)})
+        acl.basic_auth_users = json.dumps(users)
+
+    if "remove_user" in payload:
+        target = str(payload["remove_user"])
+        acl.basic_auth_users = json.dumps(
+            [u for u in acl.auth_users() if u.get("username") != target]
+        )
+
+
+def _htpasswd_hash(password: str) -> str:
+    """
+    Hash a basic auth password the way nginx expects to read it.
+
+    APR1 is what htpasswd writes by default and what nginx understands.  It is
+    not a good hash by modern standards, and that is a property of the format
+    rather than a choice.  Basic auth over https is a speed bump on top of the
+    IP rules, not the thing holding the door shut, and the help text says so.
+    """
+    import base64
+    import hashlib
+    import os as _os
+
+    salt = base64.b64encode(_os.urandom(6)).decode()[:8].replace("+", ".")
+    magic = "$apr1$"
+
+    text = (password + magic + salt).encode()
+    bin_hash = hashlib.md5((password + salt + password).encode()).digest()
+
+    for i in range(len(password), 0, -16):
+        text += bin_hash[:min(16, i)]
+
+    i = len(password)
+    while i:
+        text += bytes([0]) if i & 1 else password[0].encode()
+        i >>= 1
+
+    bin_hash = hashlib.md5(text).digest()
+
+    for i in range(1000):
+        chunk = b""
+        chunk += password.encode() if i & 1 else bin_hash
+        if i % 3:
+            chunk += salt.encode()
+        if i % 7:
+            chunk += password.encode()
+        chunk += bin_hash if i & 1 else password.encode()
+        bin_hash = hashlib.md5(chunk).digest()
+
+    itoa64 = "./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+    out = ""
+    for a, b, c in ((0, 6, 12), (1, 7, 13), (2, 8, 14), (3, 9, 15), (4, 10, 5)):
+        v = (bin_hash[a] << 16) | (bin_hash[b] << 8) | bin_hash[c]
+        for _ in range(4):
+            out += itoa64[v & 0x3F]
+            v >>= 6
+    v = bin_hash[11]
+    for _ in range(2):
+        out += itoa64[v & 0x3F]
+        v >>= 6
+
+    return f"{magic}{salt}${out}"
 
 
 # ==============================================================================

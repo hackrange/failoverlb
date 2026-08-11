@@ -508,6 +508,15 @@ async def pool_detail(pool_id: str, request: Request, db: DBSession = Depends(ge
     return response
 
 
+@router.get("/zones", response_class=HTMLResponse)
+async def zones_page(request: Request, db: DBSession = Depends(get_db)):
+    user = require_page_user(request, db)
+    token = ensure_csrf_token(request)
+    response = render(request, "zones.html", user, csrf_token=token)
+    issue_csrf_token(response, token)
+    return response
+
+
 @router.get("/certificates", response_class=HTMLResponse)
 async def certs_page(request: Request, db: DBSession = Depends(get_db)):
     user = require_page_user(request, db)
