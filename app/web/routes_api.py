@@ -11,6 +11,7 @@ Step three is what keeps the BOLA and IDOR bugs out.  There is no route that
 queries a table by id directly, so there is no route that can forget the check.
 """
 
+import ipaddress
 import json
 import logging
 import re
@@ -2232,9 +2233,26 @@ async def acme_hook(request: Request):
     from app.core import acme_hooks
     from app.core.acme import ChallengeCoordinator
 
+    # Has to be a local caller.  Test this properly rather than by comparing
+    # strings: a connection to 127.0.0.1 can arrive as "::ffff:127.0.0.1" when
+    # the listener is dual stack, and any loopback address is 127.anything, not
+    # just 127.0.0.1.  A literal list misses both, and the failure looks like
+    # the hook URL being wrong rather than the address being rejected.
     source = client_ip(request)
-    if source not in ("127.0.0.1", "::1", "localhost"):
-        log.warning("acme hook called from %s, which is not this machine", source)
+    try:
+        is_local = ipaddress.ip_address(
+            source[7:] if source.startswith("::ffff:") else source
+        ).is_loopback
+    except ValueError:
+        is_local = source == "localhost"
+
+    if not is_local:
+        log.warning(
+            "acme hook called from %s, which is not this machine.  The hook runs "
+            "on the host and talks to 127.0.0.1, so this usually means the "
+            "container is not on host networking and docker is rewriting the "
+            "source address.", source,
+        )
         raise HTTPException(status_code=404, detail="not found")
 
     sent = request.headers.get("X-NFM-Hook-Secret", "")

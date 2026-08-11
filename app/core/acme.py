@@ -769,7 +769,45 @@ def _explain_certbot_error(output: str) -> str:
         # looking at the wrong half.
         hook_worked = '"ok":true' in (output or "") or '"ok": true' in (output or "")
 
+        # The hook printing an error instead of ok means the token was never
+        # written anywhere, and every other explanation below is a red herring.
+        # The CA's 404 is then just the symptom.  Worth catching, because
+        # sending somebody to look at port 80 when their hook is broken wastes
+        # a lot of time.
+        hook_error = None
+        m_hook = _re.search(
+            r"Hook '--manual-auth-hook'[^\n]*ran with output:\s*(.+)", output or ""
+        )
+        if m_hook and not hook_worked:
+            hook_error = m_hook.group(1).strip()[:200]
+
         lines = []
+        if hook_error:
+            lines.append(
+                "The hook that publishes the challenge token failed, so the file "
+                "was never written and there was nothing for the certificate "
+                "authority to fetch.  Fix this first, the 404 below is only the "
+                "symptom."
+            )
+            lines.append(f"\nThe hook said:  {hook_error}")
+
+            if "not found" in hook_error.lower():
+                lines.append(
+                    "\n\"not found\" from the hook means the manager refused the "
+                    "call rather than the URL being wrong.  The hook runs on the "
+                    "host and posts to 127.0.0.1, and the manager only accepts "
+                    "that from a loopback address.  Check the manager log for "
+                    "\"acme hook called from\", which names the address it saw:\n"
+                    "\n"
+                    "  docker compose logs | grep 'acme hook'"
+                )
+            elif "connection" in hook_error.lower() or "refused" in hook_error.lower():
+                lines.append(
+                    "\nThe hook could not reach the manager at all.  Check the "
+                    "container is running and listening on the GUI port."
+                )
+            return "\n".join(lines)
+
         if hook_worked:
             lines.append(
                 "The challenge token was written to every node, the hook says so, "
