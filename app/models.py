@@ -862,6 +862,17 @@ class Certificate(Base):
     # Which nodes have the current copy.  json of node name to checksum.
     synced_nodes = Column(Text, default="{}")
 
+    # Whether the files were actually there last time we looked, and when.
+    #
+    # The database saying a certificate exists is not the same as the files
+    # being on disk.  A node restored from a backup that predates the
+    # certificate, or rebuilt without /etc/letsencrypt, has the row and not the
+    # files.  Rendering a config that points at files which are not there means
+    # nginx refuses to load, and then nothing can be applied anywhere until
+    # somebody works out why.
+    files_present = Column(Boolean, default=True)
+    files_checked_at = Column(DateTime)
+
     # For an uploaded cert, we keep the material here so the fleet can serve it
     # everywhere.  The key is encrypted with the node secret.
     uploaded_fullchain = Column(Text)
@@ -880,6 +891,17 @@ class Certificate(Base):
 
     def resolved_ip_list(self):
         return json_get(self.resolved_ips, [])
+
+    @property
+    def usable(self) -> bool:
+        """
+        Is this certificate safe to point nginx at.
+
+        Needs both an issue date, meaning it was actually obtained, and the
+        files still being there.  Either missing and the https block gets left
+        out rather than written with paths that do not resolve.
+        """
+        return bool(self.not_after) and self.files_present is not False
 
     @property
     def days_left(self):

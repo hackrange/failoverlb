@@ -596,6 +596,73 @@ class CertificateManager:
 
     # -------------------------------------------------------------------------
 
+    async def verify_files(self):
+        """
+        Check the certificates we think exist are really on disk.
+
+        The database and the filesystem drift apart more easily than you would
+        expect.  A node restored from a backup older than the certificate, a
+        rebuilt box, somebody clearing /etc/letsencrypt to free space.  The row
+        stays, the files do not.
+
+        It matters because the renderer points nginx at those paths.  A missing
+        file means nginx will not start, which means the config cannot be
+        applied anywhere, which means one stale certificate row blocks every
+        change you try to make until somebody works out why.
+
+        So we look, and mark the ones that are not there.  The renderer then
+        leaves their https block out and says so, which keeps the rest of the
+        fleet working while you sort the certificate out.
+        """
+        from app.core.render import CERT_SYNC_DIR, LE_LIVE_DIR
+
+        agent = get_agent()
+
+        with session_scope() as session:
+            certs = [
+                (c.id, c.name, c.issued_by_node, bool(c.not_after))
+                for c in session.query(Certificate).all()
+            ]
+
+        for cert_id, name, issued_by, was_issued in certs:
+            if not was_issued:
+                continue
+
+            here = issued_by == self.settings.node_name
+            path = f"{LE_LIVE_DIR}/{name}/fullchain.pem" if here \
+                else f"{CERT_SYNC_DIR}/{name}/fullchain.pem"
+
+            present = True
+            try:
+                await agent.read_file(path)
+            except AgentError as exc:
+                # Only a missing file counts.  The agent being unreachable tells
+                # us nothing about whether the certificate is there, and marking
+                # it missing on that basis would drop https from every site the
+                # moment the agent restarted.
+                if getattr(exc, "code", "") in ("not_found", "denied"):
+                    present = False
+                else:
+                    continue
+
+            with session_scope() as session:
+                cert = session.query(Certificate).filter(Certificate.id == cert_id).first()
+                if not cert:
+                    continue
+                if cert.files_present != present:
+                    if present:
+                        log.info("certificate %s is back on disk", name)
+                    else:
+                        log.error(
+                            "certificate %s is in the database but its files are not on "
+                            "this node.  Leaving its https block out so the rest of the "
+                            "config still applies.  Re-issue it.",
+                            name,
+                        )
+                    cert.files_present = present
+                cert.files_checked_at = utcnow()
+                session.commit()
+
     async def check_renewals(self):
         """
         Renew anything that is getting close to expiry.

@@ -316,6 +316,16 @@ def start_scheduler():
         coalesce=True,
     )
 
+    # Notice a certificate whose files have gone before it stops every apply.
+    scheduler.add_job(
+        get_cert_manager().verify_files,
+        "interval",
+        seconds=300,
+        id="cert_files",
+        max_instances=1,
+        coalesce=True,
+    )
+
     scheduler.add_job(refresh_local_state, "interval", seconds=60, id="local_state",
                       max_instances=1, coalesce=True)
 
@@ -398,6 +408,18 @@ async def lifespan(app: FastAPI):
         await acme_hooks.ensure_hooks()
 
     asyncio.create_task(_hooks())
+
+    # Check the certificate files now rather than waiting five minutes.  A node
+    # that just came back without them would otherwise spend that time unable
+    # to apply anything, with an error about a file rather than about the
+    # certificate.
+    async def _certs():
+        from app.core.acme import get_cert_manager
+
+        await asyncio.sleep(5)
+        await get_cert_manager().verify_files()
+
+    asyncio.create_task(_certs())
 
     start_scheduler()
 

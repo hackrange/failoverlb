@@ -554,6 +554,9 @@ map $cookie_{cookie} $sticky_{_safe_var(pool.name)} {{
         cert = cert_by_id.get(host.cert_id)
         acl = acl_by_id.get(host.access_list_id)
 
+        # Worked out before anything is written, because both blocks need it.
+        usable = cert is not None and getattr(cert, "usable", True)
+
         lines = [HEADER.format(detail=f"Site: {host.name}")]
         if host.notes:
             for note_line in str(host.notes).splitlines()[:5]:
@@ -562,16 +565,27 @@ map $cookie_{cookie} $sticky_{_safe_var(pool.name)} {{
 
         # ---- the plain http server ------------------------------------------
         if host.listen_http:
-            lines.append(self._render_http_block(host, names, cfg, cert))
+            lines.append(self._render_http_block(host, names, cfg, cert if usable else None))
 
         # ---- the https server -----------------------------------------------
-        if host.listen_https and cert:
+        if host.listen_https and usable:
             lines.append(self._render_https_block(host, names, cfg, cert, acl))
         elif host.listen_https and not cert:
             lines.append(
                 f"# No certificate is attached to {host.name} yet, so the https server\n"
                 f"# block was left out.  nginx will not start with an ssl listener that\n"
                 f"# has no cert, so writing it anyway would take the whole box down."
+            )
+        elif host.listen_https and cert and not usable:
+            reason = ("it has never been issued" if not cert.not_after
+                      else "its files are not on this node")
+            lines.append(
+                f"# The certificate {cert.name} is attached to {host.name} but {reason},\n"
+                f"# so the https server block was left out.  Pointing nginx at a\n"
+                f"# certificate file that is not there stops it starting at all, which\n"
+                f"# would take down every other site on this box as well.\n"
+                f"#\n"
+                f"# Issue or re-issue it from the Certificates page and apply again."
             )
 
         return "\n".join(lines)

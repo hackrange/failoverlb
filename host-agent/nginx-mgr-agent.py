@@ -763,11 +763,40 @@ def v_service(req):
                 "note": "config test failed, so we left the service alone",
             }
 
-    if not have_systemd():
-        raise AgentError("no systemd on this box, cannot manage the service", "unsupported")
+    if have_systemd():
+        result = systemctl(action, "nginx")
+        return {"ok": result["rc"] == 0, "output": (result["stderr"] + result["stdout"]).strip()}
 
-    result = systemctl(action, "nginx")
-    return {"ok": result["rc"] == 0, "output": (result["stderr"] + result["stdout"]).strip()}
+    # No systemd.  Drive nginx directly instead of refusing.
+    #
+    # This is not only containers.  It matters after a rebuild: the installer
+    # replaces the binary on disk, but the process already running keeps the old
+    # one in memory until something restarts it.  Refusing here would leave a
+    # box reporting the new version from nginx -v while still serving with the
+    # old build, which is a genuinely nasty thing to be wrong about.
+    if action in ("stop", "restart"):
+        run([str(NGINX_BIN), "-s", "quit"])
+        # Give the workers a moment to finish what they are doing.  quit is the
+        # graceful one, so this is not instant by design.
+        for _ in range(20):
+            check = run(["pgrep", "-x", "nginx"])
+            if check["rc"] != 0:
+                break
+            time.sleep(0.5)
+
+    if action in ("start", "restart"):
+        result = run([str(NGINX_BIN)])
+        return {
+            "ok": result["rc"] == 0,
+            "output": (result["stderr"] + result["stdout"]).strip() or "started",
+            "note": "no systemd here, so nginx was started directly",
+        }
+
+    if action == "reload":
+        result = run([str(NGINX_BIN), "-s", "reload"])
+        return {"ok": result["rc"] == 0, "output": (result["stderr"] + result["stdout"]).strip()}
+
+    return {"ok": True, "output": "stopped"}
 
 
 def v_read_file(req):
@@ -1376,23 +1405,51 @@ def v_nginx_upgrade(req):
 # Written by the agent.  Runs the installer and records how it went.
 set -o pipefail
 
+export STATE_FILE="{UPGRADE_STATE}"
+
+# Everything this script says goes to the log too, so a build that goes wrong
+# after the installer finishes is not invisible.
+exec >> "{UPGRADE_LOG}" 2>&1
+
 echo "=== build started at $(date -Is) ==="
-if "{INSTALLER}" install 2>&1 | tee -a "{UPGRADE_LOG}"; then
+if "{INSTALLER}" install 2>&1; then
     result=ok
 else
     result=failed
 fi
 echo "=== build finished $result at $(date -Is) ==="
 
-python3 - <<'PYEND'
-import json, pathlib, datetime
-p = pathlib.Path("{UPGRADE_STATE}")
+# The installer restarts nginx through systemd.  Without systemd it says so and
+# leaves it alone, which means the old binary carries on serving and the whole
+# rebuild has no effect until somebody notices.  Handle that here.
+if [ "$result" = "ok" ] && [ ! -d /run/systemd/system ]; then
+    echo "no systemd, restarting nginx directly so the new build takes over"
+    "{NGINX_BIN}" -t && {{ "{NGINX_BIN}" -s quit 2>/dev/null; sleep 2; "{NGINX_BIN}"; }}
+    echo "nginx is now: $("{NGINX_BIN}" -v 2>&1)"
+fi
+
+# The result goes in through the environment, not interpolated into the
+# script.
+#
+# The first version of this used a quoted heredoc, which means no shell
+# expansion, so the python compared the literal string "$result" against "ok"
+# and every build was recorded as a failure.  A successful rebuild then halted
+# the walk and told you the node had not come back cleanly, while the node sat
+# there perfectly happy on the new version.
+#
+# The heredoc stays quoted, because the alternative lets the shell expand
+# things inside python source.  The value comes in as a variable instead.
+BUILD_RESULT="$result" python3 - <<'PYEND'
+import os, json, pathlib, datetime
+
+p = pathlib.Path(os.environ["STATE_FILE"])
 try:
     state = json.loads(p.read_text())
 except Exception:
     state = {{}}
+
 state["state"] = "finished"
-state["ok"] = "$result" == "ok"
+state["ok"] = os.environ.get("BUILD_RESULT") == "ok"
 state["finished"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
 p.write_text(json.dumps(state, indent=1))
 PYEND

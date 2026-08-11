@@ -151,6 +151,18 @@ way is not.</p>
        that same script's revert path and restarts nginx on the old build.</p>
   </div>
   <div class="help-section">
+    <h4>One thing to know about the perl module</h4>
+    <p>If your build includes the perl module, its shared library lives under
+       /etc/nginx/perl and is compiled against one exact nginx version.  A
+       binary from a different version refuses to load it, with "undefined
+       symbol", and nginx will not start at all.
+
+The installer replaces both together so a normal build is fine.  Where it bites
+is putting an old binary back beside a new library, or restoring /etc/nginx from
+a backup taken at a different version.  The check after each build runs nginx -t,
+which catches exactly this, which is why the walk stops rather than moving on.</p>
+  </div>
+  <div class="help-section">
     <h4>Mixed versions are fine, for a while</h4>
     <p>Nothing breaks while some nodes are newer than others.  The manager works
        out which settings are safe from the oldest node in the fleet, so it will

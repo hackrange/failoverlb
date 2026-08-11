@@ -260,8 +260,20 @@ def fleet_capabilities() -> Capabilities:
     # display and for the post quantum check, which is per build anyway.
     merged = Capabilities()
     merged.modules = common
-    merged.nginx_version = _local_caps.nginx_version
-    merged.openssl_version = _local_caps.openssl_version
+    # Both of these come from what the nodes reported, not from a variable in
+    # this process.  A process global is only filled in by startup, so anything
+    # running in another context saw no OpenSSL version at all and decided the
+    # fleet could not do post quantum when it could.
+    parsed = [parse_build_info(i) for i in infos]
+    versions_seen = [p["nginx_version"] for p in parsed if p["nginx_version"]]
+    openssl_seen = [p["openssl_version"] for p in parsed if p["openssl_version"]]
+
+    merged.nginx_version = min(versions_seen) if versions_seen else _local_caps.nginx_version
+    # The oldest OpenSSL in the fleet, for the same reason as the nginx version.
+    merged.openssl_version = (
+        min(openssl_seen, key=_openssl_sort_key) if openssl_seen
+        else _local_caps.openssl_version
+    )
     merged.third_party = [t for t in _local_caps.third_party if t in common]
     merged.has_stream = "stream" in common
     merged.has_mail = "mail" in common
@@ -286,6 +298,15 @@ def fleet_capabilities() -> Capabilities:
         merged.nginx_version = ".".join(str(p) for p in oldest)
 
     return merged
+
+
+def _openssl_sort_key(version: str):
+    """Sort OpenSSL versions numerically rather than as text, so 3.10 beats 3.9."""
+    parts = []
+    for chunk in str(version).split("."):
+        digits = "".join(c for c in chunk if c.isdigit())
+        parts.append(int(digits) if digits else 0)
+    return tuple(parts)
 
 
 def module_differences() -> dict:
