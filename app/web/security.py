@@ -72,6 +72,23 @@ def client_ip(request: Request) -> str:
     return "unknown"
 
 
+def _is_loopback(ip: str) -> bool:
+    """
+    Is this the machine talking to itself.
+
+    Written out rather than compared against a list of strings.  A connection to
+    127.0.0.1 turns up as "::ffff:127.0.0.1" on a dual stack listener, and
+    loopback is the whole of 127.0.0.0/8, not one address.  A literal list
+    misses both.
+    """
+    try:
+        return ipaddress.ip_address(
+            ip[7:] if ip.startswith("::ffff:") else ip
+        ).is_loopback
+    except ValueError:
+        return ip == "localhost"
+
+
 def ip_allowed(ip: str, networks) -> bool:
     if not networks:
         # Nothing configured means no restriction.  The GUI shouts about this on
@@ -163,6 +180,24 @@ class AdminAllowlistMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         ip = client_ip(request)
+
+        # Loopback always gets through, whatever the allow list says.
+        #
+        # The manager calls itself.  The certbot hooks run on this host and post
+        # to 127.0.0.1 to publish a challenge token, and an allow list of real
+        # management networks does not contain 127.0.0.1, so the manager was
+        # turning away its own hook and certificates could never be issued.  The
+        # 404 it returned looked like a broken hook URL and sent people looking
+        # at DNS and port 80.
+        #
+        # This gives nothing away.  Reaching us on loopback means already being
+        # on this box, and anybody there can read the database and write the
+        # challenge file by hand.  The endpoints that matter do their own checks
+        # on top: the hook wants a shared secret, everything else wants a
+        # session.
+        if _is_loopback(ip):
+            return await call_next(request)
+
         if not ip_allowed(ip, networks):
             log.warning("turned away %s %s from %s, not on the allow list",
                         request.method, request.url.path, ip)
