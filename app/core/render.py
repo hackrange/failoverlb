@@ -23,6 +23,7 @@ uses them, so the include lines are numbered and upstreams come before sites.
 """
 
 import hashlib
+import ipaddress
 import json
 import logging
 import re
@@ -1136,9 +1137,51 @@ map $cookie_{cookie} $sticky_{_safe_var(pool.name)} {{
         lines.append("    }")
         return lines
 
+    def _backend_tls_name(self, pool) -> str:
+        """
+        The name to send as SNI and check the backend's certificate against.
+
+        What the pool says wins.  Otherwise take it from the members, because
+        the members of a pool serve the same site and present the same
+        certificate, so the first one that is a hostname is the right answer.
+
+        An address is no use here.  SNI carries a name, and a certificate for a
+        bare IP is rare enough that guessing one would be wrong more often than
+        right.  We say so with proxy_ssl_server_name off rather than putting
+        something made up on the wire.
+        """
+        explicit = (getattr(pool, "backend_tls_name", None) or "").strip()
+        if explicit:
+            return explicit
+
+        for member in sorted(pool.members, key=lambda m: m.id or 0):
+            if not member.enabled:
+                continue
+            address = (member.address or "").strip()
+            if address and not _is_bare_address(address):
+                return address
+        return ""
+
     def _proxy_lines(self, pool, cfg, indent=8) -> list:
         pad = " " * indent
-        lines = [f"{pad}proxy_pass http://{_safe_name(pool.name)};"]
+        scheme = "https" if getattr(pool, "backend_tls", False) else "http"
+        lines = [f"{pad}proxy_pass {scheme}://{_safe_name(pool.name)};"]
+
+        if scheme == "https":
+            # nginx sends no SNI at all unless you ask, and plenty of backends
+            # answer the wrong certificate or hang up without it.  The name it
+            # would use by default is the upstream block's name, which is not a
+            # hostname anybody has a certificate for, so we always say which
+            # name we mean.
+            server_name = self._backend_tls_name(pool)
+            if server_name:
+                lines.append(f"{pad}proxy_ssl_server_name on;")
+                lines.append(f"{pad}proxy_ssl_name {esc(server_name)};")
+            else:
+                # Every member is a bare address.  SNI takes a name, so there is
+                # nothing honest to send, and asking nginx to send one anyway
+                # gets the upstream block's name put on the wire.
+                lines.append(f"{pad}proxy_ssl_server_name off;")
 
         version = cfg.get("proxy_http_version", "1.1")
         lines.append(f"{pad}proxy_http_version {version};")
@@ -1314,6 +1357,23 @@ map $cookie_{cookie} $sticky_{_safe_var(pool.name)} {{
 # ==============================================================================
 # Helpers
 # ==============================================================================
+
+def _is_bare_address(value: str) -> bool:
+    """
+    Is this an IP address rather than a hostname.
+
+    A member can be either, and it changes what we can send as SNI.  Brackets
+    come off first because that is how an IPv6 member is written.
+    """
+    candidate = str(value).strip()
+    if candidate.startswith("[") and candidate.endswith("]"):
+        candidate = candidate[1:-1]
+    try:
+        ipaddress.ip_address(candidate)
+        return True
+    except ValueError:
+        return False
+
 
 def _safe_name(name: str) -> str:
     """

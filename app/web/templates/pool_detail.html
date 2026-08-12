@@ -175,6 +175,31 @@
       </div>
 
       <h3 style="font-size:0.92rem; margin:18px 0 8px">Connections to the backends</h3>
+
+      <div class="checkline">
+        <input type="checkbox" id="p-backendtls" {{ 'checked' if pool.backend_tls }}>
+        <label for="p-backendtls">
+          Talk to these backends over https
+          <button class="help-btn" data-help-static="h-backendtls"
+                  data-help-title="Backend TLS" aria-label="Help">?</button>
+        </label>
+      </div>
+      <p class="small muted" style="margin:-4px 0 14px 23px">
+        Leave this off for a backend on a network you trust.  Turn it on when the
+        backend only speaks TLS, which a member on port 443 usually does.
+      </p>
+
+      <div class="field" id="wrap-backendtlsname" style="display:none; margin-bottom:14px">
+        <label for="p-backendtlsname">Certificate name to expect</label>
+        <input type="text" id="p-backendtlsname" value="{{ pool.backend_tls_name or '' }}"
+               placeholder="taken from the members">
+        <div class="hint">
+          The name sent as SNI and checked against the backend's certificate.
+          Blank works out to the first member that is a hostname, which is right
+          unless your members answer to different names.
+        </div>
+      </div>
+
       <div class="form-grid">
         <div class="field">
           <label for="p-keepalive">
@@ -567,6 +592,48 @@ exactly where they were.</p>
   </div>
 </div>
 
+<div hidden id="h-backendtls">
+  <div class="help-section">
+    <p>Whether nginx speaks http or https on the hop from here to your backends.</p>
+  </div>
+  <div class="help-section">
+    <h4>When you need it</h4>
+    <p>When the backend only listens for TLS, which a member on port 443 almost always does, and
+       when the hop crosses anything you would not want somebody reading.  Inside a rack you
+       control, plain http is fine and cheaper.</p>
+  </div>
+  <div class="help-section">
+    <h4>How it goes wrong without this</h4>
+    <p>Sending plain http at a TLS port does not fail in a way that tells you anything.  The
+       backend answers 400 Bad Request and nothing in the message mentions the scheme, so it
+       looks like the backend is broken rather than like it is being spoken to in the wrong
+       language.</p>
+  </div>
+  <div class="help-section">
+    <h4>The name we send</h4>
+    <p>TLS needs a name, not an address, so nginx has to be told which one to ask for.  Its own
+       default is the upstream block's name, and no backend has a certificate for
+       <code>your_pool_name</code>, so we always send something real: what you type in the box,
+       or the first member that is a hostname.</p>
+    <p>If every member is a bare IP there is no name to send, so we turn the whole thing off
+       rather than put a made up one on the wire.  Certificates for bare addresses are rare and
+       guessing at one would be wrong more often than right.</p>
+  </div>
+  <div class="help-section">
+    <h4>Checking the certificate</h4>
+    <p>Turning this on encrypts the hop.  It does not on its own check who is on the other end of
+       it.  For that, turn on <code>proxy_ssl_verify</code> in the site's settings, which is where
+       the trusted certificate and the depth live too.</p>
+  </div>
+  <div class="help-section">
+    <h4>Health checks are separate</h4>
+    <p>This setting covers real traffic.  The active health check has its own type on the Health
+       tab, so a pool talking https should usually be checked with HTTPS as well.  Leaving that on
+       HTTP means the check talks the wrong language to the same port that traffic works fine
+       on.</p>
+  </div>
+</div>
+
 <div hidden id="h-keepalive">
   <div class="help-section">
     <p>How many idle connections to each backend nginx holds open for reuse.</p>
@@ -733,6 +800,18 @@ document.addEventListener("DOMContentLoaded", function () {
   document.getElementById("p-lb").addEventListener("change", function () { syncHash(); markDirty(); });
   syncHash();
 
+  // The name only means anything when we are actually speaking TLS, so keep it
+  // out of the way until then.
+  function syncBackendTls() {
+    document.getElementById("wrap-backendtlsname").style.display =
+      document.getElementById("p-backendtls").checked ? "" : "none";
+  }
+  document.getElementById("p-backendtls").addEventListener("change", function () {
+    syncBackendTls();
+    markDirty();
+  });
+  syncBackendTls();
+
   document.querySelectorAll("input, select, textarea").forEach(function (el) {
     el.addEventListener("change", markDirty);
   });
@@ -755,6 +834,8 @@ document.addEventListener("DOMContentLoaded", function () {
         keepalive_requests: num("p-karequests"),
         zone_size: str("p-zone"),
         min_healthy_members: num("p-minhealthy"),
+        backend_tls: chk("p-backendtls"),
+        backend_tls_name: str("p-backendtlsname") || null,
 
         health_check_enabled: chk("h-enabled"),
         health_check_type: document.getElementById("h-type").value,

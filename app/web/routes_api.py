@@ -680,7 +680,7 @@ POOL_FIELDS = {
     "health_check_expect_body", "health_check_interval", "health_check_timeout",
     "health_check_rise", "health_check_fall", "health_check_verify_tls",
     "health_check_port", "min_healthy_members", "settings",
-    "token_enabled",
+    "token_enabled", "backend_tls", "backend_tls_name",
 }
 
 MEMBER_FIELDS = {
@@ -963,9 +963,25 @@ def _apply_pool_fields(pool, payload):
     # header without throwing the secret away.  Turning it on does nothing on
     # its own: there has to be a token as well, which is its own endpoint.
     for field in ("hash_consistent", "health_check_enabled", "health_check_verify_tls",
-                  "token_enabled"):
+                  "token_enabled", "backend_tls"):
         if field in payload:
             setattr(pool, field, bool(payload[field]))
+
+    # The SNI name goes on the wire and into an nginx directive, so it has to
+    # look like a hostname.  A stray space or semicolon here would land straight
+    # in the config, and a config nginx will not load blocks the whole fleet.
+    if "backend_tls_name" in payload:
+        raw = (payload["backend_tls_name"] or "").strip()
+        if raw and not re.fullmatch(r"[A-Za-z0-9._-]{1,253}", raw):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "the backend TLS name has to be a hostname, so letters, numbers, "
+                    "dots, dashes and underscores only.  Leave it blank to take it "
+                    "from the members."
+                ),
+            )
+        pool.backend_tls_name = raw or None
 
     for field, low, high in (
         ("keepalive", 0, 10000),
@@ -1062,6 +1078,8 @@ def _pool_detail(p):
         "keepalive_timeout": p.keepalive_timeout,
         "zone_size": p.zone_size,
         "min_healthy_members": p.min_healthy_members,
+        "backend_tls": bool(p.backend_tls),
+        "backend_tls_name": p.backend_tls_name,
         "health_check": {
             "enabled": p.health_check_enabled,
             "type": p.health_check_type,

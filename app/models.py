@@ -465,6 +465,27 @@ class Pool(Base):
     # Without this each worker keeps its own count and they disagree.
     zone_size = Column(String(20), default="64k")
 
+    # ---- talking to the backend over TLS ------------------------------------
+    # Off means we proxy with plain http, which is right for a backend on a
+    # network you trust.  On means https, for a backend that only speaks TLS or
+    # one you reach across something you do not trust.
+    #
+    # Sending plain http at a TLS port does not fail in a way anybody enjoys.
+    # The backend answers 400 and the error says nothing about the scheme.
+    backend_tls = Column(Boolean, default=False)
+
+    # Which name to put in SNI and check the backend's certificate against.
+    #
+    # This needs saying because nginx's default is wrong for us.  It sends the
+    # host from proxy_pass, and ours is the upstream block's name, so a pool
+    # called websec_pool would offer "websec_pool" as the server name.  No
+    # backend has a certificate for that.
+    #
+    # Blank means work it out from the members, which is right nearly always,
+    # since the members of a pool serve the same site and present the same
+    # certificate.  Set it when they do not.
+    backend_tls_name = Column(String(255))
+
     # Active checks, our own
     health_check_enabled = Column(Boolean, default=True)
     health_check_type = Column(String(20), default="http")   # http, https, tcp
