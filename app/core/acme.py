@@ -519,6 +519,15 @@ class CertificateManager:
                 results["ok"].append(self.settings.node_name)
             except AgentError as exc:
                 results["failed"].append({"node": self.settings.node_name, "error": str(exc)})
+        else:
+            # We are the node certbot wrote the files on, so we have them.  This
+            # branch used to do nothing, which meant the issuing node never
+            # counted itself: peers() leaves this node out, and the loop below
+            # only credits the source when it finds it among the peers, where it
+            # never is.  So a copy that reached everybody still reported one node
+            # short, forever, and pressing the button again could not fix a
+            # number that was only ever wrong in the counting.
+            results["ok"].append(self.settings.node_name)
 
         for info in peers:
             if info["name"] == source_node:

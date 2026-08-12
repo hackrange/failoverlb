@@ -193,6 +193,30 @@ class ClusterCA:
     def exists(self) -> bool:
         return self.ca_cert_path.is_file() and self.ca_key_path.is_file()
 
+    def ca_pair_ok(self) -> bool:
+        """
+        Does the CA certificate actually go with the CA key.
+
+        Deliberately separate from exists(), and deliberately not something that
+        regenerates on its own.  A GUI certificate that does not match its key
+        can be thrown away and remade, because nobody has ever relied on it.  A
+        CA is the opposite: every node certificate in the cluster was signed by
+        it, so making a new one silently would invalidate all of them and every
+        node would have to rejoin.
+
+        So this reports, and the caller says something useful.  Losing a cluster
+        because a check quietly did the tidy looking thing is not a trade worth
+        making.
+        """
+        if not self.exists():
+            return False
+        try:
+            return key_matches_cert(
+                self.ca_cert_path.read_text(), self.ca_key_path.read_text()
+            )
+        except Exception:
+            return False
+
     def create(self, cluster_name: str = "nginx-fleet") -> None:
         """
         Make a brand new CA.  Only the first node in a cluster does this.
@@ -244,9 +268,18 @@ class ClusterCA:
             .sign(key, hashes.SHA256())
         )
 
-        self._write_key(self.ca_key_path, key)
-        self.ca_cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
-        os.chmod(self.ca_cert_path, 0o644)
+        # Both to one side, then move them in.  Written straight over the top,
+        # dying between the two leaves a CA whose certificate and key do not
+        # match, and that takes the whole cluster's trust with it.
+        key_tmp = self.ca_key_path.with_suffix(".key.tmp")
+        cert_tmp = self.ca_cert_path.with_suffix(".crt.tmp")
+
+        self._write_key(key_tmp, key)
+        cert_tmp.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+        os.chmod(cert_tmp, 0o644)
+
+        os.replace(str(key_tmp), str(self.ca_key_path))
+        os.replace(str(cert_tmp), str(self.ca_cert_path))
 
         log.info("made a new cluster CA at %s", self.ca_cert_path)
 

@@ -227,6 +227,27 @@ def ensure_pki():
         log.info("no cluster CA yet, making one.  This node starts the cluster.")
         ca.create(cluster_name=settings.node_name)
 
+    # A CA whose certificate and key do not match cannot sign anything the rest
+    # of the fleet will accept.  Say so here, plainly, rather than letting it
+    # surface later as peer connections failing for no visible reason.
+    #
+    # Not repaired automatically on purpose.  Every node certificate out there
+    # was signed by this CA, so replacing it would quietly invalidate all of
+    # them and every node would have to rejoin.  That is a decision for a person.
+    if ca.exists() and not ca.ca_pair_ok():
+        log.error("=" * 70)
+        log.error("The cluster CA certificate and its key do not match.")
+        log.error("")
+        log.error("Nothing this node signs will be trusted by the others, and")
+        log.error("joining will not work.  This is not repaired automatically,")
+        log.error("because a new CA would invalidate every node certificate in")
+        log.error("the cluster and they would all have to rejoin.")
+        log.error("")
+        log.error("If this is the only node, the clean fix is to stop it, remove")
+        log.error("%s, and start again.", ca.dir)
+        log.error("If there are other nodes, take the CA files from a healthy one.")
+        log.error("=" * 70)
+
     if not ca.has_node_cert():
         if not ca.ca_key_path.is_file():
             log.warning("no node certificate and no CA key, this node has to rejoin")
