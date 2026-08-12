@@ -684,6 +684,30 @@ def v_apply(req):
             os.rename(previous, MANAGED_DIR)
         raise AgentError(f"could not swap the config into place: {exc}", "io_error")
 
+    # Carry the certificates over.  They live in this folder but they are not
+    # rendered config, so the manager never stages them, and swapping the folder
+    # threw every one of them away.  That is a hole you cannot climb out of:
+    # copy the certs to a node, apply, the apply deletes them, the next render
+    # sees the files missing and leaves the https block out, and applying again
+    # does the same thing forever.
+    #
+    # Copy rather than move, so the folder we set aside stays whole and a
+    # rollback still has everything it started with.
+    if previous is not None:
+        old_certs = previous / "certs"
+        new_certs = MANAGED_DIR / "certs"
+        if old_certs.is_dir() and not new_certs.exists():
+            try:
+                shutil.copytree(old_certs, new_certs)
+            except OSError as exc:
+                # Worth stopping for.  Going on without the certificates means
+                # nginx cannot load any https site, and the test below would
+                # fail with a missing file rather than saying what happened.
+                _rollback(previous, backup_name)
+                raise AgentError(
+                    f"could not carry the certificates across the apply: {exc}", "io_error"
+                )
+
     # Make sure nginx.conf actually pulls our folder in.  Only matters on the
     # first apply, but checking every time is cheap and catches somebody
     # editing the include back out.
