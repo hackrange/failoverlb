@@ -75,6 +75,21 @@ RUN pip install --no-index --find-links=/wheels -r /tmp/requirements.txt \
 WORKDIR /app
 COPY app/ /app/app/
 
+# Catch names that are used but never imported, at build time.
+#
+# A missing import does not show up when the module loads.  Python only looks
+# the name up when that line actually runs, so it sits there quietly until
+# somebody clicks the one button that reaches it and gets a 500.  That is
+# exactly how a NodeRole that was never imported shipped and broke removing a
+# node.  pyflakes finds these in a second, so the build fails instead of the
+# user.
+RUN pip install --no-cache-dir pyflakes==3.2.0 \
+    && if python -m pyflakes app/ | grep -i "undefined name"; then \
+           echo "BUILD STOPPED: the names above are used but never imported."; \
+           exit 1; \
+       fi \
+    && pip uninstall -y pyflakes >/dev/null 2>&1 || true
+
 # /data holds the database, the cluster CA, and this node's own key pair.  It
 # is a volume so pulling a new image never wipes out the cluster trust.
 RUN mkdir -p /data && chown -R nginxmgr:nginxmgr /data /app

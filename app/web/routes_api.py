@@ -43,6 +43,7 @@ from app.models import (
     MapBlock,
     MemberState,
     Node,
+    NodeRole,
     Pool,
     PoolMember,
     RateLimitZone,
