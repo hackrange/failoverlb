@@ -350,7 +350,18 @@ if plan.get("ok"):
           f"https half would be the one dropped")
 
     site = sites[0] if sites else {"custom_config": "", "http2": False}
-    kept = site.get("custom_config", "")
+
+    # Everything the import held onto, wherever it put it.
+    #
+    # Config that belongs to a path now lands on that path rather than on the
+    # site, which is where it should be.  Checking only the site's own box made
+    # this suite report the `if` block and its add_headers as lost the moment
+    # paths were mapped properly, when they had in fact moved somewhere better.
+    # What matters is that nothing was dropped, not which box it is in.
+    kept = site.get("custom_config", "") + "".join(
+        l.get("custom_config", "") + " " + str(l.get("path", ""))
+        for l in (site.get("locations") or [])
+    )
 
     # Each of these was silently dropped at some point.  The round trip logic
     # treats them as ours to regenerate, which is right for our own config and

@@ -2950,3 +2950,175 @@ async def import_apply(request: Request, g: ObjectGuard = Depends(changing)):
     return {"ok": True, **result,
             "message": "imported and left switched off.  Look them over, turn on "
                        "the ones you want, then apply."}
+
+
+# ==============================================================================
+# Paths within a site
+# ==============================================================================
+
+LOCATION_FIELDS = (
+    "path", "match_type", "mode", "document_root", "alias",
+    "redirect_target", "redirect_code", "custom_config", "enabled",
+    "sort_order",
+)
+
+MATCH_TYPES = {"prefix", "exact", "preferential", "regex", "regex_i"}
+LOCATION_MODES = {"proxy", "static", "redirect", "deny"}
+
+
+def _location_json(loc) -> dict:
+    return {
+        "id": loc.id,
+        "path": loc.path,
+        "match_type": loc.match_type,
+        "mode": loc.mode,
+        "pool_id": loc.pool_id,
+        "pool": loc.pool.name if loc.pool else None,
+        "document_root": loc.document_root,
+        "alias": loc.alias,
+        "redirect_target": loc.redirect_target,
+        "redirect_code": loc.redirect_code,
+        "access_list_id": loc.access_list_id,
+        "access_list": loc.access_list.name if loc.access_list else None,
+        "custom_config": loc.custom_config or "",
+        "enabled": bool(loc.enabled),
+        "sort_order": loc.sort_order or 0,
+        "settings": loc.setting_map(),
+    }
+
+
+def _apply_location_fields(loc, payload, g):
+    if "path" in payload:
+        path = (payload.get("path") or "").strip()
+        if not path:
+            raise HTTPException(status_code=400, detail="a path is required")
+        if any(c in path for c in "{};\n\r"):
+            raise HTTPException(status_code=400,
+                                detail="a path cannot contain braces, semicolons or newlines")
+        loc.path = path
+
+    if "match_type" in payload:
+        value = payload.get("match_type") or "prefix"
+        if value not in MATCH_TYPES:
+            raise HTTPException(status_code=400, detail=f"{value} is not a match type")
+        loc.match_type = value
+
+    if "mode" in payload:
+        value = payload.get("mode") or "proxy"
+        if value not in LOCATION_MODES:
+            raise HTTPException(status_code=400, detail=f"{value} is not a mode")
+        loc.mode = value
+
+    for field, model in (("pool_id", Pool), ("access_list_id", AccessList)):
+        if field in payload:
+            value = payload[field]
+            if value in (None, "", 0):
+                setattr(loc, field, None)
+            else:
+                setattr(loc, field, g.get(model, value).id)
+
+    for field in ("document_root", "alias", "redirect_target", "custom_config"):
+        if field in payload:
+            setattr(loc, field, payload.get(field) or None)
+
+    if "redirect_code" in payload:
+        loc.redirect_code = int(payload.get("redirect_code") or 301)
+    if "enabled" in payload:
+        loc.enabled = bool(payload.get("enabled"))
+    if "sort_order" in payload:
+        loc.sort_order = int(payload.get("sort_order") or 0)
+
+    if "settings" in payload and isinstance(payload["settings"], dict):
+        # Validated the same way a site's are, and against the same catalog, so
+        # a setting that is not real cannot be smuggled in on a location when it
+        # would be refused on the site above it.
+        loc.settings = json.dumps(_validate_settings(payload["settings"], "location"))
+
+
+@router.get("/hosts/{host_id}/locations")
+async def list_locations(host_id: str, g: ObjectGuard = Depends(guard)):
+    g.require("view")
+    host = g.get(VirtualHost, host_id)
+    return {"locations": [_location_json(l) for l in
+                          sorted(host.locations, key=lambda x: x.sort_order or 0)]}
+
+
+@router.post("/hosts/{host_id}/locations")
+async def create_location(host_id: str, request: Request,
+                          g: ObjectGuard = Depends(changing)):
+    g.require("edit_sites")
+    host = g.get(VirtualHost, host_id)
+    payload = await request.json()
+
+    existing = sorted(host.locations, key=lambda x: x.sort_order or 0)
+    loc = Location(
+        host_id=host.id,
+        path=(payload.get("path") or "/").strip(),
+        match_type="prefix",
+        mode="proxy",
+        # On the end by default.  Order is what decides which path wins, so a
+        # new one going to the top would quietly take traffic from something
+        # that was already working.
+        sort_order=(existing[-1].sort_order or 0) + 10 if existing else 10,
+        enabled=True,
+    )
+    _apply_location_fields(loc, payload, g)
+    g.session.add(loc)
+    g.session.commit()
+
+    audit.record("location.create", user=g.user, object_type="location",
+                 object_name=f"{host.name}{loc.path}")
+    return _location_json(loc)
+
+
+@router.put("/locations/{loc_id}")
+async def update_location(loc_id: str, request: Request,
+                          g: ObjectGuard = Depends(changing)):
+    g.require("edit_sites")
+    loc = g.get(Location, loc_id)
+    _apply_location_fields(loc, await request.json(), g)
+    g.session.commit()
+
+    audit.record("location.update", user=g.user, object_type="location",
+                 object_name=loc.path)
+    return _location_json(loc)
+
+
+@router.delete("/locations/{loc_id}")
+async def delete_location(loc_id: str, g: ObjectGuard = Depends(changing)):
+    g.require("edit_sites")
+    loc = g.get(Location, loc_id)
+    path = loc.path
+    g.session.delete(loc)
+    g.session.commit()
+
+    audit.record("location.delete", user=g.user, object_type="location",
+                 object_name=path)
+    return {"ok": True}
+
+
+@router.post("/hosts/{host_id}/locations/order")
+async def reorder_locations(host_id: str, request: Request,
+                            g: ObjectGuard = Depends(changing)):
+    """
+    Set the order of the paths on a site.
+
+    Worth its own endpoint rather than a field on each save, because the order
+    is the thing that decides which path handles a request and it has to move as
+    one piece.  Saving them one at a time leaves a moment where two share a
+    position, and which one wins then is down to the database.
+    """
+    g.require("edit_sites")
+    host = g.get(VirtualHost, host_id)
+    payload = await request.json()
+
+    wanted = payload.get("order") or []
+    by_id = {l.id: l for l in host.locations}
+    for position, loc_id in enumerate(wanted, start=1):
+        loc = by_id.get(int(loc_id))
+        if loc is not None:
+            loc.sort_order = position * 10
+    g.session.commit()
+
+    return {"ok": True, "order": [l.id for l in
+                                  sorted(host.locations, key=lambda x: x.sort_order or 0)]}

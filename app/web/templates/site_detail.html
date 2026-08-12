@@ -27,6 +27,7 @@
 {# ---- tabs ---- #}
 <div class="tabs" role="tablist">
   <button class="tab active" data-tab="basics" role="tab">Basics</button>
+  <button class="tab" data-tab="paths" role="tab">Paths</button>
   <button class="tab" data-tab="settings" role="tab">Settings</button>
   <button class="tab" data-tab="config" role="tab">nginx config</button>
 </div>
@@ -184,6 +185,57 @@
 </div>
 
 {# ============================ settings ============================ #}
+<div class="tab-panel" data-panel="paths" hidden>
+
+  <div class="notice warn" id="paths-root-warning" hidden>
+    <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.5 15 14H1L8 1.5zm0 4.2a.8.8 0 0 0-.8.9l.3 3.1h1l.3-3.1a.8.8 0 0 0-.8-.9zM8 11a.85.85 0 1 0 0 1.7A.85.85 0 0 0 8 11z"/></svg>
+    <div>
+      <strong>Nothing here handles <code>/</code>.</strong>
+      As soon as a site has any paths at all, it stops using the single backend
+      on the Basics tab and serves only what is listed here.  A request that
+      matches nothing gets nginx's own 404.  Add a path of <code>/</code> to
+      catch everything else.
+    </div>
+  </div>
+
+  <div class="notice info">
+    <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 3a.9.9 0 1 1 0 1.8A.9.9 0 0 1 8 4zm1.2 8H6.8v-.9h.7V7.9h-.7V7h2.1v4.1h.3V12z"/></svg>
+    <div>
+      Send different paths to different places.  <code>/api</code> to one pool,
+      <code>/static</code> off disk, the rest to the main backend.
+      <br>
+      Leave this empty and the site just uses the backend on the Basics tab,
+      which is what most sites want.
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <h2>Paths</h2>
+      <div class="flex">
+        <button class="help-btn" data-help-static="h-paths"
+                data-help-title="How nginx picks a path" data-help-wide aria-label="Help">?</button>
+        <button class="btn sm" id="add-path">Add a path</button>
+      </div>
+    </div>
+    <div class="card-body tight">
+      <div id="paths-list"></div>
+    </div>
+  </div>
+
+  <div class="card mt">
+    <div class="card-head"><h2>What nginx will do</h2></div>
+    <div class="card-body">
+      <div class="small faint">
+        nginx does not read these top to bottom.  It picks the most specific
+        match, in this order:
+      </div>
+      <ol id="paths-order" class="small"></ol>
+    </div>
+  </div>
+
+</div>
+
 <div class="tab-panel" data-panel="settings" hidden>
   <div class="notice info">
     <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 3a.9.9 0 1 1 0 1.8A.9.9 0 0 1 8 4zm1.2 8H6.8v-.9h.7V7.9h-.7V7h2.1v4.1h.3V12z"/></svg>
@@ -679,6 +731,211 @@ document.addEventListener("DOMContentLoaded", function () {
 
   document.getElementById("f-acl").addEventListener("change", describeAcl);
   describeAcl();
+
+  // ---- paths within the site ---------------------------------------------
+  //
+  // The order shown is not the order they are stored in.  nginx does not read
+  // locations top to bottom: it takes exact matches first, then the longest
+  // preferential prefix, then regexes in the order they appear, then the
+  // longest ordinary prefix.  Showing them in any other order teaches people
+  // something untrue about their own config, and they will act on it.
+
+  const POOLS = {{ pools|map(attribute='id')|list|tojson }};
+  const POOL_NAMES = {{ pools|map(attribute='name')|list|tojson }};
+  let paths = [];
+
+  const MATCH_LABEL = {
+    exact: "exactly this",
+    preferential: "starts with, and beats any regex",
+    regex: "matches this expression",
+    regex_i: "matches, ignoring case",
+    prefix: "starts with"
+  };
+
+  function nginxOrder(list) {
+    // The order nginx really resolves in, so the page can show it.
+    const on = list.filter(l => l.enabled);
+    const exact = on.filter(l => l.match_type === "exact");
+    const pref  = on.filter(l => l.match_type === "preferential")
+                    .sort((a, b) => b.path.length - a.path.length);
+    const rex   = on.filter(l => l.match_type === "regex" || l.match_type === "regex_i");
+    const plain = on.filter(l => l.match_type === "prefix")
+                    .sort((a, b) => b.path.length - a.path.length);
+    return [...exact, ...pref, ...rex, ...plain];
+  }
+
+  function describeTarget(l) {
+    if (l.mode === "proxy") return l.pool ? "to pool " + l.pool : "proxy with no pool set";
+    if (l.mode === "static") return "files from " + (l.alias || l.document_root || "nowhere set");
+    if (l.mode === "redirect") return (l.redirect_code || 301) + " to " + (l.redirect_target || "nowhere set");
+    if (l.mode === "deny") return "refused";
+    return l.mode;
+  }
+
+  function renderPaths() {
+    const list = document.getElementById("paths-list");
+    const order = document.getElementById("paths-order");
+    const warn = document.getElementById("paths-root-warning");
+
+    if (!paths.length) {
+      list.innerHTML = `<div class="small faint">No paths.  The site uses the backend on the Basics tab.</div>`;
+      order.innerHTML = "";
+      warn.hidden = true;
+      return;
+    }
+
+    list.innerHTML = paths.map(l => `
+      <div class="row" data-path-id="${l.id}">
+        <div class="grow">
+          <strong class="mono">${NFM.escapeHtml(l.path)}</strong>
+          <span class="small faint">${NFM.escapeHtml(MATCH_LABEL[l.match_type] || l.match_type)}
+          &middot; ${NFM.escapeHtml(describeTarget(l))}${l.enabled ? "" : " &middot; disabled"}</span>
+        </div>
+        <div class="flex">
+          <button class="btn sm" data-edit-path="${l.id}">Edit</button>
+          <button class="btn sm danger" data-del-path="${l.id}">Delete</button>
+        </div>
+      </div>`).join("");
+
+    const resolved = nginxOrder(paths);
+    order.innerHTML = resolved.map(l =>
+      `<li><span class="mono">${NFM.escapeHtml(l.path)}</span>
+       <span class="small faint">${NFM.escapeHtml(describeTarget(l))}</span></li>`).join("");
+
+    // Anything that would catch a request for / .  A bare prefix of / does it,
+    // and so does a regex, but we do not try to work out whether a regex
+    // matches, so only the prefix counts as cover.
+    const covered = paths.some(l => l.enabled && l.path === "/" &&
+                               (l.match_type === "prefix" || l.match_type === "preferential"));
+    warn.hidden = covered;
+  }
+
+  async function loadPaths() {
+    try {
+      const r = await NFM.api(`/hosts/${HOST_ID}/locations`);
+      paths = r.locations || [];
+      renderPaths();
+    } catch (e) { NFM.toast(e.message || "could not load the paths"); }
+  }
+
+  function pathForm(l) {
+    l = l || { match_type: "prefix", mode: "proxy", enabled: true, redirect_code: 301 };
+    const poolOpts = POOLS.map((id, i) =>
+      `<option value="${id}" ${l.pool_id === id ? "selected" : ""}>${NFM.escapeHtml(POOL_NAMES[i])}</option>`).join("");
+    return `
+      <div class="field"><label for="l-path">Path</label>
+        <input type="text" id="l-path" value="${NFM.escapeHtml(l.path || "")}" placeholder="/api">
+        <div class="hint">What the request has to look like.</div></div>
+      <div class="field"><label for="l-match">Match it how</label>
+        <select id="l-match">
+          <option value="prefix" ${l.match_type === "prefix" ? "selected" : ""}>Starts with this</option>
+          <option value="exact" ${l.match_type === "exact" ? "selected" : ""}>Is exactly this</option>
+          <option value="preferential" ${l.match_type === "preferential" ? "selected" : ""}>Starts with, and beats any regex</option>
+          <option value="regex" ${l.match_type === "regex" ? "selected" : ""}>Regular expression</option>
+          <option value="regex_i" ${l.match_type === "regex_i" ? "selected" : ""}>Regular expression, ignoring case</option>
+        </select></div>
+      <div class="field"><label for="l-mode">What happens</label>
+        <select id="l-mode">
+          <option value="proxy" ${l.mode === "proxy" ? "selected" : ""}>Send it to a pool</option>
+          <option value="static" ${l.mode === "static" ? "selected" : ""}>Serve files from disk</option>
+          <option value="redirect" ${l.mode === "redirect" ? "selected" : ""}>Redirect</option>
+          <option value="deny" ${l.mode === "deny" ? "selected" : ""}>Refuse it</option>
+        </select></div>
+      <div class="field" data-lmode="proxy"><label for="l-pool">Pool</label>
+        <select id="l-pool"><option value="">none</option>${poolOpts}</select></div>
+      <div class="field" data-lmode="static"><label for="l-root">Directory</label>
+        <input type="text" id="l-root" value="${NFM.escapeHtml(l.document_root || "")}" placeholder="/var/www/static">
+        <div class="hint">Left as a root.  Use alias below instead if the path should be stripped.</div></div>
+      <div class="field" data-lmode="static"><label for="l-alias">Alias instead</label>
+        <input type="text" id="l-alias" value="${NFM.escapeHtml(l.alias || "")}" placeholder="optional"></div>
+      <div class="field" data-lmode="redirect"><label for="l-target">Redirect to</label>
+        <input type="text" id="l-target" value="${NFM.escapeHtml(l.redirect_target || "")}" placeholder="https://example.com/new"></div>
+      <div class="field" data-lmode="redirect"><label for="l-code">Code</label>
+        <select id="l-code">
+          <option value="301" ${l.redirect_code === 301 ? "selected" : ""}>301 permanent</option>
+          <option value="302" ${l.redirect_code === 302 ? "selected" : ""}>302 temporary</option>
+        </select></div>
+      <div class="field"><label for="l-custom">Extra config for this path</label>
+        <textarea id="l-custom" rows="3" spellcheck="false">${NFM.escapeHtml(l.custom_config || "")}</textarea></div>
+      <div class="checkline">
+        <input type="checkbox" id="l-enabled" ${l.enabled !== false ? "checked" : ""}>
+        <label for="l-enabled">Enabled</label></div>`;
+  }
+
+  function syncModeFields() {
+    const mode = (document.getElementById("l-mode") || {}).value;
+    document.querySelectorAll("[data-lmode]").forEach(el => {
+      el.hidden = el.getAttribute("data-lmode") !== mode;
+    });
+  }
+
+  function collectPath() {
+    const v = id => (document.getElementById(id) || {}).value || "";
+    const body = {
+      path: v("l-path").trim(),
+      match_type: v("l-match"),
+      mode: v("l-mode"),
+      custom_config: v("l-custom"),
+      enabled: (document.getElementById("l-enabled") || {}).checked
+    };
+    const pool = v("l-pool");
+    body.pool_id = pool ? parseInt(pool, 10) : null;
+    body.document_root = v("l-root").trim() || null;
+    body.alias = v("l-alias").trim() || null;
+    body.redirect_target = v("l-target").trim() || null;
+    body.redirect_code = parseInt(v("l-code") || "301", 10);
+    return body;
+  }
+
+  function openPathDialog(existing) {
+    NFM.openModal(
+      existing ? "Edit " + existing.path : "Add a path", "",
+      pathForm(existing) +
+      '<div class="mt"><button class="btn primary" id="l-save">Save</button></div>');
+
+    syncModeFields();
+    const sel = document.getElementById("l-mode");
+    if (sel) sel.addEventListener("change", syncModeFields);
+
+    document.getElementById("l-save").addEventListener("click", async function () {
+      const body = collectPath();
+      if (!body.path) { NFM.toast("A path is required", "warn"); return; }
+      try {
+        if (existing) {
+          await NFM.api("/locations/" + existing.id, { method: "PUT", body: body });
+        } else {
+          await NFM.api("/hosts/" + HOST_ID + "/locations", { method: "POST", body: body });
+        }
+        NFM.closeModal();
+        NFM.toast("Saved.  Apply the config to send it live.", "ok");
+        await loadPaths();
+      } catch (err) {
+        NFM.toast(err.message || "could not save that path", "warn");
+      }
+    });
+  }
+
+  document.getElementById("add-path").addEventListener("click", () => openPathDialog(null));
+
+  document.getElementById("paths-list").addEventListener("click", async ev => {
+    const edit = ev.target.closest("[data-edit-path]");
+    const del = ev.target.closest("[data-del-path]");
+    if (edit) {
+      const l = paths.find(x => String(x.id) === edit.getAttribute("data-edit-path"));
+      if (l) openPathDialog(l);
+    } else if (del) {
+      const id = del.getAttribute("data-del-path");
+      const l = paths.find(x => String(x.id) === id);
+      if (!confirm(`Delete the path ${l ? l.path : ""}?`)) return;
+      try {
+        await NFM.api(`/locations/${id}`, { method: "DELETE" });
+        await loadPaths();
+        NFM.toast("Deleted.  Apply config to make it live.");
+      } catch (e) { NFM.toast(e.message || "could not delete that"); }
+    }
+  });
+
+  loadPaths();
 
   const saveBtn = document.getElementById("save-site");
   if (saveBtn) saveBtn.addEventListener("click", async function () {

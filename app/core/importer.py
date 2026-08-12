@@ -34,7 +34,7 @@ from app.core.nginx_parser import (
     parse,
     serialize,
 )
-from app.models import Pool, PoolMember, VirtualHost, json_set
+from app.models import Location, Pool, PoolMember, VirtualHost, json_set
 
 log = logging.getLogger("nfm.importer")
 
@@ -283,6 +283,85 @@ def _looks_like_a_host(target: str) -> bool:
     return bool(bare) and ("." in bare or ":" in bare or bare.startswith("["))
 
 
+LOCATION_PREFIXES = {"=": "exact", "^~": "preferential", "~": "regex", "~*": "regex_i"}
+
+
+def _read_location(loc, pools_by_raw_name: dict, site: dict) -> dict:
+    """
+    One location block, as a path on the site.
+
+    Anything it does that we do not model stays in the path's own custom config,
+    the same bargain the site level makes.
+    """
+    args = [_unquote(a) for a in _args(loc)]
+    if not args:
+        return None
+
+    match_type = "prefix"
+    if args[0] in LOCATION_PREFIXES:
+        match_type = LOCATION_PREFIXES[args[0]]
+        args = args[1:]
+    if not args:
+        return None
+
+    path = args[0]
+    if path.startswith("@"):
+        # A named location is a target for error_page and try_files, not a path
+        # anybody browses to.  There is nowhere to put it, so it stays in the
+        # site's custom config where it still works.
+        return None
+
+    spec = {"path": path, "match_type": match_type, "mode": "proxy",
+            "pool": None, "document_root": None, "alias": None,
+            "redirect_target": None, "redirect_code": 301,
+            "custom_config": "", "enabled": True, "notes": []}
+
+    target = _first(loc, "proxy_pass")
+    root = _first(loc, "root")
+    alias = _first(loc, "alias")
+    ret = _first(loc, "return")
+
+    if target is not None and _args(target):
+        dest = _unquote(_args(target)[0])
+        upstream = dest.split("://", 1)[-1].split("/", 1)[0]
+        if upstream in pools_by_raw_name:
+            spec["pool"] = pools_by_raw_name[upstream]["name"]
+        elif _looks_like_a_host(upstream):
+            spec["inline_backend"] = dest
+        else:
+            spec["notes"].append(
+                f"proxies to an upstream called {upstream!r} that was not in "
+                f"what you pasted"
+            )
+    elif ret is not None and _args(ret):
+        rargs = _args(ret)
+        code = rargs[0]
+        dest = _unquote(rargs[1]) if len(rargs) > 1 else ""
+        if code.isdigit() and dest:
+            spec["mode"] = "redirect"
+            spec["redirect_code"] = int(code)
+            spec["redirect_target"] = dest
+        else:
+            spec["mode"] = "deny"
+    elif alias is not None and _args(alias):
+        spec["mode"] = "static"
+        spec["alias"] = _unquote(_args(alias)[0])
+    elif root is not None and _args(root):
+        spec["mode"] = "static"
+        spec["document_root"] = _unquote(_args(root)[0])
+    else:
+        spec["mode"] = "static"
+
+    leftover = _verbatim(loc, {}, extra_drop=(
+        "proxy_pass", "proxy_set_header", "proxy_http_version", "root", "alias",
+        "return",
+    ))
+    if leftover.strip():
+        spec["custom_config"] = leftover
+
+    return spec
+
+
 def _read_server(block, pools_by_raw_name: dict, index: int) -> dict:
     """One server block, as the site it would become."""
     names = []
@@ -370,79 +449,20 @@ def _read_server(block, pools_by_raw_name: dict, index: int) -> dict:
     root_proxy = next((p for p in proxied if p[0].strip() in ("/", "= /")), None)
     chosen = root_proxy or (proxied[0] if proxied else None)
 
-    # A root inside `location /` rather than on the server block.  This is at
-    # least as common as the server level form, and missing it made a plain
-    # static site look like a proxy with no backend, which then warned about a
-    # problem that was not there.
-    if site["mode"] != "redirect" and not chosen:
-        for loc in locations:
-            path = " ".join(_unquote(a) for a in _args(loc)).strip()
-            if path not in ("/", "= /"):
-                continue
-            inner_root = _first(loc, "root")
-            if inner_root is not None and _args(inner_root):
-                site["mode"] = "static"
-                site["document_root"] = _unquote(_args(inner_root)[0])
-                break
-            inner_return = _first(loc, "return")
-            if inner_return is not None:
-                args = _args(inner_return)
-                code = args[0] if args else ""
-                target = _unquote(args[1]) if len(args) > 1 else ""
-                if code.isdigit() and target:
-                    site["mode"] = "redirect"
-                    site["redirect_code"] = int(code)
-                    site["redirect_target"] = target
-                break
-
-    if chosen:
-        path, target, loc = chosen
-        site["mode"] = "proxy"
-        upstream = target.split("://", 1)[-1].split("/", 1)[0]
-        if upstream in pools_by_raw_name:
-            site["pool"] = pools_by_raw_name[upstream]["name"]
-        elif _looks_like_a_host(upstream):
-            # proxy_pass straight at a host rather than an upstream.  Make a
-            # pool for it, because everything downstream expects one.
-            site["pool"] = None
-            site["inline_backend"] = target
+    # Every location that does something, as a path on the site.
+    #
+    # This used to keep one backend and report the rest as not brought over.
+    # The first real config anybody imported had a restricted health endpoint on
+    # its own path, so the very first file hit that wall.
+    real_locations = [l for l in locations if not _is_acme_location(l)]
+    if len(real_locations) > 1:
+        site["locations"] = [_read_location(l, pools_by_raw_name, site) for l in real_locations]
+        site["locations"] = [l for l in site["locations"] if l]
+        if site["locations"]:
             site["notes"].append(
-                f"proxy_pass points straight at {target}, so a pool was made for it"
+                f"{len(site['locations'])} paths were brought over as paths on "
+                f"this site, so each one keeps its own backend"
             )
-        else:
-            # A bare word with no dot and no port is an upstream name, and if it
-            # is not in what was pasted then it is declared in another file.
-            # Inventing a pool with a backend called "gui_pool" would produce
-            # something that looks right in the GUI and resolves to nothing at
-            # all, which is a worse answer than saying what is missing.
-            site["pool"] = None
-            site["skipped"].append(
-                f"the backend for this site is an upstream called {upstream!r}, "
-                f"which is not in what you pasted.  Paste the file that declares "
-                f"it as well, usually the one with the upstream blocks in, and "
-                f"import again."
-            )
-        if target.startswith("https://"):
-            site["backend_tls"] = True
-
-        leftover = _verbatim(loc, {}, extra_drop=(
-            "proxy_pass", "proxy_set_header", "proxy_http_version",
-            "proxy_hide_header",
-        ))
-        if leftover.strip():
-            site["custom_config"] += _commented(
-                leftover,
-                f"From location {path} in the imported config.  This site "
-                f"generates its own location {path}, so these are here rather "
-                f"than in it.  Move what you still need.",
-            )
-
-        for extra_path, extra_target, _l in proxied:
-            if (extra_path, extra_target) != (path, target):
-                site["skipped"].append(
-                    f"location {extra_path} proxying to {extra_target}, because a "
-                    f"site here has one backend and there is no path routing UI yet"
-                )
 
     for loc in locations:
         if chosen is not None and loc is chosen[2]:
@@ -604,7 +624,44 @@ def analyse(text: str) -> dict:
         if secure is site and twin in folded:
             folded[folded.index(twin)] = secure
 
-    # Backends that were written inline rather than as an upstream.
+    # Backends that were written inline rather than as an upstream, on the site
+    # itself or on any of its paths.
+    def _pool_for(target, label):
+        hostport = target.split("://", 1)[-1].split("/", 1)[0]
+        host, _, port = hostport.partition(":")
+        wanted_port = (int(port) if port.isdigit()
+                       else (443 if target.startswith("https://") else 80))
+
+        # Several paths on a site usually proxy to the same place, and making a
+        # pool each would leave a list of identical backends under slightly
+        # different names for somebody to maintain separately.
+        for existing in pools:
+            members = existing.get("members") or []
+            if (len(members) == 1 and members[0]["address"] == host
+                    and members[0]["port"] == wanted_port
+                    and bool(existing.get("backend_tls")) == target.startswith("https://")):
+                return existing["name"]
+
+        spec = {
+            "raw_name": "",
+            "name": _clean_name(label, "imported_pool"),
+            "members": [{"address": host, "port": wanted_port, "weight": 1, "backup": False, "max_fails": 3,
+                         "fail_timeout": 10, "max_conns": 0}],
+            "lb_method": "round_robin",
+            "keepalive": None,
+            "backend_tls": target.startswith("https://"),
+            "notes": ["made from a proxy_pass that named a host directly"],
+        }
+        pools.append(spec)
+        return spec["name"]
+
+    for site in folded:
+        for loc in site.get("locations") or []:
+            target = loc.pop("inline_backend", None)
+            if target:
+                label = f"{site['name']}{loc['path']}".replace("/", "_")
+                loc["pool"] = _pool_for(target, label)
+
     for site in folded:
         target = site.pop("inline_backend", None)
         if not target:
@@ -749,6 +806,31 @@ def apply_plan(session, plan: dict, chosen_sites=None, chosen_pools=None) -> dic
             custom_config=spec.get("custom_config") or "",
         )
         session.add(host)
+        session.flush()
+
+        for order, loc in enumerate(spec.get("locations") or [], start=1):
+            loc_pool_id = None
+            if loc.get("pool"):
+                loc_pool_id = pool_ids.get(loc["pool"])
+                if loc_pool_id is None:
+                    found = session.query(Pool).filter(Pool.name == loc["pool"]).first()
+                    loc_pool_id = found.id if found else None
+
+            session.add(Location(
+                host_id=host.id,
+                path=loc["path"],
+                match_type=loc.get("match_type") or "prefix",
+                mode=loc.get("mode") or "proxy",
+                pool_id=loc_pool_id,
+                document_root=loc.get("document_root"),
+                alias=loc.get("alias"),
+                redirect_target=loc.get("redirect_target"),
+                redirect_code=loc.get("redirect_code") or 301,
+                custom_config=loc.get("custom_config") or "",
+                enabled=True,
+                sort_order=order * 10,
+            ))
+
         made_sites.append(spec["name"])
 
     session.flush()
