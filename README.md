@@ -90,21 +90,62 @@ Audit Log, My Account, Users, Settings.
 
 ## Testing
 
-The docker test rig this was developed against has been retired.  It was two
-Ubuntu containers with nginx really built from source, and it found about twenty
-real bugs, but there are things it could never reach: systemd, real ACME, real
-host permissions, separate machines, reboots.  Testing happens on real servers
-now.
+There are check suites in `checks/`, meant to be run against a real installed
+fleet rather than a mock of one.  Run them on a node, inside the container, so
+they reach the agent and the same database the manager uses:
 
-It was never meant to ship, so it is out of the history too rather than just
-the current tree.
+```bash
+docker exec -i nginx-fleet-manager python < checks/catalog_sweep.py
+```
 
-The old tests are worth reading before trusting anything similar.  One version
-passed while the login page was completely broken in a browser, because the test
-read the CSRF token from the cookie instead of from the rendered form, and was
-helpfully supplying something the page never sent.  Read tokens out of the HTML
-the way a browser does, and cover the first login and the repeat login
-separately.  They are different code paths.
+| Check | What it proves |
+|---|---|
+| `catalog_sweep.py` | Every setting in the catalog renders config that real nginx loads, one at a time and all together |
+| `page_sweep.py` | Every page and read only endpoint answers without raising |
+| `authz_sweep.py` | A viewer cannot write, an operator cannot do admin things, a write with no token or a forged one is refused |
+| `health_checks.py` | The health checker calls a backend up or down correctly, against sockets that misbehave on purpose |
+| `render_safety.py` | A setting cannot write nginx config of its own, and a missing certificate or an empty pool costs one site rather than the fleet |
+| `trust.py` | Peer signatures, encryption at rest, key and certificate pairing, and the audit log keeping secrets out of itself |
+| `parser.py` | Real nginx config parses, including the parts a regex gets wrong |
+| `upgrade_migration.py` | A database made by an older version upgrades cleanly and keeps its rows |
+| `regressions.py` | Every bug that has already cost a day, re-checked |
+
+None of them apply config, restart anything, or write to the database.  A check
+that can take a site down is a check nobody runs twice.
+
+### What is not covered
+
+Being straight about this matters more than the list above.
+
+- **Anything behind a button that writes.**  The pages are checked for handlers
+  that raise, not for whether the button does the right thing.  That needs a
+  person with a browser.
+- **Signing in, lockout, and TOTP.**  Those need a throwaway account and a real
+  session.
+- **The certificate life beyond first issue.**  Renewal, moving DNS to another
+  node and renewing from there, and a certificate whose files are deleted by
+  hand.
+- **Upgrading a running fleet in place**, as opposed to the schema migration
+  that upgrade does, which is checked.
+- **Reboots and failover on real hardware.**  One node has been rebooted and
+  came back clean.  Failover between two nodes under load has not been tested.
+
+If you are deciding whether to put this in front of traffic, that list is the
+honest answer, and the plan in `.claude/PLAN.md` is what closes it.
+
+### A warning from an earlier test suite
+
+One version passed while the login page was completely broken in a browser,
+because the test read the CSRF token from the cookie instead of from the
+rendered form, and was helpfully supplying something the page never sent.  Read
+tokens out of the HTML the way a browser does, and cover the first login and the
+repeat login separately.  They are different code paths.
+
+The same shape turned up again while writing the checks above, three separate
+times: a sweep whose requests were all being turned away and counted as passes,
+a permission check pointed at a route that does not exist, and a search for a
+string that found it inside a quoted value where it was harmless.  Make a check
+prove it reached the thing it claims to test.
 
 ## How the security works
 
