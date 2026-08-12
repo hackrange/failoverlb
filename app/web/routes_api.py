@@ -2786,6 +2786,54 @@ async def list_versions(g: ObjectGuard = Depends(guard), limit: int = 50):
     }
 
 
+@router.get("/versions/{version}/diff")
+async def version_diff(version: int, g: ObjectGuard = Depends(guard)):
+    """
+    What one applied version changed against the one before it.
+
+    Both sides come out of what was actually shipped, so this is history rather
+    than a guess.  Re-rendering the older one from today's objects would show
+    what it would look like now, which is a different and much less useful
+    question.
+    """
+    row = g.session.query(ConfigVersion).filter(
+        ConfigVersion.version == version
+    ).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="no such version")
+
+    before_row = g.session.query(ConfigVersion).filter(
+        ConfigVersion.version < version
+    ).order_by(ConfigVersion.version.desc()).first()
+
+    after = json.loads(row.rendered or "{}")
+    before = json.loads(before_row.rendered or "{}") if before_row else {}
+
+    changes = []
+    for path in sorted(set(before) | set(after)):
+        old, new = before.get(path), after.get(path)
+        if old == new:
+            continue
+        diff = list(difflib.unified_diff(
+            (old or "").splitlines(), (new or "").splitlines(),
+            fromfile=f"v{before_row.version if before_row else 0}/{path}",
+            tofile=f"v{version}/{path}", lineterm="", n=2,
+        ))
+        changes.append({
+            "path": path,
+            "kind": "added" if old is None else ("removed" if new is None else "changed"),
+            "diff": diff[:120],
+            "truncated": len(diff) > 120,
+        })
+
+    return {
+        "version": version,
+        "compared_to": before_row.version if before_row else None,
+        "changed_files": len(changes),
+        "changes": changes,
+    }
+
+
 @router.post("/rollback")
 async def rollback(request: Request, g: ObjectGuard = Depends(changing)):
     """Put the last known good config back on this node."""

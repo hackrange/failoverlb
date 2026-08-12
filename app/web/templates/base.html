@@ -116,6 +116,11 @@
         </a>
       {% endif %}
 
+      <a href="{{ base }}/changes" class="{{ 'active' if active_page == 'changes' }}">
+        <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M3 2h7l3 3v9H3V2zm1 1v10h8V6H9V3H4zm2 4h5v1H6V7zm0 2.5h5v1H6v-1z"/></svg>
+        Changes
+      </a>
+
       <a href="{{ base }}/audit" class="{{ 'active' if active_page == 'audit' }}">
         <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M4 1h6l3 3v11H4V1zm5 1v3h3M6 7h5v1H6V7zm0 2.5h5v1H6v-1zm0 2.5h3v1H6v-1z"/></svg>
         Audit Log

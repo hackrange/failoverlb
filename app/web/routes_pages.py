@@ -620,6 +620,28 @@ async def parity_page(request: Request, db: DBSession = Depends(get_db)):
     return response
 
 
+@router.get("/changes", response_class=HTMLResponse)
+async def changes_page(request: Request, db: DBSession = Depends(get_db)):
+    """
+    What is waiting to go out, and what already has.
+
+    Two questions people ask in the same breath, so they belong on one page:
+    what will change if I press the button, and what changed last time somebody
+    did.
+    """
+    from app.models import ConfigVersion
+
+    user = require_page_user(request, db)
+    token = ensure_csrf_token(request)
+    response = render(
+        request, "changes.html", user, csrf_token=token, active_page="changes",
+        versions=db.query(ConfigVersion)
+                   .order_by(ConfigVersion.version.desc()).limit(50).all(),
+    )
+    issue_csrf_token(response, token)
+    return response
+
+
 @router.get("/audit", response_class=HTMLResponse)
 async def audit_page(request: Request, db: DBSession = Depends(get_db)):
     from app.models import AuditLog
