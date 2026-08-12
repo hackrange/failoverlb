@@ -195,6 +195,31 @@ else:
               f"these have a 443 member and are still plain http: {wrong}")
 
 print()
+print("  a promoted standby cannot wipe the fleet")
+
+from app.core.cluster import looks_like_a_wipe   # noqa: E402
+
+cases = [
+    ("a first apply is allowed", {}, {"sites/a.conf": ""}, False),
+    ("a normal edit is allowed",
+     {"sites/a.conf": "", "sites/b.conf": ""},
+     {"sites/a.conf": "x", "sites/b.conf": ""}, False),
+    ("deleting one site of three is allowed",
+     {"sites/a.conf": "", "sites/b.conf": "", "sites/c.conf": ""},
+     {"sites/a.conf": "", "sites/b.conf": ""}, False),
+    ("losing every site is refused",
+     {"sites/a.conf": "", "sites/b.conf": ""}, {"00-managed.conf": ""}, True),
+    ("losing most sites at once is refused",
+     {"sites/a.conf": "", "sites/b.conf": "", "sites/c.conf": "", "sites/d.conf": ""},
+     {"sites/a.conf": ""}, True),
+]
+for label, previous, incoming, should_refuse in cases:
+    refused = bool(looks_like_a_wipe(previous, incoming))
+    check(label, refused == should_refuse,
+          f"{'refused' if refused else 'allowed'} when it should have been "
+          f"{'refused' if should_refuse else 'allowed'}")
+
+print()
 print("  live behaviour")
 with session_scope() as s:
     sites = [h.name for h in s.query(VirtualHost).all()

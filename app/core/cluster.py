@@ -65,6 +65,54 @@ MAX_CLOCK_SKEW_SECONDS = 60
 _seen_nonces = {}
 
 
+def looks_like_a_wipe(previous: dict, incoming: dict) -> str:
+    """
+    Would applying this throw away most of what is already being served.
+
+    Gives back a reason when it would, and an empty string when it is a normal
+    change.
+
+    This exists because of a real one.  A standby holds the rendered files but
+    not the objects they were rendered from, so a standby that gets promoted and
+    renders has nothing to render.  It produced a config with every site missing,
+    applied it to itself, and wiped its own config.  Then it queued the same
+    empty config for the node that was down, which would have taken the live
+    node with it when that node came back.
+
+    The rule is deliberately blunt.  Going from some sites to none is not a
+    change anybody makes on purpose, and the cost of being wrong is that
+    somebody deleting their last site has to say so twice.  The cost of not
+    having it is both load balancers serving nothing.
+
+    Deleting sites one at a time is untouched, and so is a first apply, since
+    there is nothing to lose when nothing is there yet.
+    """
+    def sites(files):
+        return {p for p in files if p.startswith("sites/")}
+
+    was, now = sites(previous), sites(incoming)
+
+    if not was:
+        return ""                       # nothing was being served, nothing to lose
+
+    if not now:
+        return (
+            f"this would remove all {len(was)} site files and leave nothing being "
+            f"served.  A config that renders no sites usually means the objects "
+            f"they come from are missing rather than that somebody deleted every "
+            f"site, which is what happens on a node that was promoted from standby."
+        )
+
+    gone = was - now
+    if len(gone) > len(was) / 2:
+        return (
+            f"this would remove {len(gone)} of {len(was)} site files at once: "
+            f"{', '.join(sorted(p.split('/')[-1] for p in gone)[:5])}"
+        )
+
+    return ""
+
+
 class ClusterError(Exception):
     pass
 
@@ -375,7 +423,7 @@ class ClusterManager:
 
     async def apply_config(self, rendered: dict, checksum: str, summary: str,
                            author: str, snapshot: dict,
-                           user_checksum: str = None) -> dict:
+                           user_checksum: str = None, force: bool = False) -> dict:
         """
         Push a config change out to the whole fleet, safely.
 
@@ -396,11 +444,11 @@ class ClusterManager:
         """
         async with self._apply_lock:
             return await self._apply_config_locked(
-                rendered, checksum, summary, author, snapshot, user_checksum
+                rendered, checksum, summary, author, snapshot, user_checksum, force
             )
 
     async def _apply_config_locked(self, rendered, checksum, summary, author, snapshot,
-                                   user_checksum=None):
+                                   user_checksum=None, force=False):
         started = time.monotonic()
 
         with session_scope() as session:
@@ -410,10 +458,34 @@ class ClusterManager:
                     "Make your change on the active node."
                 )
 
-            # Nothing to do.  Saying so beats a pointless reload of every box.
             latest = session.query(ConfigVersion).order_by(
                 ConfigVersion.version.desc()
             ).first()
+
+            # Refuse to serve nothing.  A render that has lost every site is
+            # almost always a node that cannot see the objects rather than
+            # somebody deleting their whole estate, and applying it takes the
+            # fleet down.  Checked before the version row is written so a
+            # refused apply leaves no trace to clean up.
+            if latest and not force:
+                reason = looks_like_a_wipe(json.loads(latest.rendered or "{}"), rendered)
+                if reason:
+                    log.error("refusing to apply: %s", reason)
+                    return {
+                        "ok": False,
+                        "phase": "refused",
+                        "error": (
+                            f"Refused, because {reason}\n\n"
+                            f"If this node was just promoted from standby, it does not "
+                            f"have the sites and pools, only the files it was given, and "
+                            f"it should carry on serving those.\n\n"
+                            f"If you really did mean to remove them, apply again with "
+                            f"force set."
+                        ),
+                        "refused": True,
+                    }
+
+            # Nothing to do.  Saying so beats a pointless reload of every box.
             if latest and latest.checksum == checksum:
                 return {
                     "ok": True,
@@ -472,7 +544,7 @@ class ClusterManager:
 
         for info in peer_info:
             try:
-                result = await self._prepare_peer(info, rendered, next_version, checksum)
+                result = await self._prepare_peer(info, rendered, next_version, checksum, force)
                 if result.get("ok"):
                     prepared.append(info["name"])
                 else:
@@ -685,7 +757,7 @@ class ClusterManager:
 
     # ---- prepare and commit, on a peer -------------------------------------
 
-    async def _prepare_peer(self, info, rendered, version, checksum) -> dict:
+    async def _prepare_peer(self, info, rendered, version, checksum, force=False) -> dict:
         with session_scope() as session:
             node = session.query(Node).filter(Node.name == info["name"]).first()
             if not node:
@@ -694,7 +766,8 @@ class ClusterManager:
 
         return await client.call(
             "/peer/config/prepare",
-            {"version": version, "checksum": checksum, "files": rendered},
+            {"version": version, "checksum": checksum, "files": rendered,
+             "force": bool(force)},
             timeout=PEER_PREPARE_TIMEOUT,
         )
 

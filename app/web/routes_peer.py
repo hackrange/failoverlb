@@ -16,7 +16,8 @@ from fastapi import APIRouter, HTTPException, Request
 
 from app.config import get_settings
 from app.core.agent_client import AgentError, get_agent
-from app.core.cluster import ClusterError, verify_peer_request
+from app.core.cluster import ClusterError, looks_like_a_wipe, verify_peer_request
+from app.core.render import MANAGED_ROOT
 from app.db import session_scope
 from app.models import Node, NodeRole, utcnow
 
@@ -139,6 +140,34 @@ async def config_prepare(request: Request):
 
     if not isinstance(files, dict) or not files:
         raise HTTPException(status_code=400, detail="no files were sent")
+
+    # Do not let another node empty this one.
+    #
+    # The active node checks this before sending, so reaching here means either
+    # somebody forced it or the sender is running an older build.  Checking
+    # again costs one directory listing and is the difference between losing one
+    # node's config and losing the fleet's: the node that promoted itself and
+    # wiped its own config queued the same empty config for the node that was
+    # down, and that node was serving all the traffic.
+    if not payload.get("force"):
+        try:
+            listing = await get_agent().list_dir(f"{MANAGED_ROOT}/sites")
+            live = {f"sites/{e['name']}" for e in listing.get("entries", [])
+                    if e.get("name", "").endswith(".conf")}
+        except AgentError:
+            live = set()          # cannot tell, so do not stand in the way
+
+        reason = looks_like_a_wipe({p: "" for p in live}, files)
+        if reason:
+            log.error("refusing version %s from %s: %s", version, node.name, reason)
+            return {
+                "ok": False,
+                "node": get_settings().node_name,
+                "output": (
+                    f"Refused on {get_settings().node_name}, because {reason}\n\n"
+                    f"This node is still serving what it has.  Nothing was changed."
+                ),
+            }
 
     log.info("staging version %s from %s", version, node.name)
 

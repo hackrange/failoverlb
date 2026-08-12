@@ -164,7 +164,8 @@ def render_current(session, ignore_health: bool = False) -> tuple:
     return files, renderer.checksum(), snapshot
 
 
-async def apply_current_config(author: str = "system", summary: str = "") -> dict:
+async def apply_current_config(author: str = "system", summary: str = "",
+                               force: bool = False) -> dict:
     """
     Render everything and push it out to the fleet.
 
@@ -179,6 +180,7 @@ async def apply_current_config(author: str = "system", summary: str = "") -> dic
         _f, user_checksum, _s = render_current(session, ignore_health=True)
 
     return await get_cluster().apply_config(
+        force=force,
         user_checksum=user_checksum,
         rendered=files,
         checksum=checksum,
@@ -1608,7 +1610,16 @@ async def apply(request: Request, g: ObjectGuard = Depends(changing)):
 
     summary = str(payload.get("summary", "manual apply"))[:500]
 
-    result = await apply_current_config(author=g.user.username, summary=summary)
+    # Force is how somebody says they really do mean to remove every site.  It
+    # is off unless asked for, because the case it exists for is rare and the
+    # case it guards against takes the fleet down.
+    force = bool(payload.get("force"))
+    if force:
+        log.warning("%s applied with force, so the wipe check was skipped",
+                    g.user.username)
+
+    result = await apply_current_config(author=g.user.username, summary=summary,
+                                        force=force)
 
     audit.record(
         "config.apply",
