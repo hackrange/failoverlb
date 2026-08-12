@@ -144,6 +144,15 @@ async def refresh_local_state():
             node.load_average = (status.get("load_average") or [None])[0]
             node.disk_free_bytes = status.get("disk_free")
             node.last_heartbeat = utcnow()
+
+            # The agent answered, so whatever it said last time it did not is
+            # over.  This was never cleared, so one slow reply left "the agent
+            # did not answer status within 30s" sitting on the node for good,
+            # next to a module count and a heartbeat from a second ago that
+            # proved the opposite.  An error that does not go away when the
+            # problem does is worse than no error, because people stop believing
+            # any of them.
+            node.last_error = None
             session.commit()
 
     # Our own addresses, so the management allow list can include them and the
