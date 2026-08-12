@@ -989,6 +989,29 @@ map $cookie_{cookie} $sticky_{_safe_var(pool.name)} {{
                 add.append((name.strip(), value.strip()))
 
         if add:
+            # Drop the backend's copy of anything we are about to set.
+            #
+            # add_header appends, it does not replace.  Proxy to a backend that
+            # already sets these and the browser gets two of each, and two of
+            # these do not agree: a backend saying X-Frame-Options DENY next to
+            # our SAMEORIGIN.  Browsers do not settle that the same way, and
+            # several treat a contradictory pair as no answer at all, so a
+            # header we added to harden the site ends up removing the
+            # protection the backend already had.
+            #
+            # Hiding first means exactly one of each goes out and it is the one
+            # configured here.  That is the trade: this page decides, so a
+            # backend asking for something stricter gets overruled.  It is the
+            # only version that is predictable, since the alternative is a
+            # header whose value depends on what the backend happened to send,
+            # and the setting is right here for anybody who wants DENY.
+            lines.append("    # The backend may set these too, and add_header appends rather")
+            lines.append("    # than replaces, so we drop its copy first.  Two of these that")
+            lines.append("    # disagree is worse than either one on its own.")
+            for name, _value in add:
+                lines.append(f"    proxy_hide_header {name};")
+            lines.append("")
+
             lines.append("    # Security headers.  The 'always' on the end matters: without it")
             lines.append("    # these are left off error responses, which is exactly when a")
             lines.append("    # browser is most likely to do something you did not intend.")
