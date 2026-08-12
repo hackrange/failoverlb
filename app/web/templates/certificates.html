@@ -70,6 +70,9 @@
               <td class="right nowrap">
                 <button class="btn sm" data-where="{{ c.id }}">Where?</button>
                 {% if can('edit_certs') %}
+                  {% if c.not_after and synced|length < nodes|length %}
+                    <button class="btn sm" data-replicate="{{ c.id }}">Copy to all</button>
+                  {% endif %}
                   <button class="btn sm" data-issue="{{ c.id }}">
                     {{ 'Renew' if c.not_after else 'Get it' }}
                   </button>
@@ -173,6 +176,32 @@ today.</p>
 document.addEventListener("DOMContentLoaded", function () {
 
   document.body.addEventListener("click", async function (e) {
+    const repBtn = e.target.closest("[data-replicate]");
+    if (repBtn) {
+      const id = repBtn.getAttribute("data-replicate");
+      repBtn.disabled = true;
+      repBtn.textContent = "Copying...";
+      try {
+        const r = await NFM.api("/certs/" + id + "/replicate", { method: "POST", body: {} });
+        const ok = (r.ok || []).length;
+        const bad = r.failed || [];
+        if (bad.length) {
+          // Say which node and why.  "copied to 1 of 2" with no reason is
+          // exactly the dead end this button exists to get out of.
+          NFM.toast("Copied to " + ok + ", failed on " +
+                    bad.map(f => f.node + " (" + f.error + ")").join(", "), "bad");
+        } else {
+          NFM.toast("Copied to every node (" + ok + ")", "ok");
+        }
+        setTimeout(function () { window.location.reload(); }, 1400);
+      } catch (err) {
+        NFM.toast(err.message, "bad");
+        repBtn.disabled = false;
+        repBtn.textContent = "Copy to all";
+      }
+      return;
+    }
+
     const whereBtn = e.target.closest("[data-where]");
     if (whereBtn) {
       try {

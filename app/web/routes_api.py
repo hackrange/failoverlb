@@ -1627,11 +1627,36 @@ async def remove_node(node_name: str, g: ObjectGuard = Depends(changing)):
 
 @router.post("/cluster/resync")
 async def resync(g: ObjectGuard = Depends(changing)):
-    """Push the current config at anybody who is behind, right now."""
+    """
+    Push the current config at anybody who is behind, right now.
+
+    Certificates go too.  Config was the only thing this caught, so a node that
+    joined after a certificate was issued stayed without it and pressing Sync
+    now did not help, which is the one button anybody would try.  Sync should
+    mean everything the other nodes need, not just the config files.
+    """
     g.require("manage_cluster")
     await get_cluster().drain_pending()
-    audit.record("cluster.resync", user=g.user, object_type="cluster")
-    return {"ok": True}
+
+    certs_done, certs_failed = 0, []
+    with session_scope() as session:
+        cert_ids = [
+            c.id for c in session.query(Certificate).all()
+            if c.usable
+        ]
+
+    manager = get_cert_manager()
+    for cid in cert_ids:
+        try:
+            await manager.replicate(cid)
+            certs_done += 1
+        except AcmeError as exc:
+            certs_failed.append(str(exc)[:120])
+            log.warning("resync could not copy certificate %s: %s", cid, exc)
+
+    audit.record("cluster.resync", user=g.user, object_type="cluster",
+                 detail=f"config plus {certs_done} certificate(s)")
+    return {"ok": True, "certificates_copied": certs_done, "certificate_errors": certs_failed}
 
 
 # ==============================================================================
@@ -2220,6 +2245,33 @@ async def issue_cert(cert_id: str, g: ObjectGuard = Depends(changing)):
 
     audit.record("cert.issue", user=g.user, object_type="cert", object_name=cert.name,
                  detail=f"issued by {result.get('issued_by')}")
+    return result
+
+
+@router.post("/certs/{cert_id}/replicate")
+async def replicate_cert(cert_id: str, g: ObjectGuard = Depends(changing)):
+    """
+    Push a certificate out to every node again.
+
+    Replication used to happen only as the last step of issuing.  That is fine
+    until the fleet changes afterwards: a node that joins later was never sent
+    the certificates that already existed, so it sat there missing them with no
+    way to ask for a copy.  "pushed to 1 of 2" and no button to do anything
+    about it.
+
+    Safe to run whenever.  A node that already has the files just gets the same
+    bytes written over the top.
+    """
+    cert = g.get(Certificate, cert_id, "edit_certs")
+
+    try:
+        result = await get_cert_manager().replicate(cert.id)
+    except AcmeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    audit.record("cert.replicate", user=g.user, object_type="cert",
+                 object_name=cert.name,
+                 detail=f"copied to {len(result.get('ok', []))} node(s)")
     return result
 
 
