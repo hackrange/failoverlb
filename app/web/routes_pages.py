@@ -34,7 +34,7 @@ from app.core import audit
 from app.core.capabilities import get_local_capabilities
 from app.core.cluster import get_cluster
 from app.db import get_db, session_scope
-from app.models import Certificate, ConfigVersion, Node, Pool, VirtualHost
+from app.models import AccessList, Certificate, ConfigVersion, Node, Pool, VirtualHost
 from app.web.security import (
     SESSION_COOKIE,
     check_csrf,
@@ -532,6 +532,7 @@ async def site_detail(host_id: str, request: Request, db: DBSession = Depends(ge
 
     guard = ObjectGuard(db, user)
     host = guard.get(VirtualHost, host_id)
+    acls = db.query(AccessList).order_by(AccessList.name).all()
 
     token = ensure_csrf_token(request)
     response = render(
@@ -539,9 +540,55 @@ async def site_detail(host_id: str, request: Request, db: DBSession = Depends(ge
         host=host,
         pools=db.query(Pool).order_by(Pool.name).all(),
         certs=db.query(Certificate).order_by(Certificate.name).all(),
+        access_lists=acls,
+        acl_summary=[_acl_summary(a) for a in acls],
+        # What address this request came from, so the page can tell somebody
+        # they are about to shut themselves out.  See the note in the template.
+        viewer_ip=client_ip(request),
+        node_addresses=_management_addresses(db),
     )
     issue_csrf_token(response, token)
     return response
+
+
+def _acl_summary(acl) -> dict:
+    """
+    An access list as the site page needs it.
+
+    Only what is needed to say, on that page, what picking this list will do and
+    whether the person picking it is about to shut themselves out.
+    """
+    return {
+        "id": acl.id,
+        "name": acl.name,
+        "allow": acl.allows(),
+        "deny": acl.denies(),
+        "default_action": acl.default_action,
+        "include_management": bool(acl.include_management),
+        "use_real_ip": bool(acl.use_real_ip),
+        "basic_auth": bool(acl.basic_auth_enabled),
+    }
+
+
+def _management_addresses(db) -> list:
+    """
+    Every address a rule marked "always allow the management network" covers.
+
+    The page needs these to answer the only question that matters when somebody
+    picks an access list: will I still be able to reach this.
+    """
+    from app.core.settings_store import get as setting
+
+    out = []
+    for node in db.query(Node).all():
+        if node.address:
+            out.append(node.address)
+        for entry in node.local_address_list():
+            addr = entry.get("address")
+            if addr and entry.get("scope") == "global":
+                out.append(addr)
+    out.extend(setting("management_networks") or [])
+    return sorted(set(out))
 
 
 @router.get("/pools", response_class=HTMLResponse)

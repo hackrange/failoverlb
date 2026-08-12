@@ -131,6 +131,50 @@
       </div>
 
       <div class="field mt">
+        <label for="f-acl">Who can reach this site</label>
+        <select id="f-acl">
+          <option value="">Anybody</option>
+          {% for a in access_lists %}
+            <option value="{{ a.id }}" {{ 'selected' if host.access_list_id == a.id }}>{{ a.name }}{% if a.description %} - {{ a.description }}{% endif %}</option>
+          {% endfor %}
+        </select>
+        <div class="hint">
+          Lists are made on the <a href="{{ base }}/zones">zones and access page</a>,
+          so more than one site can share one.
+        </div>
+      </div>
+
+      {# What the choice actually does, in the order nginx reads it.
+
+         nginx takes the first rule that matches and stops there, so a deny
+         written under an allow for the same address never runs.  Somebody
+         looking at a list of addresses on the other page cannot see that, and
+         the way they find out is a rule that quietly does nothing.  So the
+         order is spelled out here, where the list gets attached to a site. #}
+      <div id="acl-effect" class="notice info mt" hidden>
+        <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 3a.9.9 0 1 1 0 1.8A.9.9 0 0 1 8 4zm1.2 8H6.8v-.9h.7V7.9h-.7V7h2.1v4.1h.3V12z"/></svg>
+        <div>
+          <strong>In this order, and the first one that matches wins:</strong>
+          <ol id="acl-order"></ol>
+        </div>
+      </div>
+
+      {# The way back in.
+
+         Somebody will restrict a site to an address they are not on.  The plan
+         for this said the fix must not be editing files on the box, so the
+         check happens here, before saving, against the address this request
+         actually came from.
+
+         A warning and not a refusal: shutting yourself out on purpose is a
+         legitimate thing to do, and the person doing it is often about to move
+         to the address they just allowed. #}
+      <div id="acl-lockout" class="notice warn mt" hidden>
+        <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.5 15 14H1L8 1.5zm0 4.2a.8.8 0 0 0-.8.9l.3 3.1h1l.3-3.1a.8.8 0 0 0-.8-.9zM8 11a.85.85 0 1 0 0 1.7A.85.85 0 0 0 8 11z"/></svg>
+        <div id="acl-lockout-text"></div>
+      </div>
+
+      <div class="field mt">
         <label for="f-notes">Notes</label>
         <textarea id="f-notes" rows="2"
                   placeholder="what this site is for, who owns it">{{ host.notes or '' }}</textarea>
@@ -327,6 +371,12 @@ document.addEventListener("DOMContentLoaded", function () {
   const HOST_ID = {{ host.id }};
   const BASE = document.querySelector('meta[name=nfm-base]').content;
   const saved = {{ host.setting_map()|tojson }};
+
+  // The access lists, with enough of each to explain what picking it does
+  // without another round trip.
+  const ACLS = {{ acl_summary|tojson }};
+  const VIEWER_IP = {{ viewer_ip|tojson }};
+  const MGMT_ADDRESSES = {{ node_addresses|tojson }};
   let catalog = null;
   let dirty = false;
 
@@ -529,6 +579,107 @@ document.addEventListener("DOMContentLoaded", function () {
   }
 
   // ---- saving ----
+  // ---- who can reach this site -------------------------------------------
+  //
+  // Two jobs.  Show the rules in the order nginx will read them, because first
+  // match wins and that is not visible anywhere else.  And say so when the
+  // person setting it up is not on an address the list lets through, because
+  // the alternative is finding out by being locked out.
+
+  function inRange(ip, cidr) {
+    // Enough to answer "is my address covered", for v4 and for a plain v6
+    // match.  Anything cleverer belongs on the server, and getting this wrong
+    // in the cautious direction only means an extra warning.
+    if (!ip || !cidr) return false;
+    if (cidr === "all" || cidr === "0.0.0.0/0" || cidr === "::/0") return true;
+    if (cidr.indexOf("/") === -1) return ip === cidr;
+
+    const [net, bitsRaw] = cidr.split("/");
+    const bits = parseInt(bitsRaw, 10);
+    if (net.indexOf(":") !== -1 || ip.indexOf(":") !== -1) {
+      // v6: only claim a match on an exact address, rather than pretend to
+      // understand prefixes here.
+      return ip === net;
+    }
+    const toInt = a => a.split(".").reduce((n, o) => (n << 8 >>> 0) + parseInt(o, 10), 0) >>> 0;
+    if (ip.split(".").length !== 4 || net.split(".").length !== 4) return false;
+    if (!(bits >= 0 && bits <= 32)) return false;
+    const mask = bits === 0 ? 0 : (0xFFFFFFFF << (32 - bits)) >>> 0;
+    return ((toInt(ip) & mask) >>> 0) === ((toInt(net) & mask) >>> 0);
+  }
+
+  function aclReachable(acl) {
+    // Same order nginx uses, and stop at the first match.
+    if (acl.include_management && MGMT_ADDRESSES.some(c => inRange(VIEWER_IP, c))) return true;
+    for (const c of acl.allow) if (inRange(VIEWER_IP, c)) return true;
+    for (const c of acl.deny) if (inRange(VIEWER_IP, c)) return false;
+    return acl.default_action === "allow";
+  }
+
+  function describeAcl() {
+    const box = document.getElementById("acl-effect");
+    const list = document.getElementById("acl-order");
+    const warn = document.getElementById("acl-lockout");
+    const warnText = document.getElementById("acl-lockout-text");
+    const chosen = document.getElementById("f-acl").value;
+    const acl = ACLS.find(a => String(a.id) === String(chosen));
+
+    if (!acl) {
+      box.hidden = true;
+      warn.hidden = true;
+      return;
+    }
+
+    const steps = [];
+    if (acl.include_management) {
+      steps.push("Allow this cluster's own nodes and the management networks");
+    }
+    if (acl.use_real_ip) {
+      steps.push("Take the client address from the forwarded header, but only when the request came from a trusted proxy");
+    }
+    acl.allow.forEach(c => steps.push("Allow " + c));
+    acl.deny.forEach(c => steps.push("Deny " + c));
+    steps.push(acl.default_action === "allow"
+      ? "Allow anything that got this far"
+      : "Deny anything that got this far");
+    if (acl.basic_auth) {
+      steps.push("Then ask for a username and password");
+    }
+
+    list.innerHTML = "";
+    steps.forEach(text => {
+      const li = document.createElement("li");
+      li.textContent = text;
+      list.appendChild(li);
+    });
+    box.hidden = false;
+
+    // A deny that sits under an allow covering the same ground never runs.
+    // Worth saying, because the page above makes it look like it will.
+    const shadowed = acl.deny.filter(d => acl.allow.some(a => a === d || inRange(d.split("/")[0], a)));
+
+    const reachable = aclReachable(acl);
+    if (!reachable) {
+      warnText.innerHTML =
+        "<strong>You are at " + NFM.escapeHtml(VIEWER_IP || "an unknown address") +
+        ", which this list does not let through.</strong>  Saving and applying " +
+        "will shut you out of this site, though not out of this management page. " +
+        " If that is not what you meant, add your address to the list first, or " +
+        "tick the management networks option on it.";
+      warn.hidden = false;
+    } else if (shadowed.length) {
+      warnText.innerHTML = "<strong>" + NFM.escapeHtml(shadowed.join(", ")) +
+        "</strong> is denied lower down but allowed higher up, so the deny will " +
+        "never run.  nginx stops at the first rule that matches.";
+      warn.hidden = false;
+    } else {
+      warn.hidden = true;
+    }
+  }
+
+  document.getElementById("f-acl").addEventListener("change", describeAcl);
+  describeAcl();
+
   const saveBtn = document.getElementById("save-site");
   if (saveBtn) saveBtn.addEventListener("click", async function () {
     const mode = document.getElementById("f-mode").value;
@@ -548,6 +699,8 @@ document.addEventListener("DOMContentLoaded", function () {
     body.pool_id = pool ? parseInt(pool, 10) : null;
     const cert = document.getElementById("f-cert").value;
     body.cert_id = cert ? parseInt(cert, 10) : null;
+    const acl = document.getElementById("f-acl").value;
+    body.access_list_id = acl ? parseInt(acl, 10) : null;
 
     if (mode === "static") body.document_root = document.getElementById("f-root").value.trim();
     if (mode === "redirect") body.redirect_target = document.getElementById("f-target").value.trim();
