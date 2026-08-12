@@ -467,8 +467,15 @@ class ClusterManager:
             # somebody deleting their whole estate, and applying it takes the
             # fleet down.  Checked before the version row is written so a
             # refused apply leaves no trace to clean up.
-            if latest and not force:
-                reason = looks_like_a_wipe(json.loads(latest.rendered or "{}"), rendered)
+            #
+            # Compared against what is on disk, not against this node's version
+            # history.  A promoted standby has no history worth trusting: it
+            # either has none at all, or it has the empty version it wrote the
+            # last time this happened, and comparing an empty render against an
+            # empty record says everything is fine.  The files being served are
+            # the only honest answer to what would be lost.
+            if not force:
+                reason = looks_like_a_wipe(await self._live_config_files(), rendered)
                 if reason:
                     log.error("refusing to apply: %s", reason)
                     return {
@@ -756,6 +763,35 @@ class ClusterManager:
             return {"ok": False, "output": str(exc)}
 
     # ---- prepare and commit, on a peer -------------------------------------
+
+    async def _live_config_files(self) -> dict:
+        """
+        What this node is serving right now, as a file map.
+
+        Read off disk through the agent rather than out of the database, because
+        the question is what applying would take away, and the answer to that is
+        whatever is live.  A node whose database and disk disagree is exactly the
+        case worth catching.
+
+        An agent that will not answer gives back nothing, which makes the wipe
+        check stand aside.  Guessing that a node has no sites when we simply
+        cannot see is the wrong way to be wrong: it would block every apply on a
+        node whose agent is briefly down.
+        """
+        from app.core.agent_client import get_agent
+        from app.core.render import MANAGED_ROOT
+
+        try:
+            listing = await get_agent().list_dir(f"{MANAGED_ROOT}/sites")
+        except Exception as exc:
+            log.debug("cannot list the live sites, skipping the wipe check: %s", exc)
+            return {}
+
+        return {
+            f"sites/{entry['name']}": ""
+            for entry in listing.get("entries", [])
+            if str(entry.get("name", "")).endswith(".conf")
+        }
 
     async def _prepare_peer(self, info, rendered, version, checksum, force=False) -> dict:
         with session_scope() as session:
