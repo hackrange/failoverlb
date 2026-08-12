@@ -177,6 +177,17 @@ class ClusterCA:
         self.node_key_path = self.dir / "node.key"
         self.node_cert_path = self.dir / "node.crt"
 
+        # Where a key waits while we are asking somebody to sign it.
+        #
+        # Joining makes a new key and then asks the sponsor for a certificate.
+        # That request can fail, and often does: a spent token, a firewall, a
+        # sponsor that is not up yet.  If the new key has already replaced the
+        # live one by then, this node is left with a key and a certificate that
+        # do not match, the peer listener will not start, and it crash loops
+        # with no way back.  A failed join has to leave the node exactly as it
+        # was, so the new key sits here until a certificate for it turns up.
+        self.node_key_pending_path = self.dir / "node.key.pending"
+
     # ---- the CA itself ------------------------------------------------------
 
     def exists(self) -> bool:
@@ -290,7 +301,8 @@ class ClusterCA:
             .sign(key, hashes.SHA256())
         )
 
-        self._write_key(self.node_key_path, key)
+        # Deliberately not node_key_path.  See node_key_pending_path.
+        self._write_key(self.node_key_pending_path, key)
         return key, csr.public_bytes(serialization.Encoding.PEM).decode()
 
     def sign_node_csr(self, csr_pem: str, node_name: str) -> str:
@@ -361,12 +373,44 @@ class ClusterCA:
         return cert.public_bytes(serialization.Encoding.PEM).decode()
 
     def save_node_cert(self, cert_pem: str) -> None:
+        """
+        Take delivery of a signed certificate, and promote the key that goes
+        with it.
+
+        This is the only place the live node key changes, and it only changes
+        once we are holding the certificate that matches it.  Up to this point a
+        failure leaves the node running on whatever it had before.
+        """
         x509.load_pem_x509_certificate(cert_pem.encode())
-        self.node_cert_path.write_text(cert_pem)
-        os.chmod(self.node_cert_path, 0o644)
+
+        tmp = self.node_cert_path.with_suffix(".crt.tmp")
+        tmp.write_text(cert_pem)
+        os.chmod(tmp, 0o644)
+
+        # Key first.  A key with no certificate is caught and regenerated on the
+        # next start.  A certificate with the wrong key is what we are trying to
+        # avoid.
+        if self.node_key_pending_path.is_file():
+            os.replace(str(self.node_key_pending_path), str(self.node_key_path))
+        os.replace(str(tmp), str(self.node_cert_path))
 
     def has_node_cert(self) -> bool:
-        return self.node_cert_path.is_file() and self.node_key_path.is_file()
+        """
+        Do we have a usable certificate for this node.
+
+        Both files being present is not enough.  They have to be a pair.  This
+        used to check only that they existed, so a mismatched pair counted as
+        having a certificate, nothing regenerated it, and the peer listener
+        failed to start for good.
+        """
+        if not (self.node_cert_path.is_file() and self.node_key_path.is_file()):
+            return False
+        try:
+            return key_matches_cert(
+                self.node_cert_path.read_text(), self.node_key_path.read_text()
+            )
+        except Exception:
+            return False
 
     def node_fingerprint(self) -> str:
         if not self.node_cert_path.is_file():
