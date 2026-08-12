@@ -220,6 +220,41 @@ for label, previous, incoming, should_refuse in cases:
           f"{'refused' if should_refuse else 'allowed'}")
 
 print()
+print("  the config survives being captured and put back")
+
+from app.core.snapshot import capture, restore, is_empty   # noqa: E402
+
+if not have_sites:
+    skip("a snapshot round trip keeps every object",
+         "no sites on this node to capture")
+else:
+    import json as _json
+    with session_scope() as s:
+        before = capture(s)
+        sites_before = sorted(h.name for h in s.query(VirtualHost).all())
+        pools_before = sorted(p.name for p in s.query(Pool).all())
+
+    check("a snapshot carries the objects, not a count of them",
+          bool(before.get("tables", {}).get("hosts")),
+          "the snapshot has no rows in it, so a promoted node would restore nothing")
+
+    # Through json, because that is how it reaches the other node.
+    wire = _json.loads(_json.dumps(before))
+    with session_scope() as s:
+        restore(s, wire)
+    with session_scope() as s:
+        sites_after = sorted(h.name for h in s.query(VirtualHost).all())
+        pools_after = sorted(p.name for p in s.query(Pool).all())
+
+    check("every site survives the round trip", sites_after == sites_before,
+          f"was {sites_before}, now {sites_after}")
+    check("every pool survives the round trip", pools_after == pools_before,
+          f"was {pools_before}, now {pools_after}")
+    check("a node with config is not called empty", not is_empty(s),
+          "is_empty said yes on a node that has sites, so a restore would "
+          "overwrite a real config")
+
+print()
 print("  live behaviour")
 with session_scope() as s:
     sites = [h.name for h in s.query(VirtualHost).all()
