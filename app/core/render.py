@@ -442,8 +442,32 @@ map $cookie_{cookie} $sticky_{_safe_var(pool.name)} {{
     # Upstreams
     # =========================================================================
 
+    def _pool_has_servers(self, pool) -> bool:
+        """
+        Will this pool actually produce a server line.
+
+        nginx refuses an upstream block with nothing in it, and refusing means
+        the config does not load, which means the apply fails on every node and
+        no unrelated change can go out either.  One pool somebody emptied while
+        tidying up should not be able to freeze the fleet.
+
+        Enabled is the test, not healthy.  A pool whose members are all failing
+        their checks still writes them, marked down or put back by the safety
+        net above, so it still loads.
+        """
+        return any(m.enabled for m in getattr(pool, "members", []) or [])
+
     def _render_upstreams(self, pools):
         for pool in pools:
+            if not self._pool_has_servers(pool):
+                # No file at all.  The include is a glob, so a missing file is
+                # fine, where an empty upstream block is fatal.
+                log.warning(
+                    "pool %s has no backends, leaving its upstream out and sending "
+                    "the sites that use it to 503",
+                    pool.name,
+                )
+                continue
             self.files[f"upstreams/{_safe_name(pool.name)}.conf"] = self._render_pool(pool)
 
     def _render_pool(self, pool) -> str:
@@ -1141,7 +1165,31 @@ map $cookie_{cookie} $sticky_{_safe_var(pool.name)} {{
         lines.append("    }")
         return lines
 
+    def _empty_pool_lines(self, pool, indent=8) -> list:
+        """
+        What a location does when its pool has nothing in it.
+
+        503 rather than pointing at an upstream we did not write.  A proxy_pass
+        at a name with no upstream block is the same fatal error as the empty
+        block, so this has to change wherever the block goes missing.
+
+        The site keeps working everywhere else, and every other site on the box
+        is untouched, which is the whole point.  Same trade the renderer already
+        makes for a certificate whose files are not there.
+        """
+        pad = " " * indent
+        return [
+            f"{pad}# The pool {pool.name} has no backends, so there is nowhere to send",
+            f"{pad}# this.  Returning 503 rather than naming an upstream that is not",
+            f"{pad}# there, which stops nginx loading and takes every site on the box",
+            f"{pad}# down with it.  Add a backend to the pool and apply again.",
+            f"{pad}return 503;",
+        ]
+
     def _proxy_lines(self, pool, cfg, indent=8) -> list:
+        if not self._pool_has_servers(pool):
+            return self._empty_pool_lines(pool, indent)
+
         pad = " " * indent
         scheme = "https" if getattr(pool, "uses_backend_tls", False) else "http"
         lines = [f"{pad}proxy_pass {scheme}://{_safe_name(pool.name)};"]
@@ -1359,6 +1407,17 @@ map $cookie_{cookie} $sticky_{_safe_var(pool.name)} {{
                 lines.append(f"    ssl_certificate     {cert_dir}/fullchain.pem;")
                 lines.append(f"    ssl_certificate_key {cert_dir}/privkey.pem;")
                 lines.append("    ssl_protocols TLSv1.2 TLSv1.3;")
+
+            if s.pool and not self._pool_has_servers(s.pool):
+                # A stream has no way to answer politely, there is no status
+                # code to send on a raw socket.  So this one gets left out
+                # entirely rather than written pointing at an upstream that is
+                # not there, which would stop nginx loading.
+                log.warning(
+                    "stream %s uses pool %s which has no backends, leaving the "
+                    "stream out", s.name, s.pool.name,
+                )
+                continue
 
             if s.pool:
                 lines.append(f"    proxy_pass {_safe_name(s.pool.name)};")
