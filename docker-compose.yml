@@ -48,6 +48,12 @@ services:
       # Which networks are even allowed to load the web GUI.  Leaving it empty
       # means anybody can, so set it before this sees anything but a jump box.
       NFM_ADMIN_ALLOWLIST: ${NFM_ADMIN_ALLOWLIST:-}
+
+      # Whose X-Forwarded-For we believe.  Empty means we ignore the header and
+      # use the address the connection came from, which is right when the GUI is
+      # reached directly.  Set it to the proxy's address, and only that, when
+      # you put one in front.
+      NFM_TRUSTED_PROXIES: ${NFM_TRUSTED_PROXIES:-}
       NFM_SESSION_TIMEOUT_MINUTES: ${NFM_SESSION_TIMEOUT_MINUTES:-60}
 
       # ---- OIDC, optional.  Local break glass logins always work. --------

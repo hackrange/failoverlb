@@ -61,6 +61,20 @@ class Settings(BaseSettings):
     # ---- security -----------------------------------------------------------
     secret_key: str = Field(default="")
     admin_allowlist: str = Field(default="")
+
+    # Addresses whose X-Forwarded-For we are willing to believe.
+    #
+    # Empty by default and that matters.  With nothing here we read the address
+    # the connection actually came from and ignore the header completely, which
+    # is the only safe answer when the GUI is reached directly: anybody can send
+    # X-Forwarded-For, so believing it from a stranger lets them put a
+    # management address in it and walk through the allow list.
+    #
+    # Put something here only when a proxy you control is genuinely in front of
+    # the GUI.  Get it wrong in the other direction, by proxying without setting
+    # this, and every visitor arrives looking like the proxy, which is usually
+    # loopback, and the allow list passes the whole internet.
+    trusted_proxies: str = Field(default="")
     session_timeout_minutes: int = Field(default=60, ge=5, le=1440)
 
     # How many bad passwords before we lock the account, and for how long.
@@ -146,6 +160,28 @@ class Settings(BaseSettings):
         """
         nets = []
         for raw in self.admin_allowlist.split(","):
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                nets.append(ipaddress.ip_network(raw, strict=False))
+            except ValueError:
+                continue
+        return nets
+
+    @property
+    def trusted_proxy_networks(self):
+        """
+        Which addresses are allowed to tell us who the client really is.
+
+        A bad entry is skipped rather than crashing, same as the allow list, but
+        the direction of the mistake is different and worse.  A typo here does
+        not lock you out, it quietly stops us believing a proxy we meant to
+        believe, and then everybody arrives looking like that proxy.  So the
+        dashboard says out loud when this is set and when it is not.
+        """
+        nets = []
+        for raw in self.trusted_proxies.split(","):
             raw = raw.strip()
             if not raw:
                 continue

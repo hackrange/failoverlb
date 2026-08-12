@@ -352,6 +352,17 @@ NFM_BIND_ADDRESS=0.0.0.0
 
 NFM_SECRET_KEY=${SECRET_KEY}
 NFM_ADMIN_ALLOWLIST=${ADMIN_ALLOWLIST}
+
+# Whose X-Forwarded-For we are willing to believe.  Empty means we ignore that
+# header entirely and use the address the connection came from, which is right
+# when the GUI is reached directly and is why this ships empty.
+#
+# Set it only when a proxy you control is genuinely in front of the GUI, and set
+# it to that proxy and nothing else.  Leave it empty with a proxy in front and
+# every visitor arrives wearing the proxy's address, which is usually loopback,
+# and the allow list above passes everybody while looking like it is working.
+NFM_TRUSTED_PROXIES=
+
 NFM_SESSION_TIMEOUT_MINUTES=60
 
 NFM_OIDC_ENABLED=false

@@ -60,16 +60,55 @@ def client_ip(request: Request) -> str:
     """
     Work out the real client address.
 
-    We do NOT read X-Forwarded-For here, and that is deliberate.  Anybody can
-    send that header, so trusting it would let somebody put a management network
-    address in it and walk straight through the allow list below.
+    Everything that decides who somebody is uses this: the allow list, the login
+    rate limit, the account lockout and every line in the audit log.  Getting it
+    wrong is not one bug, it is all four at once.
 
-    The GUI is meant to be reached directly.  If you really do put a proxy in
-    front of it, that proxy has to be the thing enforcing the allow list.
+    X-Forwarded-For is only believed when the connection itself came from an
+    address in trusted_proxies, which is empty until somebody sets it.  Anybody
+    can send that header, so believing it from a stranger lets them put a
+    management address in it and walk through the allow list.  Believing it from
+    a proxy we put there ourselves is the only way to see past that proxy.
+
+    Both mistakes are easy and neither announces itself.  Trust the header from
+    everybody and the allow list means nothing.  Put the GUI behind a proxy and
+    forget to set this, and every visitor arrives wearing the proxy's address,
+    which is usually loopback, and the allow list passes the whole internet
+    while looking like it is working.
+
+    We walk the header from the right, which is the end our own proxy appends
+    to, and take the first address that is not itself a trusted proxy.  Reading
+    from the left instead would take whatever the client typed, and the client
+    writes that end.
     """
-    if request.client:
-        return request.client.host
-    return "unknown"
+    peer = request.client.host if request.client else "unknown"
+
+    trusted = get_settings().trusted_proxy_networks
+    if not trusted or not ip_allowed(_bare(peer), trusted):
+        return peer
+
+    forwarded = request.headers.get("x-forwarded-for", "")
+    for candidate in reversed([p.strip() for p in forwarded.split(",") if p.strip()]):
+        bare = _bare(candidate)
+        try:
+            ipaddress.ip_address(bare)
+        except ValueError:
+            # Junk in the header.  Stop rather than skip past it, since
+            # anything further left was written before this hop and we have
+            # already lost the chain.
+            break
+        if not ip_allowed(bare, trusted):
+            return bare
+
+    # Every hop was a proxy we trust, or the header was not there at all.  The
+    # peer is the most honest thing left.
+    return peer
+
+
+def _bare(ip: str) -> str:
+    """Strip the ::ffff: that a dual stack listener puts on a v4 address."""
+    text = str(ip)
+    return text[7:] if text.startswith("::ffff:") else text
 
 
 def _is_loopback(ip: str) -> bool:
