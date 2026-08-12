@@ -357,7 +357,16 @@ NFM_SESSION_TIMEOUT_MINUTES=60
 NFM_OIDC_ENABLED=false
 
 NFM_ACME_EMAIL=${ACME_EMAIL}
-NFM_ACME_STAGING=true
+
+# Real certificates by default.  This used to install as true, on the reasoning
+# that a first run should not burn a rate limit.  What it actually did was hand
+# people a certificate from the staging CA, which no browser trusts, on a site
+# they had just watched come up green in the GUI.  Nothing says staging except
+# the issuer name, so it reads as a broken certificate rather than the wrong CA.
+#
+# Getting a real one is the normal case and the rate limits are generous.  Turn
+# this on in Settings while you are testing an issuance you expect to fail.
+NFM_ACME_STAGING=false
 
 NFM_LOG_LEVEL=info
 NFM_HOST_GID=${SOCKET_GID}

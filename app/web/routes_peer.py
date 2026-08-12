@@ -315,6 +315,19 @@ async def cert_import(request: Request):
     except AgentError as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
+    # Pick it up straight away.  nginx reads certificate files when it loads and
+    # then holds them, so new bytes on disk change nothing until it looks again.
+    # Without this the node quietly serves the old certificate until something
+    # unrelated reloads it, and at renewal time that means serving an expired
+    # one with a good one sitting next to it.
+    #
+    # A failed reload is logged, not raised.  The copy itself worked, and
+    # answering with a 500 would tell the sending node that replication failed
+    # when it did not.
+    from app.core.acme import _reload_for_new_cert
+
+    await _reload_for_new_cert(payload.get("name"))
+
     log.info("took a copy of cert %s from %s", payload.get("name"), node.name)
     return {"ok": True, "result": result}
 

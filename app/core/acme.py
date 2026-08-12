@@ -519,6 +519,7 @@ class CertificateManager:
         # config looks, which is the one node everybody assumes is fine.
         try:
             await get_agent().cert_import(name=name, bundle=bundle)
+            await _reload_for_new_cert(name)
             results["ok"].append(self.settings.node_name)
         except AgentError as exc:
             results["failed"].append({"node": self.settings.node_name, "error": str(exc)})
@@ -882,3 +883,32 @@ def get_cert_manager() -> CertificateManager:
     if _manager is None:
         _manager = CertificateManager()
     return _manager
+
+
+async def _reload_for_new_cert(name: str):
+    """
+    Make nginx pick up a certificate that just landed on this node.
+
+    nginx reads certificate files once, when it loads, and holds them in memory.
+    New bytes on disk change nothing until it is told to look again.
+
+    Without this a renewal is invisible.  The files are replaced 30 days before
+    expiry, every page in the GUI says the certificate is current, and nginx
+    goes on serving the old one until something unrelated reloads it.  If
+    nothing does, it serves an expired certificate with a valid one sitting
+    right there on disk, which is a miserable thing to debug at the point it
+    starts costing you visitors.
+
+    A reload that fails is logged and swallowed.  The copy did work, the files
+    are correct, and throwing here would report a replication failure for
+    something that replicated fine.  The usual reason is that nginx is already
+    unhappy about unrelated config, and that is its own alarm.
+    """
+    try:
+        await get_agent().reload()
+        log.info("reloaded nginx so it picks up the new %s certificate", name)
+    except Exception as exc:
+        log.error(
+            "copied %s but could not reload nginx, so it is still serving the old "
+            "certificate on this node: %s", name, exc,
+        )
