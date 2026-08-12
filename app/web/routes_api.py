@@ -12,6 +12,7 @@ queries a table by id directly, so there is no route that can forget the check.
 """
 
 import asyncio
+import difflib
 import ipaddress
 import json
 import logging
@@ -269,6 +270,64 @@ def _pending_config(session) -> dict:
         "dirty": bool(latest is None or (known is not None and known != checksum)),
         "applied_version": latest.version if latest else 0,
         "never_applied": latest is None,
+    }
+
+
+@router.get("/config/pending")
+async def pending_config_diff(request: Request, db: DBSession = Depends(get_db)):
+    """
+    Show what applying would actually change, line by line.
+
+    Knowing that something is unapplied is only half an answer.  The other half
+    is what, and without it the only way to find out is to apply and watch,
+    which is the wrong order for anything that touches a load balancer.
+
+    Diffed against the files the last applied version actually shipped, not a
+    fresh render of it, so this is a genuine before and after rather than two
+    guesses about the same thing.
+    """
+    current_user(request, db)
+
+    files, _checksum, _snapshot = render_current(db)
+    latest = db.query(ConfigVersion).order_by(ConfigVersion.version.desc()).first()
+    previous = json.loads(latest.rendered or "{}") if latest else {}
+
+    changes = []
+    for path in sorted(set(previous) | set(files)):
+        before = previous.get(path)
+        after = files.get(path)
+        if before == after:
+            continue
+
+        if before is None:
+            kind = "added"
+        elif after is None:
+            kind = "removed"
+        else:
+            kind = "changed"
+
+        diff = list(difflib.unified_diff(
+            (before or "").splitlines(),
+            (after or "").splitlines(),
+            fromfile=f"applied/{path}",
+            tofile=f"pending/{path}",
+            lineterm="",
+            n=2,
+        ))
+        # A whole new file diffs as one huge block of additions, which is true
+        # and unreadable.  Enough to see what it is, not the entire thing.
+        changes.append({
+            "path": path,
+            "kind": kind,
+            "diff": diff[:120],
+            "truncated": len(diff) > 120,
+        })
+
+    return {
+        "applied_version": latest.version if latest else 0,
+        "never_applied": latest is None,
+        "changed_files": len(changes),
+        "changes": changes,
     }
 
 

@@ -404,6 +404,45 @@
             }
         });
 
+        // Show what applying would actually change.  "Something is pending" is
+        // half an answer, and the other half should not require applying it to
+        // find out.
+        const showBtn = document.getElementById("pending-config-show");
+        if (showBtn) {
+            showBtn.addEventListener("click", async function () {
+                showBtn.disabled = true;
+                try {
+                    const r = await api("/config/pending");
+                    let html = "";
+                    if (!r.changed_files) {
+                        html = '<div class="help-section"><p>Nothing differs from the '
+                             + 'config that is live.</p></div>';
+                    } else {
+                        html = '<div class="help-section"><p>'
+                             + r.changed_files + ' file'
+                             + (r.changed_files === 1 ? "" : "s")
+                             + ' would change'
+                             + (r.never_applied ? ", and nothing has ever been applied"
+                                                : ", against version " + r.applied_version)
+                             + ".</p></div>";
+                        r.changes.forEach(function (c) {
+                            html += '<div class="help-section"><h4>'
+                                 + escapeHtml(c.path) + " <span class=\"faint\">"
+                                 + c.kind + "</span></h4><pre>"
+                                 + escapeHtml(c.diff.join("\n"))
+                                 + (c.truncated ? "\n... trimmed" : "")
+                                 + "</pre></div>";
+                        });
+                    }
+                    openModal("Waiting to be applied", "", html, true);
+                } catch (err) {
+                    toast(err.message, "bad");
+                } finally {
+                    showBtn.disabled = false;
+                }
+            });
+        }
+
         // Saved is not live.  Check on load, then keep an eye on it, because
         // the editors save over the API without reloading the page and the
         // banner would otherwise stay wrong until you navigated.

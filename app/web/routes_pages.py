@@ -8,6 +8,7 @@ single page app that needs a bundle to load first.
 """
 
 import json
+import hashlib
 import logging
 from pathlib import Path
 
@@ -48,6 +49,34 @@ router = APIRouter()
 
 TEMPLATE_DIR = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(TEMPLATE_DIR))
+
+
+def _asset_version() -> str:
+    """
+    A short stamp that changes when the css or js changes.
+
+    Without it a browser keeps running the last version it saw.  Both files are
+    served with an ETag, which lets a browser revalidate, but nothing makes it
+    ask, so after an upgrade people carry on with the old page logic and hit
+    bugs that were fixed hours ago.  There is no worse bug report than one about
+    code that is no longer running.
+
+    Built from what is on disk rather than the release number, so a fix that
+    ships without a version bump still busts the cache.
+    """
+    stamp = ""
+    for name in ("app.js", "app.css"):
+        path = Path(__file__).parent / "static" / name
+        try:
+            stat = path.stat()
+            stamp += f"{stat.st_mtime_ns}-{stat.st_size}"
+        except OSError:
+            continue
+    return hashlib.sha256(stamp.encode()).hexdigest()[:12] if stamp else "dev"
+
+
+ASSET_VERSION = _asset_version()
+templates.env.globals["asset_version"] = ASSET_VERSION
 
 
 # ==============================================================================

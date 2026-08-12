@@ -95,6 +95,38 @@ def esc(value) -> str:
     return text
 
 
+def esc_header_value(value) -> str:
+    """
+    A response header value, which is allowed to contain semicolons.
+
+    esc() refuses a semicolon because in most places it would end the directive
+    early and let somebody write config of their own.  Inside a quoted argument
+    it does no such thing, and a header value legitimately needs them: every
+    Content-Security-Policy ever written is a list separated by semicolons, and
+    so are Permissions-Policy and a Set-Cookie.
+
+    Refusing them meant setting a CSP did not fail politely.  The render raised,
+    so nothing could be applied anywhere until somebody worked out which setting
+    on which site was responsible.
+
+    So the value gets quoted rather than rejected, which is what nginx wants
+    anyway.  A quote inside is escaped so it cannot close the string early.
+    Newlines and carriage returns are still refused outright, because those end
+    the directive whatever the quoting is, and a header value with a newline in
+    it is header injection wearing a hat.
+    """
+    if value is None:
+        return '""'
+    text = str(value)
+    if not text:
+        return '""'
+
+    if re.search(r"[\n\r]", text):
+        raise ValueError(f"refusing to write a header value with a newline in it: {text!r}")
+
+    return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
 def parse_size(value):
     """An nginx size like 16k or 1m as bytes.  None when it is not one."""
     m = re.fullmatch(r"(\d+)([kKmMgG]?)", str(value).strip())
@@ -1099,7 +1131,7 @@ map $cookie_{cookie} $sticky_{_safe_var(pool.name)} {{
             lines.append("    # these are left off error responses, which is exactly when a")
             lines.append("    # browser is most likely to do something you did not intend.")
             for name, value in add:
-                lines.append(f"    add_header {name} {esc(value)} always;")
+                lines.append(f"    add_header {name} {esc_header_value(value)} always;")
 
         return lines
 

@@ -8,7 +8,7 @@
 {# The prefix we are served under, so the JavaScript builds API URLs that land
    in the right place when something proxies us at a sub path. #}
 <meta name="nfm-base" content="{{ base }}">
-<link rel="stylesheet" href="{{ base }}/static/app.css">
+<link rel="stylesheet" href="{{ base }}/static/app.css?v={{ asset_version }}">
 {# The favicon is drawn inline as an SVG so there is no image file to fetch.
    Keeps the content security policy tight and works with no network. #}
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' rx='3' fill='%23141414'/><path d='M4 11.5v-7h1.4l3.2 4.6V4.5H10v7H8.6L5.4 6.9v4.6z' fill='white'/></svg>">
@@ -141,10 +141,12 @@
             </div>
           </div>
         </div>
-        {% if can('apply_config') %}
-          <button class="btn primary" id="pending-config-apply"
-                  style="flex:0 0 auto; margin-left:12px">Apply config</button>
-        {% endif %}
+        <div style="flex:0 0 auto; margin-left:12px; display:flex; gap:8px">
+          <button class="btn" id="pending-config-show">See what changed</button>
+          {% if can('apply_config') %}
+            <button class="btn primary" id="pending-config-apply">Apply config</button>
+          {% endif %}
+        </div>
       </div>
 
       {% block content %}{% endblock %}
@@ -155,7 +157,7 @@
 
 <div id="toasts"></div>
 
-<script src="{{ base }}/static/app.js" nonce="{{ csp_nonce }}"></script>
+<script src="{{ base }}/static/app.js?v={{ asset_version }}" nonce="{{ csp_nonce }}"></script>
 {% block scripts %}{% endblock %}
 </body>
 </html>
