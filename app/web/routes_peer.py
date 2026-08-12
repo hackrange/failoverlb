@@ -17,7 +17,12 @@ from fastapi import APIRouter, HTTPException, Request
 
 from app.config import get_settings
 from app.core.agent_client import AgentError, get_agent
-from app.core.cluster import ClusterError, looks_like_a_wipe, verify_peer_request
+from app.core.cluster import (
+    ClusterError,
+    adopt_peer_role,
+    looks_like_a_wipe,
+    verify_peer_request,
+)
 from app.core import snapshot as snapshot_store
 from app.core.render import MANAGED_ROOT
 from app.db import session_scope
@@ -98,7 +103,8 @@ async def heartbeat(request: Request):
             peer.nginx_active = payload.get("nginx_active", peer.nginx_active)
             if payload.get("role"):
                 try:
-                    peer.role = NodeRole(payload["role"])
+                    adopt_peer_role(session, peer, NodeRole(payload["role"]),
+                                    settings.node_name)
                 except ValueError:
                     pass
 

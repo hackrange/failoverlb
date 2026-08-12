@@ -65,6 +65,34 @@ MAX_CLOCK_SKEW_SECONDS = 60
 _seen_nonces = {}
 
 
+def adopt_peer_role(session, peer, claimed, self_name: str):
+    """
+    Record what a peer says it is, without ever writing down two active nodes.
+
+    A peer claiming to be active while we also think we are is not somebody
+    lying, it is the ordinary shape of a failover in progress: one side promoted
+    itself while the other was away, and the other has not run an election yet.
+    Writing both down and waiting for the election to tidy up means the roster
+    says two nodes take writes, and the GUI says so to whoever is looking.
+
+    Standing down here is the safe direction.  Believing we are a standby when
+    we are really the active node costs one election cycle.  Believing we are
+    active when another node is means two nodes taking writes, which is the
+    thing the whole design exists to prevent.
+    """
+    if claimed != NodeRole.ACTIVE:
+        peer.role = claimed
+        return
+
+    me = session.query(Node).filter(Node.name == self_name).first()
+    if me and me.role == NodeRole.ACTIVE:
+        log.warning("%s says it is active as well, standing down until the "
+                    "election settles it", peer.name)
+        me.role = NodeRole.STANDBY
+
+    peer.role = claimed
+
+
 def looks_like_a_wipe(previous: dict, incoming: dict) -> str:
     """
     Would applying this throw away most of what is already being served.
@@ -1103,7 +1131,8 @@ class ClusterManager:
                         node.local_addresses = json.dumps(answer["local_addresses"])
                     if answer.get("role"):
                         try:
-                            node.role = NodeRole(answer["role"])
+                            adopt_peer_role(session, node, NodeRole(answer["role"]),
+                                            self.settings.node_name)
                         except ValueError:
                             pass
                     session.commit()

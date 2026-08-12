@@ -95,6 +95,25 @@ async def register_self():
             session.add(node)
             log.info("registered this node as %s", settings.node_name)
 
+        else:
+            # Do not assume we are still active because we were when we stopped.
+            #
+            # A node that has been away has no idea what happened while it was
+            # gone, and the usual answer is that the other node took over.
+            # Coming back still believing it is active means its own roster says
+            # two nodes are active until the first election tidies up, which is
+            # a handful of seconds of the GUI telling two different people they
+            # are both on the node that takes writes.
+            #
+            # Standing down and waiting to be elected costs nothing.  The
+            # election runs within seconds, and if this node should be active it
+            # will be, by the same rule everybody else is using.  A cluster of
+            # one elects itself immediately, so nothing is stuck read only.
+            peers = session.query(Node).filter(Node.name != settings.node_name).count()
+            if peers and node.role == NodeRole.ACTIVE:
+                log.info("starting up as standby until an election says otherwise")
+                node.role = NodeRole.STANDBY
+
         node.address = settings.node_address
         node.peer_port = settings.peer_port
         node.gui_port = settings.gui_port
