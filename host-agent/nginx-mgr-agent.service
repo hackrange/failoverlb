@@ -36,9 +36,19 @@ Environment=NFM_NGINX_BIN=/usr/sbin/nginx
 Environment=NFM_ACME_WEBROOT=/var/www/certbot
 Environment=PYTHONUNBUFFERED=1
 
-# systemd makes the socket folder for us and cleans it up on stop.
+# systemd makes the socket folder for us.
 RuntimeDirectory=nginxmgr
 RuntimeDirectoryMode=0750
+
+# Keep the folder when we stop, and this one is not tidiness.  The manager runs
+# in a container with /run/nginxmgr bind mounted, and a bind mount follows the
+# folder it was given, not the name.  Letting systemd delete and remake the
+# folder on every restart hands the container a folder that no longer exists, so
+# the GUI says "no agent socket at /run/nginxmgr/agent.sock" forever, even
+# though the agent is up and the socket is right there on the host.  Recreating
+# the container is the only way out, which is not something the GUI can tell you
+# to do.  Keeping the folder keeps both sides looking at the same one.
+RuntimeDirectoryPreserve=yes
 
 # ---- locking it down --------------------------------------------------------
 #
