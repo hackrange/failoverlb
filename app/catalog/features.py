@@ -2172,6 +2172,84 @@ register(
     ),
 
     Feature(
+        key="ssl_ciphersuites",
+        min_version=(1, 19, 4),
+        label="TLS 1.3 cipher suites",
+        category="tls",
+        directive="ssl_conf_command",
+        contexts=("server",),
+        type="string",
+        default="TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256",
+        module="http_ssl_module",
+        advanced=True,
+        depends_on="ssl_protocols",
+        help=HelpText(
+            summary="Which cipher suites TLS 1.3 may use.  Separate from the 1.2 list.",
+            detail=(
+                "TLS 1.3 threw out the old cipher machinery and started again, so it "
+                "ignores the cipher list above completely.  These are its own, and there "
+                "are only five in the whole protocol.  All five are good, which is the "
+                "point of the redesign.\n\n"
+                "Written out only when TLS 1.3 is switched on, since the directive means "
+                "nothing otherwise.  The same goes the other way: turn 1.3 on on its own "
+                "and the 1.2 cipher list stops being written, because it would sit there "
+                "looking like it was doing something.\n\n"
+                "The default is the three with hardware acceleration on anything current. "
+                "The two left out are the CCM ones, which are for small embedded chips "
+                "with no AES instructions and are slower everywhere else."
+            ),
+            use_cases=[
+                "Leave the default",
+                "Drop to one suite for a compliance list that names it",
+            ],
+            example="The three fast ones, which is what is filled in",
+            example_config="ssl_conf_command Ciphersuites TLS_AES_256_GCM_SHA384;",
+            docs_url=f"{D}/http/ngx_http_ssl_module.html#ssl_conf_command",
+        ),
+    ),
+
+    Feature(
+        key="ssl_post_quantum_only",
+        min_version=(1, 19, 4),
+        label="Require post-quantum key exchange",
+        category="tls",
+        directive="ssl_conf_command",
+        contexts=("server",),
+        type="bool",
+        default=False,
+        module="http_ssl_module",
+        advanced=True,
+        help=HelpText(
+            summary="Refuse anything that cannot do the quantum resistant exchange.",
+            detail=(
+                "The setting above offers the quantum resistant exchange and lets a "
+                "client that does not know it fall back to a classic curve.  That is the "
+                "right default and it protects nobody who falls back.\n\n"
+                "This one removes the fallback.  Only X25519MLKEM768 is offered, so a "
+                "client that cannot do it does not get a connection at all.  That is the "
+                "whole point: harvest now decrypt later does not care that most of your "
+                "traffic was protected.\n\n"
+                "Turning this on moves TLS to 1.3 only, and the page will show that.  It "
+                "is not a side effect to work around, it is the only honest answer: the "
+                "quantum resistant exchange exists only in 1.3, so leaving 1.2 switched "
+                "on would let any client opt straight back out of the thing you just "
+                "insisted on.\n\n"
+                "Know what this costs before you turn it on.  Support is recent, roughly "
+                "Chrome and Edge 131, Firefox 132, and OpenSSL 3.5 for anything scripted. "
+                "Older phones, older curl, and most embedded clients will simply fail to "
+                "connect, and the error they show will not mention key exchange."
+            ),
+            use_cases=[
+                "An internal service where you control every client",
+                "Data that has to stay secret for longer than the machines that will attack it",
+            ],
+            example="Off unless you know every client is recent",
+            example_config="ssl_conf_command Groups X25519MLKEM768;",
+            docs_url=f"{D}/http/ngx_http_ssl_module.html#ssl_conf_command",
+        ),
+    ),
+
+    Feature(
         key="ssl_post_quantum",
         min_version=(1, 19, 4),
         label="Post-quantum key exchange",
