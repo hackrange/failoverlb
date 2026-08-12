@@ -511,28 +511,23 @@ class CertificateManager:
 
         results = {"ok": [], "failed": []}
 
-        # Put a copy on this node too, unless this node is where it came from,
-        # in which case certbot already owns the real files.
-        if source_node != self.settings.node_name:
-            try:
-                await get_agent().cert_import(name=name, bundle=bundle)
-                results["ok"].append(self.settings.node_name)
-            except AgentError as exc:
-                results["failed"].append({"node": self.settings.node_name, "error": str(exc)})
-        else:
-            # We are the node certbot wrote the files on, so we have them.  This
-            # branch used to do nothing, which meant the issuing node never
-            # counted itself: peers() leaves this node out, and the loop below
-            # only credits the source when it finds it among the peers, where it
-            # never is.  So a copy that reached everybody still reported one node
-            # short, forever, and pressing the button again could not fix a
-            # number that was only ever wrong in the counting.
+        # Put a copy in this node's synced folder, even when this is the node
+        # certbot wrote the real files on.  Having the files somewhere is not
+        # enough, they have to be at the path the rendered config names, and
+        # that path is now the synced folder on every node.  Skipping this on
+        # the issuing node left it as the only node without a copy where the
+        # config looks, which is the one node everybody assumes is fine.
+        try:
+            await get_agent().cert_import(name=name, bundle=bundle)
             results["ok"].append(self.settings.node_name)
+        except AgentError as exc:
+            results["failed"].append({"node": self.settings.node_name, "error": str(exc)})
 
+        # Push to every peer, the node the files came from included.  It has the
+        # certbot copy, which is not the copy the config reads, and sending the
+        # same bytes back costs one write and removes a way for that node to sit
+        # there looking fine while nginx cannot find its certificate.
         for info in peers:
-            if info["name"] == source_node:
-                results["ok"].append(info["name"])
-                continue
             try:
                 with session_scope() as session:
                     node = session.query(Node).filter(Node.id == info["id"]).first()
@@ -623,23 +618,25 @@ class CertificateManager:
         leaves their https block out and says so, which keeps the rest of the
         fleet working while you sort the certificate out.
         """
-        from app.core.render import CERT_SYNC_DIR, LE_LIVE_DIR
+        from app.core.render import CERT_SYNC_DIR
 
         agent = get_agent()
 
         with session_scope() as session:
             certs = [
-                (c.id, c.name, c.issued_by_node, bool(c.not_after))
+                (c.id, c.name, bool(c.not_after))
                 for c in session.query(Certificate).all()
             ]
 
-        for cert_id, name, issued_by, was_issued in certs:
+        for cert_id, name, was_issued in certs:
             if not was_issued:
                 continue
 
-            here = issued_by == self.settings.node_name
-            path = f"{LE_LIVE_DIR}/{name}/fullchain.pem" if here \
-                else f"{CERT_SYNC_DIR}/{name}/fullchain.pem"
+            # Check the path the config actually names, which is the synced
+            # folder on every node now.  Checking certbot's folder on the
+            # issuing node made that node report the certificate present while
+            # the file nginx was told to open was somewhere else entirely.
+            path = f"{CERT_SYNC_DIR}/{name}/fullchain.pem"
 
             present = True
             try:

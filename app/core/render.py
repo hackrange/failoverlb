@@ -751,18 +751,22 @@ map $cookie_{cookie} $sticky_{_safe_var(pool.name)} {{
 
     def _cert_path(self, cert) -> str:
         """
-        Where this cert's files live.
+        Where this cert's files live.  Same answer on every node, on purpose.
 
-        Two possibilities and it matters which.  If this node is the one that
-        got the cert from Lets Encrypt, certbot owns it and it is in
-        /etc/letsencrypt/live, where the renewal machinery expects it.  If the
-        cert came over from another node, it is in our own synced folder.  We
-        never write into certbot's folder from here, because certbot keeps
-        renewal state alongside those files and dropping foreign files in
-        confuses it.
+        This used to point at /etc/letsencrypt/live on whichever node certbot
+        got the cert on, and at our synced folder everywhere else.  That reads
+        as correct and cannot work, because the config is rendered once on the
+        active node and the exact same bytes are shipped to the rest of the
+        fleet.  So every node got the issuing node's path, and any node that did
+        not issue the cert failed its test with "cannot load certificate", which
+        blocked the apply for the whole fleet.  Every https site hit this, so
+        nothing could be applied at all.
+
+        Now every node reads the cert from its own synced folder, including the
+        node that issued it, so one rendered config is true everywhere.  Certbot
+        still owns /etc/letsencrypt and we still never write into it.  We copy
+        out of it, which is what the other nodes were already doing.
         """
-        if cert.source == "letsencrypt" and cert.issued_by_node == self.settings.get("node_name"):
-            return f"{LE_LIVE_DIR}/{cert.name}"
         return f"{CERT_SYNC_DIR}/{cert.name}"
 
     # =========================================================================
