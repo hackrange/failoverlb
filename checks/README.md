@@ -51,6 +51,7 @@ docker exec -i nginx-fleet-manager python < checks/catalog_sweep.py
 | `upgrade_migration.py` | A database made by an older version upgrades cleanly and keeps its rows. |
 | `parser.py` | Real nginx config parses, including the parts a regex gets wrong, and survives a round trip. |
 | `render_safety.py` | A setting cannot write config of its own, and a missing certificate or an empty pool costs one site rather than the fleet. |
+| `trust.py` | Peer signatures, secret comparison, encryption at rest, key and certificate pairing, and the audit log keeping secrets out of itself. |
 
 ## A pass that touched nothing is not a pass
 
