@@ -49,6 +49,8 @@ docker exec -i nginx-fleet-manager python < checks/catalog_sweep.py
 | `authz_sweep.py` | A viewer cannot write, an operator cannot do admin things, and a write with no token or a forged one is refused. |
 | `health_checks.py` | The checker calls a backend up or down correctly, against real sockets that misbehave on purpose. |
 | `upgrade_migration.py` | A database made by an older version upgrades cleanly and keeps its rows. |
+| `parser.py` | Real nginx config parses, including the parts a regex gets wrong, and survives a round trip. |
+| `render_safety.py` | A setting cannot write config of its own, and a missing certificate or an empty pool costs one site rather than the fleet. |
 
 ## A pass that touched nothing is not a pass
 
@@ -60,6 +62,9 @@ in three different ways.  It is the failure mode to watch for:
 - a path that does not exist gives a 404 that reads exactly like a refusal
 - an incomplete request body is rejected by validation before the handler runs,
   so a permission check that never fired looks like one that refused
+- searching the rendered config for a string finds it inside a quoted value,
+  where it is harmless, and calls that an injection.  Ask the parser whether
+  nginx would read it as config, rather than asking whether the text is there
 
 Each of those is now caught by the check itself.  When you add one, make it
 prove it reached the thing it claims to be testing.
