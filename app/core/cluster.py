@@ -594,7 +594,26 @@ class ClusterManager:
                     "message": "nothing actually changed, so nothing was reloaded",
                 }
 
-            next_version = (latest.version if latest else 0) + 1
+            # Carry on from the highest number anybody in the fleet has reached,
+            # not just the highest this node happens to have written.
+            #
+            # Version numbers are meant to describe the fleet's config, and a
+            # node that has been a standby all its life has written none of them.
+            # Promote it and it would start again at 1 while the other node was
+            # at sixty, so the same number would mean two different configs, the
+            # pending queue would be full of versions lower than what the node it
+            # is for already has, and anybody reading either during an incident
+            # would draw the wrong conclusion.
+            #
+            # Every node knows what the others have applied, from the heartbeat,
+            # so the highest number in the fleet is knowable without anybody
+            # coordinating.  Taking the maximum keeps them going up, which is the
+            # only property anything here relies on.
+            highest = latest.version if latest else 0
+            for node in session.query(Node).all():
+                highest = max(highest, node.applied_version or 0)
+
+            next_version = highest + 1
 
             version_row = ConfigVersion(
                 version=next_version,
