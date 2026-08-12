@@ -526,7 +526,38 @@ def gui_ssl_context(settings) -> dict:
     cert_path = settings.pki_dir / "gui.crt"
     key_path = settings.pki_dir / "gui.key"
 
-    if not cert_path.is_file() or not key_path.is_file():
+    # Both there is not the same as both good.
+    #
+    # This used to check only that the files existed.  A pair that does not go
+    # together, which is what you get if a run was interrupted between writing
+    # the key and writing the certificate, passed that check happily.  uvicorn
+    # then refused to build an SSL context, the process died before it listened
+    # on anything, and docker restarted it into the same wall forever.  A crash
+    # loop with no way out, over two files we can simply make again.
+    #
+    # So check they actually match, and rebuild them if they do not.  There is
+    # nothing to lose by regenerating: it is a self signed certificate for a
+    # management GUI, not something anybody has pinned.
+    remake = not cert_path.is_file() or not key_path.is_file()
+
+    if not remake:
+        try:
+            from app.core.crypto import key_matches_cert
+
+            if not key_matches_cert(cert_path.read_text(), key_path.read_text()):
+                log.warning(
+                    "the GUI certificate and key do not go together, making a new "
+                    "pair.  This usually means a previous start was interrupted "
+                    "part way through writing them."
+                )
+                remake = True
+        except Exception as exc:
+            log.warning("could not read the GUI certificate (%s), making a new pair", exc)
+            remake = True
+
+    if remake:
+        cert_path.unlink(missing_ok=True)
+        key_path.unlink(missing_ok=True)
         _make_gui_cert(settings, cert_path, key_path)
 
     return {
@@ -575,15 +606,33 @@ def _make_gui_cert(settings, cert_path: Path, key_path: Path):
         .sign(key, hashes.SHA256())
     )
 
-    fd = os.open(str(key_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    # Write both to one side first, then move them into place together.
+    #
+    # These were written straight over the top, key first and certificate
+    # second.  Dying in the gap between the two left a new key beside the old
+    # certificate, which do not match, and the app would not start again.
+    #
+    # Two renames are still two operations, so this narrows the window rather
+    # than closing it.  What actually closes it is gui_ssl_context checking that
+    # the pair matches and rebuilding them when it does not.  Both, because a
+    # window this cheap to shrink is worth shrinking.
+    key_tmp = key_path.with_suffix(".key.tmp")
+    cert_tmp = cert_path.with_suffix(".crt.tmp")
+
+    fd = os.open(str(key_tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "wb") as fh:
         fh.write(key.private_bytes(
             encoding=serialization.Encoding.PEM,
             format=serialization.PrivateFormat.PKCS8,
             encryption_algorithm=serialization.NoEncryption(),
         ))
+        fh.flush()
+        os.fsync(fh.fileno())
 
-    cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    cert_tmp.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+
+    os.replace(str(key_tmp), str(key_path))
+    os.replace(str(cert_tmp), str(cert_path))
 
 
 def peer_ssl_config(settings) -> dict:
