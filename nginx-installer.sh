@@ -963,6 +963,23 @@ cmd_install() {
   write_acme_snippet
   write_default_site
 
+  # Test before stopping anything.
+  #
+  # This used to come after the disable below, and the order cost a node.  A
+  # build that produced a working binary but one the live config would not load,
+  # which is what you get when a module the config depends on drops out of the
+  # build, went like this: nginx stopped, config test failed, installer died,
+  # nginx never started again.  The box was left down, with a new binary that
+  # could not serve the config it had.  On a standby you would not notice; on
+  # the node taking traffic it is a full outage caused by the very step that was
+  # meant to be safe.
+  #
+  # Testing first means a bad build leaves the old nginx running and serving.
+  # The new binary is already in place at this point, so the way out is a revert,
+  # but the site stays up while somebody does it.
+  log "Testing the config before we stop anything."
+  "$SBIN" -t
+
   # Get any old apt nginx out of the way before we drop our own unit in, so we
   # are never disabling the service we just wrote.
   if have_systemd; then
@@ -971,9 +988,6 @@ cmd_install() {
 
   write_service
   write_renewal_hook
-
-  log "Testing the config before we start."
-  "$SBIN" -t
 
   if have_systemd; then
     # Prove the unit really landed before we tell anyone the install worked.
