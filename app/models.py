@@ -237,6 +237,18 @@ class ConfigVersion(Base):
     # serving the same config, full stop.
     checksum = Column(String(64), nullable=False)
 
+    # The same render, but with every enabled backend treated as healthy.
+    #
+    # There are two because they answer different questions.  The one above
+    # answers "are these nodes serving the same bytes", which has to include
+    # health, since a backend marked down really is different config.  This one
+    # answers "has a person changed something since the last apply", and health
+    # has no business in that: backends flap on their own all day, the health
+    # checker applies those changes itself, and counting them as somebody's
+    # unfinished work puts a banner in front of them about a change they did not
+    # make and cannot usefully apply.
+    user_checksum = Column(String(64))
+
     snapshot = Column(Text, nullable=False)      # json of every object
     rendered = Column(Text)                      # json of path to file contents
 

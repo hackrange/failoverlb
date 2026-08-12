@@ -174,8 +174,18 @@ class Renderer:
     a render that blows up half way cannot leave a broken file behind.
     """
 
-    def __init__(self, capabilities=None, node_addresses=None, settings=None):
+    def __init__(self, capabilities=None, node_addresses=None, settings=None,
+                 ignore_health=False):
         self.caps = capabilities
+        # Render as though every enabled backend were healthy.
+        #
+        # Only used to answer "has a person changed something since the last
+        # apply".  Health state changes the config on its own, all day, as
+        # backends flap, and the health checker applies those itself within
+        # seconds.  Counting them as pending work puts a banner in front of
+        # somebody about a change they did not make and cannot usefully apply,
+        # and by the time they click it the checker has already done it.
+        self.ignore_health = ignore_health
         # Every cluster node's address.  These go into the management allow list
         # so our own health checks never get blocked by an ACL somebody wrote.
         self.node_addresses = node_addresses or []
@@ -569,7 +579,7 @@ map $cookie_{cookie} $sticky_{_safe_var(pool.name)} {{
         # that climbs over the ramp window.  The health checker sets
         # ramp_weight, we just write whatever it decided.
         weight = member.weight
-        node_state = member.node_states()
+        node_state = {} if self.ignore_health else member.node_states()
         ramp = node_state.get("ramp_weight")
         if ramp is not None and ramp < weight:
             parts.append(f"weight={ramp}")
@@ -585,7 +595,7 @@ map $cookie_{cookie} $sticky_{_safe_var(pool.name)} {{
         if member.backup:
             parts.append("backup")
 
-        state = member.effective_state
+        state = MemberState.UP if self.ignore_health else member.effective_state
         if not force_up and state in (MemberState.DOWN, MemberState.MAINTENANCE):
             parts.append("down")
 

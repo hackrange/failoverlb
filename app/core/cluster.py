@@ -374,7 +374,8 @@ class ClusterManager:
     # =========================================================================
 
     async def apply_config(self, rendered: dict, checksum: str, summary: str,
-                           author: str, snapshot: dict) -> dict:
+                           author: str, snapshot: dict,
+                           user_checksum: str = None) -> dict:
         """
         Push a config change out to the whole fleet, safely.
 
@@ -395,10 +396,11 @@ class ClusterManager:
         """
         async with self._apply_lock:
             return await self._apply_config_locked(
-                rendered, checksum, summary, author, snapshot
+                rendered, checksum, summary, author, snapshot, user_checksum
             )
 
-    async def _apply_config_locked(self, rendered, checksum, summary, author, snapshot):
+    async def _apply_config_locked(self, rendered, checksum, summary, author, snapshot,
+                                   user_checksum=None):
         started = time.monotonic()
 
         with session_scope() as session:
@@ -425,6 +427,7 @@ class ClusterManager:
             version_row = ConfigVersion(
                 version=next_version,
                 checksum=checksum,
+                user_checksum=user_checksum,
                 snapshot=json.dumps(snapshot),
                 rendered=json.dumps(rendered),
                 author=author,

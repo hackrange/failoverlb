@@ -100,7 +100,7 @@ async def changing(request: Request, db: DBSession = Depends(get_db)) -> ObjectG
 # Rendering and applying
 # ==============================================================================
 
-def render_current(session) -> tuple:
+def render_current(session, ignore_health: bool = False) -> tuple:
     """
     Turn everything in the database into config files.
 
@@ -134,6 +134,7 @@ def render_current(session) -> tuple:
                 node_addresses.append(addr)
 
     renderer = Renderer(
+        ignore_health=ignore_health,
         capabilities=fleet_capabilities(),
         node_addresses=sorted(set(node_addresses)),
         settings={
@@ -172,8 +173,12 @@ async def apply_current_config(author: str = "system", summary: str = "") -> dic
     """
     with session_scope() as session:
         files, checksum, snapshot = render_current(session)
+        # The same render with health ignored, stored alongside, so the
+        # "saved but not live" banner has something honest to compare against.
+        _f, user_checksum, _s = render_current(session, ignore_health=True)
 
     return await get_cluster().apply_config(
+        user_checksum=user_checksum,
         rendered=files,
         checksum=checksum,
         summary=summary,
@@ -225,6 +230,45 @@ async def status(request: Request, db: DBSession = Depends(get_db)):
         },
         "user": {"username": user.username, "role": user.role.value},
         "allowlist_set": bool(settings.admin_networks),
+        "config": _pending_config(db),
+    }
+
+
+def _pending_config(session) -> dict:
+    """
+    Is there anything saved that nginx has not been given yet.
+
+    Saving and applying are deliberately separate, so you can make three related
+    changes and push them out together rather than reloading nginx three times
+    and living through two half finished states.  The cost of that split is that
+    saving looks finished when it is not, and the config quietly drifts from
+    what is running until somebody notices.
+
+    Worked out by rendering what the config would be now and comparing it to the
+    version that actually went out.  A stored flag would be cheaper and would
+    lie the moment anything changed a row without going through the page that
+    sets it.  This cannot drift, because it is the same render the apply itself
+    would do.
+    """
+    try:
+        _files, _checksum, _snapshot = render_current(session, ignore_health=True)
+        checksum = _checksum
+    except Exception as exc:
+        # A render that blows up is its own problem and the apply will report it
+        # properly.  Do not take the whole status endpoint down over it.
+        log.warning("could not work out whether config is pending: %s", exc)
+        return {"dirty": False, "error": str(exc)[:200]}
+
+    latest = session.query(ConfigVersion).order_by(ConfigVersion.version.desc()).first()
+
+    # An older row has no user_checksum, from before this existed.  Treat that
+    # as nothing pending rather than showing a banner nobody can clear, since
+    # the next apply fills it in.
+    known = latest.user_checksum if latest else None
+    return {
+        "dirty": bool(latest is None or (known is not None and known != checksum)),
+        "applied_version": latest.version if latest else 0,
+        "never_applied": latest is None,
     }
 
 

@@ -35,6 +35,10 @@
     }
 
     // ------------------------------------------------------------------- API
+    // Set once the pending banner is wired up.  Kept at this level so api()
+    // can nudge it after a write without knowing anything about the banner.
+    let pendingRefresh = null;
+
     async function api(path, options) {
         options = options || {};
         const method = options.method || "GET";
@@ -75,6 +79,13 @@
         if (!response.ok) {
             const detail = data && data.detail;
             throw new Error(formatError(detail) || ("request failed with " + response.status));
+        }
+
+        // Anything that changed something may have made the saved config differ
+        // from the running one, so ask again rather than waiting for the timer.
+        // Skipped for the status call itself, which would loop forever.
+        if (method !== "GET" && method !== "HEAD" && pendingRefresh) {
+            pendingRefresh();
         }
 
         return data;
@@ -351,39 +362,79 @@
             );
         });
 
-        // Apply button, on every page that has one.
-        const applyBtn = document.getElementById("apply-config");
-        if (applyBtn) {
-            applyBtn.addEventListener("click", async function () {
-                applyBtn.disabled = true;
-                const original = applyBtn.textContent;
-                applyBtn.textContent = "Applying...";
+        // Applying, shared by the page button and the one in the pending
+        // banner.  Both get the real handler rather than one forwarding clicks
+        // to the other, because forwarding put every bit of feedback on the
+        // wrong button and the banner looked dead when it was working fine.
+        async function doApply(btn) {
+            btn.disabled = true;
+            const original = btn.textContent;
+            btn.textContent = "Applying...";
 
+            try {
+                const result = await api("/apply", {
+                    method: "POST",
+                    body: { summary: "applied from the web GUI" }
+                });
+
+                if (result.unchanged) {
+                    toast("Nothing had changed, so nothing was reloaded");
+                } else {
+                    let message = "Applied version " + result.version +
+                        " to " + result.applied_to.join(", ");
+                    if (result.queued_for && result.queued_for.length) {
+                        message += ".  Queued for " + result.queued_for.join(", ") +
+                            ", they will catch up when they are back.";
+                    }
+                    toast(message, "ok");
+                    setTimeout(function () { window.location.reload(); }, 1200);
+                }
+            } catch (err) {
+                toast(err.message, "bad");
+            } finally {
+                btn.disabled = false;
+                btn.textContent = original;
+            }
+        }
+
+        ["apply-config", "pending-config-apply"].forEach(function (id) {
+            const btn = document.getElementById(id);
+            if (btn) {
+                btn.addEventListener("click", function () { doApply(btn); });
+            }
+        });
+
+        // Saved is not live.  Check on load, then keep an eye on it, because
+        // the editors save over the API without reloading the page and the
+        // banner would otherwise stay wrong until you navigated.
+        const banner = document.getElementById("pending-config");
+        if (banner) {
+            async function refreshPending() {
                 try {
-                    const result = await api("/apply", {
-                        method: "POST",
-                        body: { summary: "applied from the web GUI" }
-                    });
-
-                    if (result.unchanged) {
-                        toast("Nothing had changed, so nothing was reloaded");
-                    } else {
-                        let message = "Applied version " + result.version +
-                            " to " + result.applied_to.join(", ");
-                        if (result.queued_for && result.queued_for.length) {
-                            message += ".  Queued for " + result.queued_for.join(", ") +
-                                ", they will catch up when they are back.";
+                    const st = await api("/status");
+                    const cfg = (st && st.config) || {};
+                    banner.hidden = !cfg.dirty;
+                    if (cfg.dirty) {
+                        const title = document.getElementById("pending-config-title");
+                        const detail = document.getElementById("pending-config-detail");
+                        if (cfg.never_applied) {
+                            title.textContent = "Nothing has been applied yet";
+                            detail.textContent = "This config has never been sent to nginx.  "
+                                + "Apply it to make it live.";
+                        } else {
+                            title.textContent = "Saved, but not live yet";
+                            detail.textContent = "These changes are stored.  nginx is still "
+                                + "running version " + cfg.applied_version + ".";
                         }
-                        toast(message, "ok");
-                        setTimeout(function () { window.location.reload(); }, 1200);
                     }
                 } catch (err) {
-                    toast(err.message, "bad");
-                } finally {
-                    applyBtn.disabled = false;
-                    applyBtn.textContent = original;
+                    // Losing the session or the network is its own alarm
+                    // elsewhere.  Do not flash a banner about it.
                 }
-            });
+            }
+            pendingRefresh = refreshPending;
+            refreshPending();
+            setInterval(refreshPending, 15000);
         }
 
         // Sidebar toggle on narrow screens.

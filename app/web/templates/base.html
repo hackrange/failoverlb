@@ -123,6 +123,30 @@
     </nav>
 
     <main class="content">
+      {# Saved is not the same as live, and that catches people out.  This sits
+         above every page rather than on the one you happened to edit, because
+         by the time it matters you have usually moved on to another page. #}
+      <div class="notice warn" id="pending-config" hidden
+           style="position:sticky; top:0; z-index:20; margin-bottom:14px;
+                  align-items:center; justify-content:space-between">
+        <div style="display:flex; gap:8px; align-items:flex-start">
+          <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+            <path d="M8 1L1 14h14L8 1zm0 4v5H7V5h1zm0 6.5v1H7v-1h1z"/>
+          </svg>
+          <div>
+            <strong id="pending-config-title">Saved, but not live yet</strong>
+            <div class="small" id="pending-config-detail">
+              These changes are stored.  nginx is still running the last config
+              that was applied.
+            </div>
+          </div>
+        </div>
+        {% if can('apply_config') %}
+          <button class="btn primary" id="pending-config-apply"
+                  style="flex:0 0 auto; margin-left:12px">Apply config</button>
+        {% endif %}
+      </div>
+
       {% block content %}{% endblock %}
     </main>
 
