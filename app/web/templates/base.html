@@ -32,10 +32,17 @@
 
     <div class="right">
       <span class="node-chip">
-        {% if me and me.role.value == 'active' %}
+        {# node_role comes from the shared context, so this is right on every
+           page rather than on the two that happened to pass a node object. #}
+        {% if node_role == 'active' %}
           <span class="dot ok"></span>{{ node_name }} &middot; active
-        {% else %}
+        {% elif node_role == 'standby' %}
           <span class="dot neutral"></span>{{ node_name }} &middot; standby
+        {% else %}
+          {# Not known is its own answer.  Calling it standby would be a guess,
+             and it is the guess that gets somebody to make a change on the box
+             they thought was the spare. #}
+          <span class="dot warn"></span>{{ node_name }} &middot; role unknown
         {% endif %}
       </span>
       <a href="{{ base }}/account">{{ user.username }}

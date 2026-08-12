@@ -33,7 +33,7 @@ from app.config import get_settings
 from app.core import audit
 from app.core.capabilities import get_local_capabilities
 from app.core.cluster import get_cluster
-from app.db import get_db
+from app.db import get_db, session_scope
 from app.models import Certificate, ConfigVersion, Node, Pool, VirtualHost
 from app.web.security import (
     SESSION_COOKIE,
@@ -103,6 +103,34 @@ def require_page_user(request: Request, db: DBSession):
     return user
 
 
+def _own_role() -> str:
+    """
+    This node's role, as a plain string.
+
+    Read fresh rather than cached, because it changes on failover and a chip
+    that is right at login and wrong an hour later is the same lie told slower.
+
+    Pulled out as a string on purpose.  Handing the template an ORM object from
+    a session that has already closed means the first attribute it touches
+    raises, and it would raise inside the layout, on every page.
+    """
+    from app.models import Node
+
+    try:
+        with session_scope() as session:
+            node = session.query(Node).filter(
+                Node.name == get_settings().node_name
+            ).first()
+            if not node or not node.role:
+                return "unknown"
+            return node.role.value
+    except Exception:
+        # The layout must render even when the database is unhappy.  Saying
+        # unknown is honest, and it is better than a stack trace where the
+        # navigation should be.
+        return "unknown"
+
+
 def render(request: Request, template: str, user, csrf_token: str = None, **context):
     """
     Render a page with everything the layout needs.
@@ -117,6 +145,14 @@ def render(request: Request, template: str, user, csrf_token: str = None, **cont
         template,
         {
             "user": user,
+            # What this node actually is, on every page.
+            #
+            # The chip used to read this from a "me" that only two pages passed,
+            # so everywhere else it fell through to standby and said so with a
+            # straight face.  On a tool whose whole job is failover, telling
+            # somebody they are on the standby when they are on the active one
+            # is worse than saying nothing, because they will act on it.
+            "node_role": _own_role(),
             "can": lambda perm: can(user, perm),
             "node_name": settings.node_name,
             "csp_nonce": getattr(request.state, "csp_nonce", ""),
