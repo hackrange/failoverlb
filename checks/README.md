@@ -47,6 +47,7 @@ docker exec -i nginx-fleet-manager python < checks/catalog_sweep.py
 | `page_sweep.py` | Every page and read only endpoint answers without raising, signed in. |
 | `regressions.py` | Every bug that has already cost a day, re-checked without applying anything. |
 | `authz_sweep.py` | A viewer cannot write, an operator cannot do admin things, and a write with no token or a forged one is refused. |
+| `health_checks.py` | The checker calls a backend up or down correctly, against real sockets that misbehave on purpose. |
 
 ## A pass that touched nothing is not a pass
 
