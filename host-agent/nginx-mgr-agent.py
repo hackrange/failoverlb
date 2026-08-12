@@ -1747,16 +1747,30 @@ def v_nginx_revert(req):
         # /usr/sbin/nginx, which this agent's sandbox forbids.  Run it as a unit.
         # No --no-block here, because a revert is quick and the caller wants to
         # know whether it worked.
+        # Where the log ends before we start, so what comes back is what the
+        # revert said and not the tail of the last build.  The first version
+        # returned the last forty lines of the file, which on a box that had
+        # just built something was forty lines about a successful build sitting
+        # under a failure, and the actual reason was nowhere to be seen.
+        before = UPGRADE_LOG.stat().st_size if UPGRADE_LOG.is_file() else 0
+
         out = run(["systemctl", "start", REVERT_UNIT], timeout=300)
-        tail = ""
+
+        said = ""
         if UPGRADE_LOG.is_file():
             try:
-                tail = "\n".join(UPGRADE_LOG.read_text(errors="replace").splitlines()[-40:])
+                with UPGRADE_LOG.open("r", errors="replace") as handle:
+                    handle.seek(before)
+                    said = handle.read()
             except OSError:
                 pass
+
+        if not said.strip():
+            said = (out["stdout"] + out["stderr"])
+
         return {
             "ok": out["rc"] == 0,
-            "output": (tail or (out["stdout"] + out["stderr"])).strip()[-4000:],
+            "output": said.strip()[-4000:],
         }
 
     result = run([str(INSTALLER), "revert"], timeout=300)

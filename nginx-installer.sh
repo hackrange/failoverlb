@@ -1010,6 +1010,21 @@ cmd_revert() {
   log "Reverting from $(readlink -f "$dir")"
 
   if [[ -f "${dir}/nginx.bin" ]]; then
+    # You cannot write over a binary that is running.  The kernel says "Text
+    # file busy" and the copy fails, which is exactly what this did for as long
+    # as it existed: revert, the way out of a bad build, did not work at all,
+    # and the one time you would ever reach for it is when something is already
+    # broken.  It went unnoticed because nothing had reverted on a box where
+    # nginx was up.
+    #
+    # Renaming a running binary is fine, the running process keeps the inode it
+    # already has.  This is the same move nginx's own make install makes, which
+    # is why building over a running nginx has always worked while this did not.
+    if [[ -f "$SBIN" ]]; then
+      mv -f "$SBIN" "${SBIN}.old" \
+        || die "Could not move the running nginx aside, so the revert stopped here."
+    fi
+
     cp -a "${dir}/nginx.bin" "$SBIN"
     log "Restored the old nginx binary."
   else
@@ -1019,9 +1034,33 @@ cmd_revert() {
   fi
 
   if [[ -f "${dir}/etc-nginx.tar.gz" ]]; then
-    rm -rf "$PREFIX"
-    tar xzf "${dir}/etc-nginx.tar.gz" -C "$(dirname "$PREFIX")"
-    log "Restored the old config."
+    # Emptied and refilled, not deleted and replaced.
+    #
+    # The agent reaches ${PREFIX} through a systemd ReadWritePaths bind mount,
+    # and that mount is tied to the directory that existed when the agent
+    # started.  Deleting the directory and untarring a new one in its place
+    # leaves the agent holding a mount to an inode that no longer exists, so
+    # every write it makes to nginx config comes back read only.  The node then
+    # sits there looking healthy and quietly refusing to apply anything, until
+    # somebody restarts the agent, and the one time you have just run a revert
+    # is the one time you are least likely to guess that is what is wrong.
+    #
+    # Keeping the directory itself and swapping what is inside it keeps every
+    # mount valid and needs nothing restarted.
+    local staged
+    staged="$(mktemp -d)"
+    tar xzf "${dir}/etc-nginx.tar.gz" -C "$staged"
+
+    if [[ -d "${staged}/$(basename "$PREFIX")" ]]; then
+      mkdir -p "$PREFIX"
+      find "$PREFIX" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+      # The dot matters, it copies what is inside rather than the folder itself.
+      cp -a "${staged}/$(basename "$PREFIX")/." "$PREFIX/"
+      log "Restored the old config."
+    else
+      warn "That snapshot did not hold a $(basename "$PREFIX") folder, leaving the config alone."
+    fi
+    rm -rf "$staged"
   fi
 
   if [[ -f "${dir}/nginx.service" ]]; then
