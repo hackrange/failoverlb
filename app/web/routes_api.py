@@ -2905,7 +2905,7 @@ async def import_preview(request: Request, g: ObjectGuard = Depends(guard)):
     committed to anything, and without needing the permission that changes
     things.
     """
-    g.require("edit_hosts")
+    g.require("edit_sites")
     payload = await request.json()
 
     from app.core.importer import analyse
@@ -2923,7 +2923,7 @@ async def import_apply(request: Request, g: ObjectGuard = Depends(changing)):
     client would let anybody who can reach this endpoint make whatever they
     liked, whatever the preview actually said.
     """
-    g.require("edit_hosts")
+    g.require("edit_sites")
     g.require("edit_pools")
     payload = await request.json()
 

@@ -297,6 +297,87 @@ with session_scope() as s:
     s.rollback()
 
 print()
+print("  importing somebody else's config keeps what it cannot model")
+
+from app.core.importer import analyse   # noqa: E402
+
+# Written to have the same shapes that a real world file turned out to have,
+# with invented names and addresses.  Each one of these lost config silently
+# before it was checked, which is the worst way for an importer to fail: the
+# import looks like it worked and the behaviour is gone.
+AWKWARD = """
+server {
+    if ($host = site.invalid) { return 301 https://$host$request_uri; }
+    listen 80;
+    server_name site.invalid;
+    more_set_headers "Server: edge";
+    location ^~ /.well-known/acme-challenge/ { root /var/www/certbot; allow all; }
+    location / { return 301 https://$host$request_uri; }
+}
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name site.invalid;
+    error_page 400 403 404 500 502 /error.html;
+    more_set_headers "Referrer-Policy: no-referrer";
+    rewrite ^/old$ /new last;
+    location = /healthz {
+        allow 192.0.2.10;
+        deny all;
+        error_page 403 =404 /error.html;
+        proxy_pass http://192.0.2.50:8000;
+    }
+    location = /error.css { root /var/www/html; }
+    location @missing { return 404 "nope\n"; }
+    location / {
+        if ($request_method = 'OPTIONS') {
+            add_header 'Access-Control-Max-Age' '3600' always;
+            return 204;
+        }
+        proxy_pass http://192.0.2.50:8000;
+        proxy_cookie_path /o/ /;
+    }
+}
+"""
+
+plan = analyse(AWKWARD)
+check("an awkward config still parses", plan.get("ok"), str(plan.get("error"))[:200])
+
+if plan.get("ok"):
+    sites = plan["sites"]
+    check("http and https blocks for one name make one site", len(sites) == 1,
+          f"made {len(sites)} sites, so the same name would collide and the "
+          f"https half would be the one dropped")
+
+    site = sites[0] if sites else {"custom_config": "", "http2": False}
+    kept = site.get("custom_config", "")
+
+    # Each of these was silently dropped at some point.  The round trip logic
+    # treats them as ours to regenerate, which is right for our own config and
+    # wrong for somebody else's.
+    for label, needle in (
+        ("error_page survives", "error_page"),
+        ("allow and deny survive", "deny all"),
+        ("if blocks survive", "if ("),
+        ("add_header inside an if survives", "add_header"),
+        ("a location that is only a root survives", "/error.css"),
+        ("a named location survives", "@missing"),
+        ("rewrite survives", "rewrite"),
+        ("header directives survive", "more_set_headers"),
+    ):
+        check(label, needle in kept,
+              f"{needle!r} is nowhere in what was kept, so importing this "
+              f"config would quietly lose it")
+
+    check("http2 as its own directive is picked up", site.get("http2") is True,
+          "nginx 1.25.1 moved http2 off the listen line, and only reading the "
+          "listen line leaves the switch off on a site that asked for it")
+
+    check("an upstream declared elsewhere is not invented as a host",
+          all("192.0.2.50" in str(p["members"]) or p["members"] for p in plan["pools"]),
+          "a bare upstream name became a backend that will never resolve")
+
+print()
 print("  live behaviour")
 with session_scope() as s:
     sites = [h.name for h in s.query(VirtualHost).all()

@@ -154,6 +154,36 @@ def main():
     print()
     failed = [name for name, ok, _ in results if not ok]
     print(f"  {len(results) - len(failed)} of {len(results)} were refused as they should be")
+    # Every permission a route asks for has to be one that exists.
+    #
+    # A name that is not in ROLE_PERMISSIONS is in nobody's set, so `require`
+    # refuses everybody, including an admin, and the message says their role
+    # cannot do it.  That reads like a permissions decision rather than a typo,
+    # which is what makes it worth a check: the import routes shipped asking for
+    # "edit_hosts", the real name is "edit_sites", and an admin was told their
+    # role was not allowed.
+    import re
+    from pathlib import Path
+
+    from app.auth.service import ROLE_PERMISSIONS
+
+    real = set().union(*ROLE_PERMISSIONS.values())
+    # The module's own file, because these suites are run through stdin and
+    # __file__ is then "<stdin>".
+    import app.web.routes_api as routes_api
+
+    api = Path(routes_api.__file__)
+    asked = set(re.findall(r'require\("([a-z_]+)"\)', api.read_text()))
+    invented = sorted(asked - real)
+
+    results.append(("every permission a route asks for exists", not invented,
+                    f"these are asked for but defined nowhere, so they refuse "
+                    f"everybody including an admin: {invented}"))
+    print(f"    {'pass' if not invented else 'FAIL'}  "
+          f"every permission a route asks for exists")
+    if invented:
+        print(f"          asked for but not defined anywhere: {invented}")
+
     print()
     print("  what this does not cover:")
     print("    - that an admin CAN do these, which the GUI shows the moment it cannot")

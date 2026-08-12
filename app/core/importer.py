@@ -192,10 +192,82 @@ def _listen_info(block) -> dict:
             if port:
                 info["http_port"] = port
 
+    # nginx 1.25.1 moved http2 off the listen line and made it its own
+    # directive.  Both forms are current, plenty of real config uses the newer
+    # one, and only reading the listen line left the switch off on a site that
+    # had asked for it.
+    for d in _find_all(block, "http2"):
+        args = _args(d)
+        if not args or args[0].lower() in ("on", "1", "true"):
+            info["http2"] = True
+
     if not info["http"] and not info["https"]:
         info["http"] = True
 
     return info
+
+
+# What we will write ourselves from the fields captured above, and so must not
+# also copy verbatim or it would appear twice.
+#
+# Deliberately short.  `extract_unknown` in the parser drops a much longer list,
+# and it is right to, because it exists for reading back config this system
+# generated, where those directives really were ours.  A config from somewhere
+# else is the opposite case: every one of those lines is somebody's decision,
+# and dropping it loses behaviour they are relying on.  Importing a real world
+# file is what showed this up, with error_page, allow, deny and add_header all
+# quietly disappearing.
+ALWAYS_REGENERATED = {
+    "listen", "server_name", "ssl_certificate", "ssl_certificate_key",
+    "location",
+}
+# `if` is not on that list, and putting it there was a mistake worth recording.
+# We never generate one, so dropping them lost two different things at once: the
+# certbot style `if ($host = ...)` redirect, and a CORS preflight handler living
+# inside `location /` that carried five add_header lines with it.  An `if` block
+# is somebody's logic and it gets kept like anything else.
+
+
+def _verbatim(block, settings: dict, extra_drop=()) -> str:
+    """
+    Everything in this block we are not going to write ourselves.
+
+    Anything that became a setting is dropped, because we will render it from
+    the setting.  Everything else is kept exactly as it was written.
+    """
+    from app.core.nginx_parser import DIRECTIVE_TO_KEY
+
+    if not block.is_block:
+        return ""
+
+    drop = set(ALWAYS_REGENERATED) | set(extra_drop)
+    kept = []
+    for d in block.block:
+        if d.name in drop:
+            continue
+        # It became a setting, so it will be rendered from there.
+        key = DIRECTIVE_TO_KEY.get(d.name)
+        if key and key in settings:
+            continue
+        kept.append(d)
+
+    return serialize(kept) if kept else ""
+
+
+def _commented(text: str, why: str) -> str:
+    """
+    Keep config we cannot place, commented out, with the reason.
+
+    Used where copying it in as it stands would clash with something this system
+    generates.  Commented out it changes nothing, and it is still there for
+    somebody to move by hand, which beats both silently dropping it and
+    producing config that will not load.
+    """
+    if not text.strip():
+        return ""
+    out = [f"\n# {why}"]
+    out.extend("#   " + line for line in text.rstrip().splitlines())
+    return "\n".join(out) + "\n"
 
 
 def _looks_like_a_host(target: str) -> bool:
@@ -353,6 +425,18 @@ def _read_server(block, pools_by_raw_name: dict, index: int) -> dict:
         if target.startswith("https://"):
             site["backend_tls"] = True
 
+        leftover = _verbatim(loc, {}, extra_drop=(
+            "proxy_pass", "proxy_set_header", "proxy_http_version",
+            "proxy_hide_header",
+        ))
+        if leftover.strip():
+            site["custom_config"] += _commented(
+                leftover,
+                f"From location {path} in the imported config.  This site "
+                f"generates its own location {path}, so these are here rather "
+                f"than in it.  Move what you still need.",
+            )
+
         for extra_path, extra_target, _l in proxied:
             if (extra_path, extra_target) != (path, target):
                 site["skipped"].append(
@@ -361,20 +445,28 @@ def _read_server(block, pools_by_raw_name: dict, index: int) -> dict:
                 )
 
     for loc in locations:
-        if loc in [c[2] for c in ([chosen] if chosen else [])]:
+        if chosen is not None and loc is chosen[2]:
             continue
         if _is_acme_location(loc):
             # We write our own, on every node, whenever a certificate is issued.
             # Carrying somebody else's copy across would leave two.
             continue
-        body = extract_unknown(loc)
-        if body.strip():
-            path = " ".join(_unquote(a) for a in _args(loc)) or "/"
-            site["custom_config"] += f"\n# from location {path}\nlocation {path} {{\n{body}}}\n"
+        # The whole block, as written.  Not filtered: a location whose body is
+        # only a root, or only an allow, is still a location that does
+        # something, and an earlier version dropped exactly those because every
+        # directive in them was on the "we generate this" list.
+        path = " ".join(_unquote(a) for a in _args(loc)) or "/"
+        body = serialize(loc.block or [])
+        site["custom_config"] += f"\n# kept from the imported config\nlocation {path} {{\n{body}}}\n"
 
     # ---- settings we understand, and everything else kept verbatim
     site["settings"] = extract_settings(block) or {}
-    leftover = extract_unknown(block)
+    extra = ["http2"]
+    if site["mode"] == "static" and site["document_root"]:
+        extra.append("root")
+    if site["mode"] == "redirect":
+        extra.append("return")
+    leftover = _verbatim(block, site["settings"], extra_drop=extra)
     if leftover.strip():
         site["custom_config"] = (
             "# Kept from the imported config because there is no setting for it.\n"
@@ -486,6 +578,15 @@ def analyse(text: str) -> dict:
                 "the plain http block for these names only redirected to https, "
                 "so it became the force https switch rather than a second site"
             )
+            # It is only a redirect as far as traffic goes, but it can still
+            # carry directives that were doing something, and folding it away
+            # used to take those with it.
+            if plain["custom_config"].strip():
+                secure["custom_config"] += _commented(
+                    plain["custom_config"],
+                    "From the plain http block for these names, which became the "
+                    "force https switch.  Kept in case any of it still matters.",
+                )
         else:
             secure["notes"].append(
                 "there were two blocks for these names, one per port, and they "

@@ -42,7 +42,7 @@
   <div class="card mt">
     <div class="card-head">
       <h2>What this would make</h2>
-      {% if can('edit_hosts') %}
+      {% if can('edit_sites') %}
         <button class="btn primary" id="do-import">Import the ticked ones</button>
       {% endif %}
     </div>
@@ -147,7 +147,8 @@
   document.getElementById("preview").addEventListener("click", async () => {
     if (!box.value.trim()) { NFM.toast("Paste a config first"); return; }
     try {
-      render(await NFM.api("POST", "/api/import/preview", { config: box.value }));
+      render(await NFM.api("/import/preview",
+        { method: "POST", body: { config: box.value } }));
     } catch (e) {
       NFM.toast(e.message || "could not read that config");
     }
@@ -162,8 +163,9 @@
 
       importBtn.disabled = true;
       try {
-        const r = await NFM.api("POST", "/api/import", {
-          config: box.value, sites: sites, pools: pools
+        const r = await NFM.api("/import", {
+          method: "POST",
+          body: { config: box.value, sites: sites, pools: pools }
         });
         let msg = `Imported ${r.sites.length} site(s) and ${r.pools.length} pool(s).`;
         if (r.already_there && r.already_there.length) {
