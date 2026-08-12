@@ -591,6 +591,15 @@ def _management_addresses(db) -> list:
     return sorted(set(out))
 
 
+@router.get("/import", response_class=HTMLResponse)
+async def import_page(request: Request, db: DBSession = Depends(get_db)):
+    user = require_page_user(request, db)
+    token = ensure_csrf_token(request)
+    response = render(request, "import.html", user, csrf_token=token)
+    issue_csrf_token(response, token)
+    return response
+
+
 @router.get("/pools", response_class=HTMLResponse)
 async def pools_page(request: Request, db: DBSession = Depends(get_db)):
     user = require_page_user(request, db)

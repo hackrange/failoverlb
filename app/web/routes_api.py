@@ -2889,3 +2889,64 @@ async def audit_log(g: ObjectGuard = Depends(guard), limit: int = 100):
             for r in rows
         ]
     }
+
+
+# ==============================================================================
+# Importing somebody else's config
+# ==============================================================================
+
+@router.post("/import/preview")
+async def import_preview(request: Request, g: ObjectGuard = Depends(guard)):
+    """
+    Work out what a config would become.  Writes nothing.
+
+    Deliberately a read.  Somebody weighing up whether to adopt this tool should
+    be able to point it at their live config and see the answer without having
+    committed to anything, and without needing the permission that changes
+    things.
+    """
+    g.require("edit_hosts")
+    payload = await request.json()
+
+    from app.core.importer import analyse
+
+    return analyse(payload.get("config") or "")
+
+
+@router.post("/import")
+async def import_apply(request: Request, g: ObjectGuard = Depends(changing)):
+    """
+    Make what the preview described.
+
+    The config is parsed again here rather than trusting a plan posted back by
+    the browser.  A plan is a list of objects to create, and taking one from the
+    client would let anybody who can reach this endpoint make whatever they
+    liked, whatever the preview actually said.
+    """
+    g.require("edit_hosts")
+    g.require("edit_pools")
+    payload = await request.json()
+
+    from app.core.importer import analyse, apply_plan
+
+    plan = analyse(payload.get("config") or "")
+    if not plan.get("ok"):
+        raise HTTPException(status_code=400, detail=plan.get("error", "that config would not parse"))
+
+    result = apply_plan(
+        g.session,
+        plan,
+        chosen_sites=payload.get("sites"),
+        chosen_pools=payload.get("pools"),
+    )
+    g.session.commit()
+
+    audit.record("config.import", user=g.user, object_type="fleet",
+                 detail=f"imported {len(result['sites'])} sites and "
+                        f"{len(result['pools'])} pools")
+
+    # Nothing is applied here.  Everything lands disabled and unapplied, so the
+    # person can look at what arrived before any of it reaches nginx.
+    return {"ok": True, **result,
+            "message": "imported and left switched off.  Look them over, turn on "
+                       "the ones you want, then apply."}

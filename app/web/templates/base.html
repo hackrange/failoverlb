@@ -73,6 +73,11 @@
         <span class="count">{{ pools|length if pools is defined else '' }}</span>
       </a>
 
+      <a href="{{ base }}/import" class="{{ 'active' if active_page == 'import' }}">
+        <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 1v7.6l2.3-2.3 1 1L7.5 11 3.7 7.3l1-1L7 8.6V1h1zM2 12h12v2H2v-2z"/></svg>
+        Import
+      </a>
+
       <a href="{{ base }}/zones" class="{{ 'active' if active_page == 'zones' }}">
         <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M2 2h5v5H2V2zm0 7h5v5H2V9zm7-7h5v5H9V2zm0 7h5v5H9V9z"/></svg>
         Zones &amp; Access
