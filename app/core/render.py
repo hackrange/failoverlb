@@ -716,6 +716,27 @@ map $cookie_{cookie} $sticky_{_safe_var(pool.name)} {{
         lines.append("}")
         return "\n".join(lines)
 
+    def _tls_default(self, cfg, key):
+        """
+        A cipher setting, falling back to what the catalog says the default is.
+
+        Leaving these unset does not mean "no preference", it means nginx uses
+        its own built in list, which is older and looser than the one the help
+        text on the page calls the default.  So a site nobody touched ran
+        weaker ciphers than the GUI said it did, and the only way to get the
+        advertised list was to open the field and save it unchanged.
+
+        Writing the catalog default when nothing is set makes the page honest:
+        what it shows is what the file gets.
+        """
+        value = cfg.get(key)
+        if value:
+            return value
+        feature = get_feature(key)
+        if not feature or not self.supports(key):
+            return None
+        return feature.default
+
     def _render_https_block(self, host, names, cfg, cert, acl) -> str:
         default = " default_server" if host.default_server else ""
         http2 = ""
@@ -769,7 +790,7 @@ map $cookie_{cookie} $sticky_{_safe_var(pool.name)} {{
         legacy = [p for p in proto if p in ("TLSv1", "TLSv1.1", "TLSv1.2")]
 
         if legacy:
-            ciphers = cfg.get("ssl_ciphers")
+            ciphers = self._tls_default(cfg, "ssl_ciphers")
             if ciphers:
                 lines.append(f"    ssl_ciphers {ciphers};")
             lines.append("    ssl_prefer_server_ciphers off;")
@@ -779,7 +800,7 @@ map $cookie_{cookie} $sticky_{_safe_var(pool.name)} {{
             lines.append("    # look like it was doing something.")
 
         if "TLSv1.3" in proto:
-            suites = cfg.get("ssl_ciphersuites")
+            suites = self._tls_default(cfg, "ssl_ciphersuites")
             if suites:
                 lines.append(f"    ssl_conf_command Ciphersuites {esc(suites)};")
 
