@@ -2522,7 +2522,13 @@ async def cert_placement(cert_id: str, g: ObjectGuard = Depends(guard)):
     if not domains:
         raise HTTPException(status_code=400, detail="that certificate has no domains")
 
-    return await pick_issuing_node(domains[0])
+    placement = await pick_issuing_node(domains[0])
+
+    # The stored check too, so the dialog you opened because issuance looked
+    # wrong also tells you the record has been pointing elsewhere for a while.
+    placement["dns_health"] = cert.dns_warning
+    placement["dns_ok"] = bool(cert.dns_ok)
+    return placement
 
 
 @router.delete("/certs/{cert_id}")

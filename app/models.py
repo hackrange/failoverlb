@@ -1049,6 +1049,17 @@ class Certificate(Base):
     files_present = Column(Boolean, default=True)
     files_checked_at = Column(DateTime)
 
+    # Whether this domain points at addresses we actually answer on.
+    #
+    # A renewal is only possible from a node the certificate authority can
+    # reach, and it reaches whatever DNS says.  So a domain pointing somewhere
+    # no node owns is a renewal that will fail, ninety days from now, quietly,
+    # long after whoever changed the record has forgotten.  Worth saying out
+    # loud while the certificate is still fine.
+    dns_ok = Column(Boolean, default=True)
+    dns_warning = Column(Text)
+    dns_checked_at = Column(DateTime)
+
     # For an uploaded cert, we keep the material here so the fleet can serve it
     # everywhere.  The key is encrypted with the node secret.
     uploaded_fullchain = Column(Text)

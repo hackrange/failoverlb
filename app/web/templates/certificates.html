@@ -40,6 +40,14 @@
               <td>
                 <strong>{{ c.name }}</strong>
                 <div class="small faint">{{ c.challenge_type }}</div>
+                {% if c.dns_warning %}
+                  {# Said here rather than only in a log, because the failure it
+                     warns about is ninety days away and nobody reads a log for
+                     something that has not happened yet. #}
+                  <div class="small" style="margin-top:4px; color:var(--{{ 'bad' if not c.dns_ok else 'warn' }})">
+                    {{ 'DNS does not point here' if not c.dns_ok else 'DNS partly points elsewhere' }}
+                  </div>
+                {% endif %}
               </td>
               <td class="mono small">{{ c.domain_list()|join(', ') }}</td>
               <td>
@@ -227,6 +235,11 @@ document.addEventListener("DOMContentLoaded", function () {
         };
         html += '<div class="help-section"><h4>Why</h4><p>' +
           NFM.escapeHtml(reasons[r.reason] || r.reason) + "</p></div>";
+
+        if (r.dns_health) {
+          html += '<div class="notice ' + (r.dns_ok ? "warn" : "bad") + '">' + NFM.icon("warn") +
+            "<div>" + NFM.escapeHtml(r.dns_health) + "</div></div>";
+        }
 
         if (r.warning) {
           html += '<div class="notice warn">' + NFM.icon("warn") +

@@ -670,6 +670,92 @@ class CertificateManager:
                 cert.files_checked_at = utcnow()
                 session.commit()
 
+    async def check_dns(self):
+        """
+        Check each certificate's domains still point at this fleet.
+
+        Renewal works by the certificate authority connecting to whatever the
+        domain resolves to.  Point it somewhere no node answers and the renewal
+        fails, but not today: today the certificate is still valid and every
+        page says so.  It fails in ninety days, on a schedule nobody is watching,
+        long after whoever moved the record has stopped thinking about it.
+
+        So we compare what the domain resolves to against every address the
+        fleet knows it has, and say so while there is still time to fix it.
+
+        A resolver that will not answer is not a mismatch.  DNS being down tells
+        us nothing about where the record points, and marking every certificate
+        broken because a resolver timed out would be worse than saying nothing.
+        """
+        with session_scope() as session:
+            certs = [
+                (c.id, c.name, json.loads(c.domains or "[]"))
+                for c in session.query(Certificate).all()
+            ]
+            ours = set()
+            for node in session.query(Node).all():
+                if node.public_ip:
+                    ours.add(node.public_ip)
+                for entry in node.local_address_list():
+                    if entry.get("scope") == "global" and entry.get("address"):
+                        ours.add(entry["address"])
+
+        if not ours:
+            log.debug("no node addresses known yet, skipping the dns check")
+            return
+
+        for cert_id, name, domains in certs:
+            unowned, owned, failed = [], [], []
+
+            # Resolve once and keep both halves.  Looking it up twice invites
+            # two different answers, which is exactly the sort of thing that
+            # makes a warning appear and vanish for no visible reason.
+            for domain in domains or [name]:
+                result = await resolve_domain(domain)
+                if not result["resolved"]:
+                    failed.append(domain)
+                    continue
+                for address in result["all"]:
+                    (owned if address in ours else unowned).append(address)
+
+            if not owned and not unowned:
+                # Every lookup failed.  Say nothing rather than cry wolf.
+                if failed:
+                    log.warning("could not resolve %s to check its dns", ", ".join(failed))
+                continue
+
+            ok, warning = True, None
+
+            if unowned and not owned:
+                ok = False
+                warning = (
+                    f"{name} resolves to {', '.join(sorted(set(unowned)))}, and no node in "
+                    f"this fleet answers on any of those.  A renewal has to be answered by "
+                    f"the node the record points at, so this one will fail when it comes "
+                    f"due.  Point the record at a node, or issue from wherever it points."
+                )
+            elif unowned:
+                warning = (
+                    f"{name} also resolves to {', '.join(sorted(set(unowned)))}, which no "
+                    f"node here owns.  Renewal still works through the addresses we do "
+                    f"answer on, but a certificate authority may try that one first, and "
+                    f"anybody reaching it goes nowhere.  Usually a stale record."
+                )
+
+            with session_scope() as session:
+                cert = session.query(Certificate).filter(Certificate.id == cert_id).first()
+                if not cert:
+                    continue
+                if cert.dns_warning != warning:
+                    if warning:
+                        log.warning("dns check on %s: %s", name, warning)
+                    else:
+                        log.info("dns for %s points at this fleet again", name)
+                cert.dns_ok = ok
+                cert.dns_warning = warning
+                cert.dns_checked_at = utcnow()
+                session.commit()
+
     async def check_renewals(self):
         """
         Renew anything that is getting close to expiry.

@@ -356,6 +356,18 @@ def start_scheduler():
         coalesce=True,
     )
 
+    # Notice a domain that stopped pointing at us, while the certificate it
+    # belongs to is still valid and there is time to do something about it.
+    # Hourly is plenty: DNS moves when a person moves it, not on its own.
+    scheduler.add_job(
+        get_cert_manager().check_dns,
+        "interval",
+        seconds=3600,
+        id="cert_dns",
+        max_instances=1,
+        coalesce=True,
+    )
+
     scheduler.add_job(refresh_local_state, "interval", seconds=60, id="local_state",
                       max_instances=1, coalesce=True)
 
