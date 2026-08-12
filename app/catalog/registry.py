@@ -144,6 +144,18 @@ class Feature:
     # Hidden behind the "show advanced" toggle so the normal page stays short.
     advanced: bool = False
 
+    # Stop and make somebody read something before this is switched on.
+    #
+    # For the few settings that can take a working site away from most of the
+    # people using it, where the damage is not obvious from the label and does
+    # not show up until real traffic arrives.  Help text is not enough on its
+    # own: nobody opens the help for a checkbox they already understand, and
+    # this is the class of setting where they only think they do.
+    #
+    # Only on the way on.  Turning one of these off is how you recover, so it
+    # should never need a dialog.
+    confirm: str = ""
+
     # Only show this when another setting is on.  Keeps the form from showing
     # you twelve cache options when caching is off.
     depends_on: str = ""

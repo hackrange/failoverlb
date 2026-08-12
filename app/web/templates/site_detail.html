@@ -410,6 +410,19 @@ document.addEventListener("DOMContentLoaded", function () {
     holder.querySelectorAll("[data-setting]").forEach(function (el) {
       el.addEventListener("change", markDirty);
     });
+
+    // Make somebody read the warning before a setting that turns visitors away
+    // goes on.  Refusing puts the box back, so declining is the same as never
+    // having touched it.
+    holder.querySelectorAll("input[type=checkbox][data-confirm]").forEach(function (el) {
+      el.addEventListener("click", function (event) {
+        if (!el.checked) return;          // switching off never asks
+        if (!window.confirm(el.getAttribute("data-confirm"))) {
+          el.checked = false;
+          event.preventDefault();
+        }
+      });
+    });
   }
 
   function control(f) {
@@ -419,8 +432,19 @@ document.addEventListener("DOMContentLoaded", function () {
 
     let input = "";
     if (f.type === "bool") {
+      // A setting that can take the site away from most of the people using it
+      // carries its own warning, and the box stops you on the way on.  Turning
+      // it back off is how you recover, so that never asks.
+      // escapeHtml goes through textContent, which handles < > and & and
+      // leaves quotes alone.  That is fine for text between tags and not fine
+      // here, where a quote would close the attribute early and whatever came
+      // next would be parsed as markup.  Today's warning has no quotes in it,
+      // which is luck, not a design.
+      const guard = f.confirm
+        ? ' data-confirm="' + NFM.escapeHtml(f.confirm).replace(/"/g, "&quot;") + '"'
+        : "";
       input = '<div class="checkline"><input type="checkbox" id="' + id +
-              '" data-setting="' + f.key + '" data-type="bool"' +
+              '" data-setting="' + f.key + '" data-type="bool"' + guard +
               (val ? " checked" : "") + disabled + '>' +
               '<label for="' + id + '">' + NFM.escapeHtml(f.label) + "</label>" +
               help(f) + "</div>";

@@ -2219,6 +2219,19 @@ register(
         default=False,
         module="http_ssl_module",
         advanced=True,
+        confirm=(
+            "This turns visitors away.\n\n"
+            "Only X25519MLKEM768 will be offered, with no fallback, so anything that "
+            "cannot do it will not connect at all.  That means roughly Chrome and Edge "
+            "before 131, Firefox before 132, most phones more than a year old, and "
+            "anything scripted against OpenSSL older than 3.5, which includes most "
+            "monitoring and a lot of curl.\n\n"
+            "It also moves this site to TLS 1.3 only, because the exchange does not "
+            "exist in 1.2 and leaving 1.2 on would let a client opt straight back out.\n\n"
+            "The people it turns away see a handshake failure that says nothing about "
+            "key exchange, so they will not be able to tell you what is wrong.\n\n"
+            "Turn this on only where you control every client."
+        ),
         help=HelpText(
             summary="Refuse anything that cannot do the quantum resistant exchange.",
             detail=(
