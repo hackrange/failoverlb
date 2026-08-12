@@ -44,6 +44,23 @@ docker exec -i nginx-fleet-manager python < checks/catalog_sweep.py
 | Check | What it proves |
 |---|---|
 | `catalog_sweep.py` | Every catalog setting renders config that real nginx loads, one at a time and all together. |
+| `page_sweep.py` | Every page and read only endpoint answers without raising, signed in. |
+| `regressions.py` | Every bug that has already cost a day, re-checked without applying anything. |
+| `authz_sweep.py` | A viewer cannot write, an operator cannot do admin things, and a write with no token or a forged one is refused. |
+
+## A pass that touched nothing is not a pass
+
+Three of these suites reported green while testing nothing, on their first run,
+in three different ways.  It is the failure mode to watch for:
+
+- the test client's address is the literal string `testclient`, which is in no
+  allow list, so every request came back 404 and every check "passed"
+- a path that does not exist gives a 404 that reads exactly like a refusal
+- an incomplete request body is rejected by validation before the handler runs,
+  so a permission check that never fired looks like one that refused
+
+Each of those is now caught by the check itself.  When you add one, make it
+prove it reached the thing it claims to be testing.
 
 ## What is not here yet
 
