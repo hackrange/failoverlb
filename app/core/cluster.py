@@ -311,7 +311,24 @@ class ClusterManager:
             # everybody we can see agrees.  In a network split the smaller side
             # has to stand down, or both sides start writing config and you get
             # two different edges serving two different things.
-            if total > 1 and len(healthy) <= total / 2:
+            #
+            # Two nodes are the exception, and it has to be, because a pair can
+            # never reach a majority when one of them is down.  One out of two
+            # is not more than half, so the strict rule meant an HA pair lost
+            # the ability to change anything the moment either node died, which
+            # is the exact moment you need it.  A load balancer you cannot
+            # reconfigure during an outage is not much of a load balancer.
+            #
+            # So for a pair the survivor takes over.  The risk that buys is a
+            # split where both sides think they are alone and both go active.
+            # That is a real risk and worth understanding: config written on one
+            # side during the split gets overwritten when they meet again.  It
+            # is still the better trade, because a split between two boxes is
+            # rarer than one box rebooting, and the damage is a lost edit rather
+            # than an outage.  Three or more nodes keep the strict rule, where
+            # majority actually means something.
+            pair = (total == 2)
+            if total > 1 and not pair and len(healthy) <= total / 2:
                 if me.role == NodeRole.ACTIVE:
                     log.warning(
                         "only %s of %s nodes are visible, that is not a majority, "

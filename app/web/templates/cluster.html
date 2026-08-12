@@ -142,6 +142,9 @@
               {% if can('failover') and n.role.value != 'active' and n.state.value == 'online' %}
                 <button class="btn sm" data-failover="{{ n.name }}">Make active</button>
               {% endif %}
+              {% if can('manage_cluster') and not n.is_self and n.role.value != 'active' %}
+                <button class="btn sm danger" data-remove-node="{{ n.name }}">Remove</button>
+              {% endif %}
             </td>
           </tr>
           {% if n.last_error %}
@@ -289,6 +292,24 @@ document.addEventListener("DOMContentLoaded", function () {
   });
 
   document.body.addEventListener("click", function (e) {
+    const rm = e.target.closest("[data-remove-node]");
+    if (rm) {
+      const node = rm.getAttribute("data-remove-node");
+      NFM.confirmThen(
+        "Remove " + node + " from the cluster?\n\n" +
+        "This only forgets it here.  Nothing is uninstalled, so if that box is " +
+        "still running the manager it will heartbeat and come back.  Stop it " +
+        "there first if you mean this to stick.",
+        async function () {
+          try {
+            await NFM.api("/cluster/nodes/" + encodeURIComponent(node), { method: "DELETE" });
+            NFM.toast(node + " removed", "ok");
+            setTimeout(function () { window.location.reload(); }, 900);
+          } catch (err) { NFM.toast(err.message, "bad"); }
+        });
+      return;
+    }
+
     const btn = e.target.closest("[data-failover]");
     if (!btn) return;
 

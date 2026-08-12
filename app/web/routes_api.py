@@ -1567,6 +1567,63 @@ async def failover(request: Request, g: ObjectGuard = Depends(changing)):
     return {"ok": True, "active": target}
 
 
+@router.delete("/cluster/nodes/{node_name}")
+async def remove_node(node_name: str, g: ObjectGuard = Depends(changing)):
+    """
+    Take a node out of the cluster.
+
+    There was no way to do this at all, which is a problem the moment somebody
+    registers the wrong box.  A node that is not really there still counts
+    towards quorum, so a phantom entry can stop the real nodes electing anybody
+    and there was no way to clear it out short of editing the database.
+
+    This only forgets the node here.  It does not reach out and uninstall
+    anything, because the usual reason for doing this is that the node is not
+    answering in the first place.  If it is still running out there, stop it or
+    it will carry on heartbeating and reappear.
+    """
+    node = g.session.query(Node).filter(Node.name == node_name).first()
+    if not node:
+        raise HTTPException(status_code=404, detail="not found")
+
+    g.require("manage_cluster")
+
+    if node.is_self:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "a node cannot remove itself.  Do it from another node, or if "
+                "this is the last one you want the whole install gone rather "
+                "than a node removed."
+            ),
+        )
+
+    if node.role == NodeRole.ACTIVE:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"{node_name} is the active node.  Make another node active "
+                f"first, so there is somewhere for changes to go."
+            ),
+        )
+
+    g.session.delete(node)
+    g.session.commit()
+
+    audit.record("cluster.node_remove", user=g.user, object_type="cluster",
+                 object_name=node_name, detail=f"removed {node_name} from the cluster")
+
+    # Roles are worked out from who is left, so run that again now rather than
+    # waiting for the timer.  Dropping a dead node is often the thing that lets
+    # the survivors elect somebody.
+    try:
+        await get_cluster().run_election()
+    except Exception as exc:
+        log.warning("election after removing %s did not run: %s", node_name, exc)
+
+    return {"ok": True, "removed": node_name}
+
+
 @router.post("/cluster/resync")
 async def resync(g: ObjectGuard = Depends(changing)):
     """Push the current config at anybody who is behind, right now."""
