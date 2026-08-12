@@ -48,8 +48,18 @@
         <table>
           <thead>
             <tr>
-              <th>Address</th><th>State</th><th>Weight</th><th>Fails</th>
-              <th>Timeout</th><th>Max conns</th><th>Backup</th>
+              <th>Address</th><th>State</th>
+              <th class="nowrap">Weight
+                <button class="help-btn" data-help-static="h-weight"
+                        data-help-title="Weight" aria-label="Help">?</button>
+              </th>
+              <th>Fails</th>
+              <th>Timeout</th>
+              <th class="nowrap">Max conns
+                <button class="help-btn" data-help-static="h-maxconns"
+                        data-help-title="Max connections" aria-label="Help">?</button>
+              </th>
+              <th>Backup</th>
               <th class="right">Response</th><th></th>
             </tr>
           </thead>
@@ -634,6 +644,61 @@
 
 With it, only the users who were on the server that went away move.  Everybody else stays
 exactly where they were.</p>
+  </div>
+</div>
+
+<div hidden id="h-weight">
+  <div class="help-section">
+    <p>How big a share of the traffic this backend takes.  <strong>Higher gets more.</strong></p>
+  </div>
+  <div class="help-section">
+    <h4>Which way round it goes</h4>
+    <p>This is a share, not a priority, and it is the opposite of the ranking most
+       people expect.  A 10 is not first in line ahead of a 1.  A 10 takes ten times
+       as many requests as a 1, and both are used at the same time.</p>
+    <p>Three backends on 1, 1 and 1 is an even split, a third each.  Change one to 2
+       and it takes half of everything while the other two take a quarter each, because
+       the shares are 2 out of 4, 1 out of 4 and 1 out of 4.</p>
+  </div>
+  <div class="help-section">
+    <h4>What it is for</h4>
+    <p>Backends that are not the same size.  A box with twice the cores can carry twice
+       the traffic, so give it 2 while the others stay on 1 rather than sending an even
+       split to machines that cannot take it evenly.</p>
+    <p>Leave everything on 1 when the machines match, which is the normal case.</p>
+  </div>
+  <div class="help-section">
+    <h4>Not a way to take a backend out</h4>
+    <p>There is no weight that means "do not use this".  Even a 1 next to a 100 still
+       takes one request in a hundred.  To stop traffic reaching a backend, drain it or
+       turn it off, both on this page.</p>
+  </div>
+</div>
+
+<div hidden id="h-maxconns">
+  <div class="help-section">
+    <p>The most requests nginx will have in flight to this backend at once.  Past that
+       it queues rather than piling more on.</p>
+  </div>
+  <div class="help-section">
+    <h4>Zero means no limit</h4>
+    <p>Which is the default, and is right until you know the number.  A limit invented
+       out of nowhere turns a backend that was coping into one that queues.</p>
+  </div>
+  <div class="help-section">
+    <h4>When to set it</h4>
+    <p>When the backend falls over under load rather than slowing down.  A database with
+       a connection pool of 50 behind an app that opens one per request has a real limit,
+       and it is better for nginx to hold requests than for the backend to start
+       refusing them.</p>
+    <p>Set it to what the backend can actually take, not to what you hope it can.  The
+       number belongs to the backend, not to this page.</p>
+  </div>
+  <div class="help-section">
+    <h4>What a visitor sees</h4>
+    <p>Nothing, while the queue drains fast enough.  If it does not, they wait, and then
+       they time out, so this trades a fast error for a slow success.  Watch the response
+       column after changing it.</p>
   </div>
 </div>
 

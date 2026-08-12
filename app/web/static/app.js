@@ -476,6 +476,52 @@
             setInterval(refreshPending, 15000);
         }
 
+        // Filter boxes.
+        //
+        // Anything with data-filter="<selector>" filters the things that
+        // selector matches, on the text in their data-search attribute.  Built
+        // once here rather than per page, so sites, pools and certificates
+        // behave the same and there is one place to fix.
+        //
+        // Client side on purpose.  These lists are tens to hundreds of rows and
+        // filtering them in the browser is instant, where a round trip per
+        // keystroke is not.  If somebody turns up with thousands, this becomes
+        // a query and the markup does not have to change.
+        document.querySelectorAll("[data-filter]").forEach(function (box) {
+            const targets = Array.from(document.querySelectorAll(box.getAttribute("data-filter")));
+            const empty = document.getElementById(box.getAttribute("data-filter-empty"));
+            const count = document.getElementById(box.getAttribute("data-filter-count"));
+
+            function apply() {
+                const needle = box.value.trim().toLowerCase();
+                let shown = 0;
+
+                targets.forEach(function (el) {
+                    // Fall back to the row's own text, so a page that forgets
+                    // data-search still filters on something sensible rather
+                    // than hiding everything.
+                    const hay = (el.getAttribute("data-search") || el.textContent || "").toLowerCase();
+                    const match = !needle || hay.indexOf(needle) !== -1;
+                    el.hidden = !match;
+                    if (match) shown += 1;
+                });
+
+                if (empty) empty.hidden = !needle || shown > 0;
+                if (count) {
+                    count.textContent = needle
+                        ? shown + " of " + targets.length
+                        : targets.length + (targets.length === 1 ? " total" : " total");
+                }
+            }
+
+            box.addEventListener("input", apply);
+            // Escape clears, which is what people try before reaching for the mouse.
+            box.addEventListener("keydown", function (e) {
+                if (e.key === "Escape") { box.value = ""; apply(); }
+            });
+            apply();
+        });
+
         // Sidebar toggle on narrow screens.
         const toggle = document.querySelector(".menu-toggle");
         if (toggle) {

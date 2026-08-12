@@ -17,6 +17,19 @@
 </div>
 
 {% if hosts %}
+  <div class="flex" style="margin-bottom:14px; gap:10px; align-items:center">
+    <input type="search" id="site-filter" data-filter="tr[data-search]"
+           data-filter-empty="site-none" data-filter-count="site-count"
+           placeholder="Search sites, server names, pool, certificate"
+           style="flex:1; max-width:480px">
+    <span class="small faint" id="site-count"></span>
+  </div>
+  <div class="empty" id="site-none" hidden>
+    <strong>No site matches that</strong>
+    <p>Search covers the site name, every server name it answers to, the pool
+       it sends to, and the certificate it uses.</p>
+  </div>
+
   <div class="card">
     <div class="card-body tight">
       <div class="table-scroll">
@@ -32,7 +45,17 @@
         </thead>
         <tbody>
           {% for h in hosts %}
-            <tr>
+            {#- Server names matter as much as the site name here.  People look
+                for the name a visitor types, which is often not what the site
+                is called in this tool. -#}
+            {%- set searchable = [
+                  h.name, h.mode or '', h.document_root or '',
+                  h.pool.name if h.pool else '',
+                  h.cert.name if h.cert else '',
+                  'enabled' if h.enabled else 'disabled',
+                  'https' if h.listen_https else 'http'
+                ] + h.name_list() -%}
+            <tr data-search="{{ searchable|join(' ')|lower }}">
               <td>
                 <a href="{{ base }}/sites/{{ h.id }}"><strong>{{ h.name }}</strong></a>
                 {% if h.admin_only %}

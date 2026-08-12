@@ -19,6 +19,19 @@
 </div>
 
 {% if certs %}
+  <div class="flex" style="margin-bottom:14px; gap:10px; align-items:center">
+    <input type="search" id="cert-filter" data-filter="tr[data-search]"
+           data-filter-empty="cert-none" data-filter-count="cert-count"
+           placeholder="Search certificates, domains, issuer, which node got it"
+           style="flex:1; max-width:480px">
+    <span class="small faint" id="cert-count"></span>
+  </div>
+  <div class="empty" id="cert-none" hidden>
+    <strong>No certificate matches that</strong>
+    <p>Search covers the name, every domain on it, the issuer, and the node
+       that obtained it.</p>
+  </div>
+
   <div class="card">
     <div class="card-body tight">
       <div class="table-scroll">
@@ -36,7 +49,14 @@
         </thead>
         <tbody>
           {% for c in certs %}
-            <tr>
+            {#- Domains are the useful one.  A certificate is usually looked for
+                by a name somebody saw in a browser, not by what it is called
+                here, and a wildcard covers names that appear nowhere else. -#}
+            {%- set searchable = [
+                  c.name, c.issuer or '', c.issued_by_node or '',
+                  c.source or '', c.challenge_type or '', c.status or ''
+                ] + c.domain_list() -%}
+            <tr data-search="{{ searchable|join(' ')|lower }}">
               <td>
                 <strong>{{ c.name }}</strong>
                 <div class="small faint">{{ c.challenge_type }}</div>

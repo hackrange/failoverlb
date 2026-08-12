@@ -32,8 +32,32 @@
   </div>
 {% endif %}
 
+{% if pools %}
+  <div class="flex" style="margin-bottom:14px; gap:10px; align-items:center">
+    <input type="search" id="pool-filter" data-filter=".pool-card"
+           data-filter-empty="pool-none" data-filter-count="pool-count"
+           placeholder="Search pools, backends, method, health check"
+           style="flex:1; max-width:480px">
+    <span class="small faint" id="pool-count"></span>
+  </div>
+  <div class="empty" id="pool-none" hidden>
+    <strong>No pool matches that</strong>
+    <p>Search covers the name, the description, the load balancing method, the
+       health check, and every backend address in the pool.</p>
+  </div>
+{% endif %}
+
 {% for pool in pools %}
-  <div class="card">
+  {#- Everything worth searching, flattened onto the card.  Backends matter
+      most: somebody knows the address of the box misbehaving and not which
+      pool it is sitting in. -#}
+  {%- set searchable = [
+        pool.name, pool.description or '', pool.lb_method,
+        pool.backend_kind or '', pool.effective_health_check_type or '',
+        'https' if pool.uses_backend_tls else 'http',
+        pool.status_summary
+      ] + pool.members|map(attribute='label')|list -%}
+  <div class="card pool-card" data-search="{{ searchable|join(' ')|lower }}">
     <div class="card-head">
       <div>
         <h2>
