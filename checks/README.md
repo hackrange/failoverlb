@@ -48,6 +48,7 @@ docker exec -i nginx-fleet-manager python < checks/catalog_sweep.py
 | `regressions.py` | Every bug that has already cost a day, re-checked without applying anything. |
 | `authz_sweep.py` | A viewer cannot write, an operator cannot do admin things, and a write with no token or a forged one is refused. |
 | `health_checks.py` | The checker calls a backend up or down correctly, against real sockets that misbehave on purpose. |
+| `upgrade_migration.py` | A database made by an older version upgrades cleanly and keeps its rows. |
 
 ## A pass that touched nothing is not a pass
 
