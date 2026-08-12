@@ -1770,7 +1770,14 @@ def main():
 
     def shutdown(signum, frame):
         log.info("got signal %s, shutting down", signum)
-        server.shutdown()
+        # shutdown() tells serve_forever() to stop and then waits for it to say
+        # it has.  A signal handler runs on the main thread, which is the thread
+        # sitting in serve_forever(), so calling it straight from here waits for
+        # a loop that cannot run until the handler returns.  That is a deadlock,
+        # and systemd sat through the full 90 second stop timeout and SIGKILLed
+        # the agent on every single stop and restart.  Hand it to another thread
+        # so the handler returns right away and the loop gets to finish.
+        threading.Thread(target=server.shutdown, daemon=True).start()
 
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
