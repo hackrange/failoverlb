@@ -118,4 +118,9 @@ test/.secrets
 # Testing scratch.  The old docker rig lived here and was never meant to ship,
 # so it was taken out of the history as well, not just the current tree.  This
 # line keeps a scratch test/ folder from getting committed by accident.
+#
+# Checks you want to keep go in checks/, which is committed.  The two names are
+# one letter apart and that has already caught somebody out: a suite written
+# into test/ is silently left out of every commit, and nothing tells you,
+# because being ignored is exactly what this line asks for.
 test/
