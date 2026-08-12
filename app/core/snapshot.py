@@ -31,8 +31,42 @@ a backend that starts refusing traffic the moment the standby takes over, which
 is a worse outcome than sending it over a channel we already trust with private
 keys.
 
-TOTP seeds and peer HMAC keys are not here.  Those belong to the node and the
-person, not to the config, and a standby has its own.
+Peer HMAC keys are not here.  Those belong to the node rather than to the
+config, and a standby has its own.
+
+## Accounts
+
+Accounts travel too, and they did not used to, which was a security bug rather
+than a missing feature.  Every node kept the admin it was installed with and
+nothing since, so a password changed on the active node left the standby on the
+install password, an operator added after setup did not exist on the standby at
+all, and an account taken away on the active node was still live on the standby
+and came back the moment it was promoted.  Revoking somebody's access has to
+revoke it everywhere.
+
+Accounts are merged by username rather than replaced wholesale, which is the one
+place this module does not simply swap a table out.  Three reasons:
+
+- Sessions hang off users with a cascading delete.  Replacing the rows would end
+  every session on the receiving node on every apply, which logs people out of a
+  healthy box for no reason.
+- Lockout counters and last login belong to the box that saw the attempt.  A
+  node should not forget that somebody is part way through guessing a password
+  because a config change happened to arrive, and it should not import another
+  node's lockout either.
+- Ids stay put, so anything holding a user id keeps pointing at the same person.
+
+TOTP seeds do travel, and that is a change of mind.  Leaving them behind meant a
+person with TOTP required on their account could not log in at all after a
+failover, which is a lockout dressed up as a security measure.  They are
+encrypted per node, so they are decrypted on the way out and encrypted again on
+the way in, the same as the pool tokens above.  Recovery codes are already
+hashed and travel as they are.
+
+There is one guard.  A snapshot carrying no enabled admin is refused outright,
+and the accounts on the receiving node are left exactly as they were.  Nothing
+else in here can lock every person out of every box at once, so nothing else
+needs it.
 """
 import logging
 from datetime import datetime
@@ -49,6 +83,8 @@ from app.models import (
     PoolMember,
     RateLimitZone,
     StreamServer,
+    User,
+    UserRole,
     VirtualHost,
 )
 
@@ -78,7 +114,28 @@ SECRET_COLUMNS = {
     "token_previous_encrypted",
     "dns_credentials_encrypted",
     "uploaded_privkey_encrypted",
+    "totp_secret_encrypted",
 }
+
+# What an account is, fleet wide.  Anything not in here belongs to the box that
+# saw it happen and is left alone on the receiving node.
+USER_FLEET_COLUMNS = [
+    "username",
+    "email",
+    "full_name",
+    "source",
+    "role",
+    "password_hash",
+    "totp_secret_encrypted",
+    "totp_enrolled",
+    "recovery_codes",
+    "enabled",
+    "must_change_password",
+    "oidc_subject",
+    "created_at",
+    "updated_at",
+    "created_by",
+]
 
 
 def _columns(model):
@@ -158,7 +215,98 @@ def capture(session) -> dict:
             rows.append(row)
         out["tables"][key] = rows
 
+    out["users"] = _capture_users(session)
     return out
+
+
+def _capture_users(session) -> list:
+    """
+    Accounts, with only the parts that belong to the fleet.
+
+    Lockout counters and last login are left out on purpose.  They describe what
+    one box saw rather than who somebody is, and sending them would let a failed
+    login on one node lock an account out on another.
+    """
+    rows = []
+    for user in session.query(User).all():
+        row = {}
+        for name in USER_FLEET_COLUMNS:
+            value = getattr(user, name, None)
+
+            if name in SECRET_COLUMNS and value:
+                value = decrypt(value)
+                if value is None:
+                    log.warning("could not read the totp secret for %s to put in "
+                                "the snapshot", user.username)
+                    continue
+
+            if hasattr(value, "value"):
+                value = value.value
+            elif hasattr(value, "isoformat"):
+                value = value.isoformat()
+
+            row[name] = value
+        rows.append(row)
+    return rows
+
+
+def _restore_users(session, rows) -> dict:
+    """
+    Bring accounts into line, matching on username.
+
+    Merged rather than replaced.  See the note at the top of this module for
+    why: sessions cascade off users, and lockout counters belong to the box.
+
+    Deletions are the whole point of this, so a username missing from the
+    snapshot is removed here.  That is what makes revoking access actually
+    revoke it, and it is why the guard below exists.
+    """
+    if rows is None:
+        # A snapshot from a version that predates this.  Leaving accounts alone
+        # is the only safe reading of "the sender said nothing about users".
+        return {"skipped": "this snapshot has no accounts in it"}
+
+    incoming = {r.get("username"): r for r in rows if r.get("username")}
+
+    # The one thing that could lock every person out of every box at once.
+    has_admin = any(
+        r.get("enabled") and str(r.get("role")) in ("admin", str(UserRole.ADMIN.value))
+        for r in incoming.values()
+    )
+    if not has_admin:
+        log.error("refusing to take accounts from a snapshot with no enabled admin "
+                  "in it, keeping the ones this node already has")
+        return {"refused": "that snapshot had no enabled admin account in it"}
+
+    existing = {u.username: u for u in session.query(User).all()}
+    added = updated = removed = 0
+
+    for username, row in incoming.items():
+        user = existing.get(username)
+        if user is None:
+            user = User(username=username)
+            session.add(user)
+            added += 1
+        else:
+            updated += 1
+
+        for name, value in row.items():
+            if name == "username" or name not in USER_FLEET_COLUMNS:
+                continue
+            if name in SECRET_COLUMNS and value:
+                value = encrypt(value)
+            setattr(user, name, _coerce(User, name, value))
+
+    for username, user in existing.items():
+        if username not in incoming:
+            # Gone on the node that owns the config, so gone here.  The cascade
+            # takes their sessions with them, which is the point: an account
+            # taken away should not still be able to use a cookie it already has.
+            session.delete(user)
+            removed += 1
+
+    session.flush()
+    return {"added": added, "updated": updated, "removed": removed}
 
 
 def restore(session, data: dict) -> dict:
@@ -201,10 +349,32 @@ def restore(session, data: dict) -> dict:
         written[key] = len(rows)
         session.flush()
 
+    # Accounts last, and by their own route.  They are merged rather than
+    # replaced, so they cannot ride along with the loop above.
+    written["users"] = _restore_users(session, (data or {}).get("users"))
+
     session.commit()
     log.warning("restored the config from a snapshot: %s",
                 ", ".join(f"{k}={v}" for k, v in written.items() if v))
     return written
+
+
+def capture_users(session) -> list:
+    """
+    Just the accounts, for the sync that does not wait on a config change.
+
+    Accounts ride along in the full snapshot too, which covers a node being
+    promoted or catching up.  It cannot be the only route though: a snapshot only
+    travels when the rendered nginx config changes, and changing a password does
+    not change a line of nginx config.  Without this an account change would sit
+    on one node until somebody happened to edit a site.
+    """
+    return _capture_users(session)
+
+
+def restore_users(session, rows) -> dict:
+    """Take on a set of accounts.  See `_restore_users` for the rules."""
+    return _restore_users(session, rows)
 
 
 def is_empty(session) -> bool:

@@ -356,6 +356,22 @@ def start_scheduler():
         coalesce=True,
     )
 
+    # Accounts, converging on their own.
+    #
+    # The push after a change is the fast path.  This is what makes the fleet
+    # agree again when that push could not be delivered, which is exactly the
+    # case that matters: an account taken away while the other box was down must
+    # not come back when it returns.  Does nothing on a standby, and nothing on
+    # the active node when the accounts already match.
+    scheduler.add_job(
+        cluster.replicate_accounts,
+        "interval",
+        seconds=60,
+        id="accounts",
+        max_instances=1,
+        coalesce=True,
+    )
+
     scheduler.add_job(
         get_cert_manager().check_renewals,
         "interval",

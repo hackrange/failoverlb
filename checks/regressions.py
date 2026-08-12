@@ -255,6 +255,48 @@ else:
           "overwrite a real config")
 
 print()
+print("  accounts reach every node, and cannot lock everybody out")
+
+from app.core.snapshot import capture_users, restore_users   # noqa: E402
+from app.models import User, UserRole   # noqa: E402
+
+with session_scope() as s:
+    captured = capture_users(s)
+    check("the snapshot carries accounts at all", bool(captured),
+          "no accounts in the snapshot, so a password change would never leave "
+          "this node and a revoked account would live on wherever it already is")
+
+    leaked = sorted({c for c in ("failed_attempts", "locked_until",
+                                 "last_login_at", "last_login_ip")
+                     if any(c in row for row in captured)})
+    check("lockout state stays on the box that saw it", not leaked,
+          f"these travel and should not: {leaked}.  A failed login on one node "
+          f"would lock the account out on another.")
+
+    check("passwords travel, or the standby keeps the install one",
+          all(r.get("password_hash") for r in captured if r.get("source") in (None, "local")),
+          "a local account crossed without its password hash")
+
+# A set with no enabled admin has to be refused, or one bad snapshot locks
+# every person out of every box at once.
+with session_scope() as s:
+    before = sorted(u.username for u in s.query(User).all())
+    verdict = restore_users(s, [{"username": "nobody", "role": "viewer", "enabled": True}])
+    after = sorted(u.username for u in s.query(User).all())
+    s.rollback()
+    check("a snapshot with no enabled admin is refused", bool(verdict.get("refused")),
+          f"it was accepted, and the accounts became {after}")
+    check("and the accounts it already had are left alone", before == after,
+          f"was {before}, became {after}")
+
+with session_scope() as s:
+    check("a snapshot that predates accounts changes nothing",
+          bool(restore_users(s, None).get("skipped")),
+          "an older node sending no account list should leave accounts alone, "
+          "not empty them")
+    s.rollback()
+
+print()
 print("  live behaviour")
 with session_scope() as s:
     sites = [h.name for h in s.query(VirtualHost).all()

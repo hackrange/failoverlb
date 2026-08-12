@@ -502,6 +502,42 @@ async def peer_agent(request: Request):
         raise HTTPException(status_code=502, detail=str(exc))
 
 
+@router.post("/peer/accounts")
+async def peer_accounts(request: Request):
+    """
+    Take on the fleet's accounts from the active node.
+
+    Separate from the config apply on purpose.  Nothing anybody does to an
+    account changes a line of nginx config, so an account change would otherwise
+    wait for an unrelated site edit to carry it across.  Taking somebody's access
+    away is the case that matters: it has to land on every box now, not the next
+    time a site is edited.
+
+    The rules for what is taken on, what is kept, and the refusal when a set
+    arrives with no enabled admin in it, are all in `snapshot.py`.
+    """
+    node, payload = await authenticate(request)
+
+    rows = payload.get("users")
+    if rows is None or not isinstance(rows, list):
+        raise HTTPException(status_code=400, detail="that had no account list on it")
+
+    with session_scope() as session:
+        result = snapshot_store.restore_users(session, rows)
+        session.commit()
+
+    if result.get("refused"):
+        # Say so out loud rather than answering as though it worked.  A node
+        # quietly keeping different accounts from the rest of the fleet is the
+        # thing this whole path exists to stop.
+        log.error("refused the accounts %s sent: %s", node.name, result["refused"])
+        raise HTTPException(status_code=409, detail=result["refused"])
+
+    log.info("took on accounts from %s: %s", node.name,
+             ", ".join(f"{k}={v}" for k, v in result.items()))
+    return {"ok": True, **result}
+
+
 # ==============================================================================
 # Joining
 # ==============================================================================

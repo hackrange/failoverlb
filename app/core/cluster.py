@@ -349,6 +349,57 @@ class ClusterManager:
         me = self.self_node(session)
         return bool(me and me.role == NodeRole.ACTIVE)
 
+    async def replicate_accounts(self) -> dict:
+        """
+        Send this node's accounts to every peer.
+
+        Accounts are in the config snapshot as well, which covers a node being
+        promoted or catching up after being away.  That is not enough on its own:
+        a snapshot only moves when the rendered nginx config changes, and none of
+        the things people do to accounts change a line of nginx config.  Changing
+        a password, enrolling a second factor, or taking somebody's access away
+        would otherwise sit on one node until an unrelated site edit carried it
+        across, which for the last of those is a security hole with a wait on it.
+
+        Called after an account changes, and again on a timer so a node that was
+        unreachable at the time catches up without anybody doing anything.
+
+        Only the active node sends.  Two nodes pushing different ideas of the
+        account list at each other is how you get a flap, and the active node is
+        already the one that owns config.
+        """
+        from app.core import snapshot as snapshot_store
+
+        with session_scope() as session:
+            if not self.is_active(session):
+                return {"skipped": "not the active node"}
+
+            rows = snapshot_store.capture_users(session)
+            targets = [
+                (p.name, PeerClient(p, self.ca))
+                for p in self.peers(session)
+                if p.state == NodeState.ONLINE
+            ]
+
+        if not targets:
+            return {"sent_to": [], "failed": {}}
+
+        sent, failed = [], {}
+        for name, client in targets:
+            try:
+                await client.call("/peer/accounts", {"users": rows})
+                sent.append(name)
+            except (NodeUnreachable, ClusterError) as exc:
+                # Not worth raising over.  The timer will try again, and an
+                # account change must not fail because one box is having a
+                # moment.
+                failed[name] = str(exc)
+                log.warning("could not send accounts to %s: %s", name, exc)
+
+        if sent:
+            log.info("sent %d accounts to %s", len(rows), ", ".join(sent))
+        return {"sent_to": sent, "failed": failed}
+
     # =========================================================================
     # Election
     # =========================================================================

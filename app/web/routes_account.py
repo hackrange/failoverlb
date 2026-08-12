@@ -131,6 +131,24 @@ async def account_page(request: Request, db: DBSession = Depends(get_db),
     return response
 
 
+async def _push_accounts():
+    """
+    Get this change onto the other nodes now.
+
+    Without it the change waits for the timer, and for a password that is a
+    minute where the old one still works somewhere.  Never allowed to fail the
+    thing the person actually asked for: the account is already changed here and
+    the timer will carry it across if this does not.
+    """
+    try:
+        from app.core.cluster import get_cluster
+
+        await get_cluster().replicate_accounts()
+    except Exception as exc:      # noqa: BLE001
+        log.warning("could not send the account change to the other nodes now, "
+                    "the sync will pick it up: %s", exc)
+
+
 @router.post("/account/password")
 async def change_own_password(request: Request, db: DBSession = Depends(get_db),
                               current_password: str = Form(...),
@@ -162,6 +180,7 @@ async def change_own_password(request: Request, db: DBSession = Depends(get_db),
     db.commit()
 
     audit.record("account.password_change", user=user, source_ip=client_ip(request))
+    await _push_accounts()
     return _back(ok="password changed")
 
 
@@ -252,6 +271,7 @@ async def confirm_totp_change(request: Request, db: DBSession = Depends(get_db),
     token = create_session(db, user, client_ip(request), request.headers.get("user-agent"))
     db.commit()
 
+    await _push_accounts()
     audit.record("account.totp_changed", user=user, source_ip=client_ip(request),
                  detail=f"new authenticator set up, {revoked} other session(s) signed out")
     log.warning("%s changed their authenticator from %s", user.username, client_ip(request))
@@ -289,6 +309,7 @@ async def regenerate_recovery_codes(request: Request, db: DBSession = Depends(ge
     user.recovery_codes = json.dumps([hash_token(c) for c in codes])
     db.commit()
 
+    await _push_accounts()
     audit.record("account.recovery_codes_regenerated", user=user,
                  source_ip=client_ip(request))
 
