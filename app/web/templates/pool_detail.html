@@ -177,7 +177,7 @@
       <h3 style="font-size:0.92rem; margin:18px 0 8px">Connections to the backends</h3>
 
       <div class="checkline">
-        <input type="checkbox" id="p-backendtls" {{ 'checked' if pool.backend_tls }}>
+        <input type="checkbox" id="p-backendtls" {{ 'checked' if pool.uses_backend_tls }}>
         <label for="p-backendtls">
           Talk to these backends over https
           <button class="help-btn" data-help-static="h-backendtls"
@@ -253,9 +253,9 @@
         <div class="field">
           <label for="h-type">Check type</label>
           <select id="h-type">
-            <option value="http"  {{ 'selected' if pool.health_check_type=='http' }}>HTTP</option>
-            <option value="https" {{ 'selected' if pool.health_check_type=='https' }}>HTTPS</option>
-            <option value="tcp"   {{ 'selected' if pool.health_check_type=='tcp' }}>TCP connect only</option>
+            <option value="http"  {{ 'selected' if pool.effective_health_check_type=='http' }}>HTTP</option>
+            <option value="https" {{ 'selected' if pool.effective_health_check_type=='https' }}>HTTPS</option>
+            <option value="tcp"   {{ 'selected' if pool.effective_health_check_type=='tcp' }}>TCP connect only</option>
           </select>
         </div>
         <div class="field">

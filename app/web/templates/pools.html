@@ -131,7 +131,7 @@
       <div class="small faint">
         Health check:
         {% if pool.health_check_enabled %}
-          {{ pool.health_check_type|upper }} {{ pool.health_check_path }}
+          {{ pool.effective_health_check_type|upper }} {{ pool.health_check_path }}
           every {{ pool.health_check_interval }}s,
           up after {{ pool.health_check_rise }},
           down after {{ pool.health_check_fall }}

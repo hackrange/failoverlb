@@ -963,9 +963,16 @@ def _apply_pool_fields(pool, payload):
     # header without throwing the secret away.  Turning it on does nothing on
     # its own: there has to be a token as well, which is its own endpoint.
     for field in ("hash_consistent", "health_check_enabled", "health_check_verify_tls",
-                  "token_enabled", "backend_tls"):
+                  "token_enabled"):
         if field in payload:
             setattr(pool, field, bool(payload[field]))
+
+    # Somebody touching the switch settles it.  From here on we do what they
+    # said and stop working it out from the member ports, including when they
+    # turn it off with a member on 443, which is theirs to decide.
+    if "backend_tls" in payload:
+        pool.backend_tls = bool(payload["backend_tls"])
+        pool.backend_tls_set = True
 
     # The SNI name goes on the wire and into an nginx directive, so it has to
     # look like a hostname.  A stray space or semicolon here would land straight
@@ -1078,11 +1085,12 @@ def _pool_detail(p):
         "keepalive_timeout": p.keepalive_timeout,
         "zone_size": p.zone_size,
         "min_healthy_members": p.min_healthy_members,
-        "backend_tls": bool(p.backend_tls),
+        "backend_tls": p.uses_backend_tls,
+        "backend_tls_set": bool(p.backend_tls_set),
         "backend_tls_name": p.backend_tls_name,
         "health_check": {
             "enabled": p.health_check_enabled,
-            "type": p.health_check_type,
+            "type": p.effective_health_check_type,
             "path": p.health_check_path,
             "method": p.health_check_method,
             "host_header": p.health_check_host_header,

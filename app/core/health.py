@@ -161,7 +161,7 @@ class HealthChecker:
         port = pool.health_check_port or member.port
 
         try:
-            if pool.health_check_type == "tcp":
+            if pool.effective_health_check_type == "tcp":
                 ok, detail = await self._check_tcp(member.address, port,
                                                    pool.health_check_timeout)
             else:
@@ -189,7 +189,7 @@ class HealthChecker:
             return False, f"connection failed: {exc}"
 
     async def _check_http(self, pool, member, port):
-        scheme = "https" if pool.health_check_type == "https" else "http"
+        scheme = "https" if pool.effective_health_check_type == "https" else "http"
         path = pool.health_check_path or "/"
         if not path.startswith("/"):
             path = "/" + path

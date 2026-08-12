@@ -1164,7 +1164,7 @@ map $cookie_{cookie} $sticky_{_safe_var(pool.name)} {{
 
     def _proxy_lines(self, pool, cfg, indent=8) -> list:
         pad = " " * indent
-        scheme = "https" if getattr(pool, "backend_tls", False) else "http"
+        scheme = "https" if getattr(pool, "uses_backend_tls", False) else "http"
         lines = [f"{pad}proxy_pass {scheme}://{_safe_name(pool.name)};"]
 
         if scheme == "https":

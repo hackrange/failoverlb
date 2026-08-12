@@ -474,6 +474,12 @@ class Pool(Base):
     # The backend answers 400 and the error says nothing about the scheme.
     backend_tls = Column(Boolean, default=False)
 
+    # Has anybody actually chosen, or are we still guessing from the port.
+    # Without this we could not tell "off because they left it alone" from "off
+    # because they turned it off", and we would keep switching it back on under
+    # somebody who meant it.
+    backend_tls_set = Column(Boolean, default=False)
+
     # Which name to put in SNI and check the backend's certificate against.
     #
     # This needs saying because nginx's default is wrong for us.  It sends the
@@ -588,6 +594,41 @@ class Pool(Base):
     @property
     def token_rotation_pending(self):
         return bool(self.token_next_encrypted)
+
+    @property
+    def uses_backend_tls(self):
+        """
+        Are we talking to these backends over https.
+
+        Until somebody says otherwise we go by the port.  A member on 443 is
+        speaking TLS in every setup anybody actually runs, and sending plain
+        http at it gets a 400 whose message says nothing about the scheme, so
+        the person who added the member gets to debug a made up problem.
+
+        The moment anybody touches the switch we stop guessing and do what they
+        said, forever, including turning it off with a 443 member sitting there.
+        Guessing is for the setup nobody has thought about yet.
+        """
+        if self.backend_tls_set:
+            return bool(self.backend_tls)
+        return any(m.enabled and m.port == 443 for m in self.members)
+
+    @property
+    def effective_health_check_type(self):
+        """
+        What the health checker should really speak.
+
+        An http check against a TLS backend fails every time, which marks every
+        member down and takes the pool out.  Defaulting the traffic to https and
+        leaving the check on http would hand somebody a pool that goes dark the
+        moment they add a backend, so the check follows the same guess.
+
+        Only the plain http default moves.  Somebody who picked tcp or https
+        picked it on purpose and we leave it be.
+        """
+        if self.health_check_type == "http" and self.uses_backend_tls:
+            return "https"
+        return self.health_check_type or "http"
 
     @property
     def healthy_count(self):
