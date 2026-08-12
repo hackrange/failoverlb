@@ -416,36 +416,78 @@ def v_ping(req):
     }
 
 
+# Status asks five separate programs how they are doing, and the caller only
+# waits 30 seconds for the lot.  The default subprocess timeout is 60, so one
+# slow systemctl was enough to blow the whole budget and the caller got nothing
+# back, not even the parts that answered.  "the agent did not answer status
+# within 30s" tells you nothing about which of the five was the problem.
+#
+# So each one gets a short leash of its own, and a call that misses it is
+# recorded as unknown rather than taken as a failure.  Status is a dashboard
+# read.  Partial and quick beats complete and never.
+STATUS_STEP_TIMEOUT = 5
+
+
+def _status_step(out, name, fn):
+    """Run one part of status, and never let it sink the whole thing."""
+    started = time.monotonic()
+    try:
+        fn()
+    except Exception as exc:
+        out[f"{name}_error"] = str(exc)[:200]
+        log.warning("status step %s failed: %s", name, exc)
+    took = time.monotonic() - started
+    if took > 1:
+        # Worth knowing which one is dragging, because from the outside the
+        # whole call just looks slow.
+        log.warning("status step %s took %.1fs", name, took)
+
+
 def v_status(req):
     """What nginx is doing right now, plus what it was built with."""
     out = {"nginx_bin": str(NGINX_BIN), "installed": NGINX_BIN.is_file()}
 
     if out["installed"]:
-        ver = run([str(NGINX_BIN), "-v"])
-        # nginx prints its version banner to stderr, which trips people up.
-        out["version_banner"] = (ver["stderr"] or ver["stdout"]).strip()
+        def _version():
+            ver = run([str(NGINX_BIN), "-v"], timeout=STATUS_STEP_TIMEOUT)
+            # nginx prints its version banner to stderr, which trips people up.
+            out["version_banner"] = (ver["stderr"] or ver["stdout"]).strip()
+        _status_step(out, "version", _version)
 
-        # -V gives the whole configure line.  This is how we work out which
-        # modules got compiled in, so the GUI only offers settings that will
-        # actually load on this box.
-        build = run([str(NGINX_BIN), "-V"])
-        out["build_info"] = (build["stderr"] or build["stdout"]).strip()
+        def _build():
+            # -V gives the whole configure line.  This is how we work out which
+            # modules got compiled in, so the GUI only offers settings that will
+            # actually load on this box.
+            build = run([str(NGINX_BIN), "-V"], timeout=STATUS_STEP_TIMEOUT)
+            out["build_info"] = (build["stderr"] or build["stdout"]).strip()
+        _status_step(out, "build", _build)
 
     if have_systemd():
-        active = systemctl("is-active", "nginx")
-        enabled = systemctl("is-enabled", "nginx")
-        out["service_active"] = active["stdout"].strip()
-        out["service_enabled"] = enabled["stdout"].strip()
+        out["service_active"] = "unknown"
+        out["service_enabled"] = "unknown"
 
-        # A few useful bits without shelling out to the whole status output.
-        props = systemctl(
-            "show", "nginx",
-            "--property=MainPID,ActiveEnterTimestamp,NRestarts,SubState",
-        )
-        for line in props["stdout"].splitlines():
-            if "=" in line:
-                k, _, val = line.partition("=")
-                out[f"svc_{k.lower()}"] = val
+        def _active():
+            active = systemctl("is-active", "nginx", timeout=STATUS_STEP_TIMEOUT)
+            out["service_active"] = active["stdout"].strip() or "unknown"
+        _status_step(out, "is_active", _active)
+
+        def _enabled():
+            enabled = systemctl("is-enabled", "nginx", timeout=STATUS_STEP_TIMEOUT)
+            out["service_enabled"] = enabled["stdout"].strip() or "unknown"
+        _status_step(out, "is_enabled", _enabled)
+
+        def _props():
+            # A few useful bits without shelling out to the whole status output.
+            props = systemctl(
+                "show", "nginx",
+                "--property=MainPID,ActiveEnterTimestamp,NRestarts,SubState",
+                timeout=STATUS_STEP_TIMEOUT,
+            )
+            for line in props["stdout"].splitlines():
+                if "=" in line:
+                    k, _, val = line.partition("=")
+                    out[f"svc_{k.lower()}"] = val
+        _status_step(out, "properties", _props)
     else:
         out["service_active"] = "no-systemd"
         out["service_enabled"] = "no-systemd"

@@ -412,19 +412,37 @@ if [[ -n "$JOIN_TARGET" ]]; then
         sleep 2
     done
 
+    # Keep the output.  The join says exactly why it failed, and that line is
+    # the whole diagnosis, but it used to scroll past and the summary at the end
+    # just said it did not work.  That is useless: "could not reach" and "token
+    # refused" are completely different problems.
+    JOIN_LOG="$(mktemp)"
     if docker compose exec -T nginx-fleet-manager \
-        python -m app.join "$JOIN_TARGET" "$JOIN_TOKEN"; then
+        python -m app.join "$JOIN_TARGET" "$JOIN_TOKEN" 2>&1 | tee "$JOIN_LOG"; then
         log "joined, restarting so the peer listener comes up"
         docker compose restart
         sleep 6
         success "      this node is part of the cluster"
+        rm -f "$JOIN_LOG"
     else
+        JOIN_WHY="$(grep -i "join failed:" "$JOIN_LOG" | head -1 | sed 's/^[[:space:]]*//')"
+        [[ -z "$JOIN_WHY" ]] && JOIN_WHY="$(tail -3 "$JOIN_LOG" | tr '\n' ' ' | cut -c1-300)"
+        rm -f "$JOIN_LOG"
+
         problem "Joining the cluster did not work." \
-"The node is installed and the GUI is up, it is just on its own for now.
-Tokens are single use and expire after two hours, so make a fresh one on
-the Cluster page of a node that is already running, then:
+"${JOIN_WHY}
+
+The node is installed and the GUI is up, it is just on its own for now.
+Tokens are single use and expire after two hours, so a token that has
+already been tried once will not work again.  Make a fresh one on the
+Cluster page of the node that is already running, then run the join on its
+own so you can see what it says:
     docker compose exec nginx-fleet-manager python -m app.join ${JOIN_TARGET} <token>
-    docker compose restart"
+    docker compose restart
+
+If it says it could not reach ${JOIN_TARGET}, the peer port is blocked
+between these boxes.  Check from here with:
+    curl -k -m 5 https://${JOIN_TARGET}/"
     fi
 fi
 
