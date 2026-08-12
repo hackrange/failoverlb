@@ -11,10 +11,12 @@ Step three is what keeps the BOLA and IDOR bugs out.  There is no route that
 queries a table by id directly, so there is no route that can forget the check.
 """
 
+import asyncio
 import ipaddress
 import json
 import logging
 import re
+import socket
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session as DBSession
@@ -1163,6 +1165,7 @@ async def add_member(pool_id: str, request: Request, g: ObjectGuard = Depends(ch
         raise HTTPException(status_code=400, detail="that backend address is not valid")
 
     port = validate_port(payload.get("port", 80))
+    await _must_resolve(address)
 
     existing = g.session.query(PoolMember).filter(
         PoolMember.pool_id == pool.id,
@@ -1180,6 +1183,187 @@ async def add_member(pool_id: str, request: Request, g: ObjectGuard = Depends(ch
     audit.record("pool.member.add", user=g.user, object_type="pool",
                  object_name=pool.name, changes={"member": f"{address}:{port}"})
     return _member_detail(member)
+
+
+@router.post("/pools/{pool_id}/members/bulk")
+async def add_members_bulk(pool_id: str, request: Request, g: ObjectGuard = Depends(changing)):
+    """
+    Add a list of backends in one go.
+
+    Typing them one at a time is fine for two and miserable for thirty, and
+    thirty is exactly when a typo slips through and you do not notice until
+    something is quietly getting no traffic.
+
+    Every line is checked before a single one is saved.  A half loaded pool is
+    worse than a rejected one, because you cannot tell by looking which lines
+    made it, and adding the list again would collide with the half that did.
+    """
+    pool = g.get(Pool, pool_id, "edit_pools")
+
+    body = await request.json()
+    text = body.get("text")
+    if not isinstance(text, str) or not text.strip():
+        raise HTTPException(status_code=400, detail="paste some backends first")
+
+    if len(text) > 100_000:
+        raise HTTPException(status_code=400, detail="that is too much at once, split it up")
+
+    # What is already here, so we can say which lines are duplicates rather than
+    # failing on the first one and making them find it.
+    seen = {
+        (m.address, m.port)
+        for m in g.session.query(PoolMember).filter(PoolMember.pool_id == pool.id).all()
+    }
+
+    parsed = []
+    problems = []
+    duplicates = []
+
+    for number, raw in enumerate(text.splitlines(), start=1):
+        line = raw.split("#")[0].strip().rstrip(",")
+        if not line:
+            continue
+
+        address, port = _split_backend(line)
+        if not address:
+            problems.append(f"line {number}: cannot read {raw.strip()!r}")
+            continue
+        if not re.fullmatch(r"[A-Za-z0-9._:\[\]-]{1,253}", address):
+            problems.append(f"line {number}: {address} is not a valid address")
+            continue
+        try:
+            port = validate_port(port)
+        except HTTPException:
+            problems.append(f"line {number}: {port} is not a valid port")
+            continue
+
+        if (address, port) in seen:
+            duplicates.append(f"{address}:{port}")
+            continue
+
+        seen.add((address, port))
+        parsed.append((address, port))
+
+    # Look the names up together.  One at a time is fine for three and slow
+    # enough to look broken for fifty, since every miss waits out its own
+    # timeout before the next one starts.
+    if parsed:
+        checks = await asyncio.gather(
+            *[_must_resolve(address) for address, _port in parsed],
+            return_exceptions=True,
+        )
+        for (address, _port), outcome in zip(parsed, checks):
+            if isinstance(outcome, HTTPException):
+                problems.append(f"{address} does not resolve from this node")
+            elif isinstance(outcome, BaseException):
+                problems.append(f"{address} could not be looked up: {outcome}")
+
+    if problems:
+        raise HTTPException(
+            status_code=400,
+            detail="nothing was added.  " + "  ".join(problems[:10]),
+        )
+
+    if not parsed:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"every one of those is already in this pool: {', '.join(duplicates[:10])}"
+                if duplicates else "there were no backends in that"
+            ),
+        )
+
+    for address, port in parsed:
+        g.session.add(PoolMember(pool_id=pool.id, address=address, port=port))
+    g.session.commit()
+
+    audit.record("pool.member.add", user=g.user, object_type="pool",
+                 object_name=pool.name,
+                 changes={"added": [f"{a}:{p}" for a, p in parsed]})
+
+    return {
+        "added": [f"{a}:{p}" for a, p in parsed],
+        "skipped": duplicates,
+    }
+
+
+async def _must_resolve(address: str):
+    """
+    Refuse a backend name this box cannot look up.
+
+    nginx resolves the names in an upstream block when it loads the config, not
+    when a request arrives.  A name that does not resolve is not a backend that
+    is down, it is a config nginx refuses to load at all, and since one node
+    saying no stops the whole fleet, one typo here blocks every change on every
+    node until somebody finds it.
+
+    The error nginx gives is "host not found in upstream", which arrives later,
+    from a different page, about a file the person never opened.  Saying it here
+    costs one lookup and points at the box they are typing into.
+
+    This only proves the name resolves from this node.  A standby with different
+    DNS can still fail the apply, and the two phase apply is what catches that.
+    """
+    bare = address.strip("[]")
+    try:
+        ipaddress.ip_address(bare)
+        return
+    except ValueError:
+        pass
+
+    try:
+        await asyncio.wait_for(
+            asyncio.get_running_loop().getaddrinfo(bare, None), timeout=5
+        )
+    except (socket.gaierror, asyncio.TimeoutError, OSError):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"{address} does not resolve from this node.  nginx looks names up when "
+                f"it loads the config, so it would refuse to start and no config could be "
+                f"applied anywhere.  Check the spelling, or use the address instead if "
+                f"this name only exists somewhere else."
+            ),
+        )
+
+
+def _split_backend(line: str):
+    """
+    Pull an address and a port out of one line.
+
+    People paste these from all sorts of places, so take the shapes that turn up
+    rather than making them reformat a list they already have:
+    host:8080, host 8080, host,8080, host, and [::1]:8080 for IPv6.
+
+    A bare host means port 80, same as adding one by hand.
+    """
+    line = line.replace("\t", " ").replace(",", " ").strip()
+
+    # IPv6 in brackets keeps its colons, so the port is only what follows the
+    # closing bracket.  Splitting on the last colon would take the address apart.
+    if line.startswith("["):
+        end = line.find("]")
+        if end == -1:
+            return None, None
+        address = line[: end + 1]
+        rest = line[end + 1:].lstrip(":").strip()
+        return address, (rest.split()[0] if rest.split() else 80)
+
+    parts = line.split()
+    if len(parts) > 2:
+        return None, None
+    if len(parts) == 2:
+        return parts[0], parts[1]
+
+    single = parts[0]
+    if single.count(":") == 1:
+        address, _sep, port = single.partition(":")
+        return address, (port or 80)
+    if single.count(":") > 1:
+        # Bare IPv6 with no brackets.  There is no way to tell a port from
+        # another group, so ask for brackets rather than guess wrong.
+        return None, None
+    return single, 80
 
 
 @router.put("/members/{member_id}")

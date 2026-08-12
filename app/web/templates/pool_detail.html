@@ -39,6 +39,7 @@
       <h2>Backends</h2>
       {% if can('edit_pools') %}
         <button class="btn sm" id="add-member">Add backend</button>
+        <button class="btn sm" id="import-members">Add a list</button>
       {% endif %}
     </div>
     <div class="card-body tight">
@@ -955,6 +956,64 @@ document.addEventListener("DOMContentLoaded", function () {
         NFM.closeModal();
         window.location.reload();
       } catch (err) { NFM.toast(err.message, "bad"); }
+    });
+  });
+
+  document.getElementById("import-members").addEventListener("click", function () {
+    NFM.openModal("Add a list of backends", "", `
+      <div class="field">
+        <label for="im-text">One backend per line</label>
+        <textarea id="im-text" rows="10" spellcheck="false"
+                  style="width:100%; font-family:var(--mono, monospace); font-size:0.86rem"
+                  placeholder="10.20.30.51:8080&#10;10.20.30.52:8080&#10;app-03.internal.example 8080&#10;app-04.internal.example&#10;[2001:db8::1]:8080"></textarea>
+        <div class="hint">
+          Address and port, split by a colon, a space or a comma.  No port means 80.
+          IPv6 goes in brackets.  Blank lines and anything after a # are ignored,
+          so a list with comments in it can go straight in.
+        </div>
+      </div>
+      <div class="field">
+        <label for="im-file">Or pick a file</label>
+        <input type="file" id="im-file" accept=".txt,.csv,.list,text/plain">
+        <div class="hint">Read here in the browser and dropped into the box above, so you can see it before it goes anywhere.</div>
+      </div>
+      <div class="mt"><button class="btn primary" id="im-save">Add them</button></div>
+    `);
+
+    document.getElementById("im-file").addEventListener("change", function () {
+      const file = this.files && this.files[0];
+      if (!file) return;
+      if (file.size > 100000) { NFM.toast("that file is too big, split it up", "bad"); return; }
+      const reader = new FileReader();
+      reader.onload = function () {
+        const box = document.getElementById("im-text");
+        box.value = (box.value.trim() ? box.value.replace(/\s*$/, "\n") : "") + reader.result;
+      };
+      reader.onerror = function () { NFM.toast("could not read that file", "bad"); };
+      reader.readAsText(file);
+    });
+
+    document.getElementById("im-save").addEventListener("click", async function () {
+      const btn = this;
+      btn.disabled = true;
+      try {
+        const res = await NFM.api("/pools/" + POOL_ID + "/members/bulk", {
+          method: "POST",
+          body: { text: document.getElementById("im-text").value }
+        });
+        NFM.closeModal();
+        // Say what was skipped.  Silently dropping the duplicates would leave
+        // somebody counting rows to work out what happened.
+        if (res.skipped && res.skipped.length) {
+          NFM.toast("added " + res.added.length + ", already there: " + res.skipped.join(", "), "warn");
+          setTimeout(function () { window.location.reload(); }, 2500);
+        } else {
+          window.location.reload();
+        }
+      } catch (err) {
+        btn.disabled = false;
+        NFM.toast(err.message, "bad");
+      }
     });
   });
 
