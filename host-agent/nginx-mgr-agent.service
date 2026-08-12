@@ -170,7 +170,13 @@ SystemCallArchitectures=native
 #   CHOWN, DAC_OVERRIDE, FOWNER: write config and set who owns it
 #   SETUID, SETGID: certbot drops privileges when it runs its hooks
 #   KILL: send nginx a reload signal when there is no systemd
-CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETUID CAP_SETGID CAP_KILL
+#   NET_BIND_SERVICE: nginx -t opens the real listen sockets while it checks a
+#     config, which is how it catches a port that is already taken.  nginx runs
+#     as a child of this agent and inherits this list, so without it every test
+#     of a config with a normal web port in it failed with
+#     "bind() to 0.0.0.0:80 failed (13: Permission denied)", and nothing could
+#     be applied.  The message points at nginx and the real cause is here.
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETUID CAP_SETGID CAP_KILL CAP_NET_BIND_SERVICE
 
 # Keep one bad apply from eating the box.
 LimitNOFILE=4096
