@@ -25,6 +25,7 @@ from app.web.routes_api import render_current
 SOCKET = "/run/nginxmgr/agent.sock"
 
 results = []
+skipped = []
 
 
 def check(name, ok, detail=""):
@@ -33,6 +34,20 @@ def check(name, ok, detail=""):
     if detail and not ok:
         print(f"          {detail[:160]}")
     return ok
+
+
+def skip(name, why):
+    """
+    Nothing here to check, which is not the same as a failure.
+
+    A standby holds no sites or pools of its own, so half of these have nothing
+    to look at on that node.  Reporting those as broken sends somebody hunting
+    for a bug that is really an empty database, and a suite that cries wolf on a
+    healthy box is a suite people stop running.
+    """
+    skipped.append((name, why))
+    print(f"    skip  {name}")
+    print(f"          {why}")
 
 
 def agent(request):
@@ -128,12 +143,22 @@ def set_csp(session):
     cfg["content_security_policy"] = "default-src 'self'; img-src 'self' data:"
     host.settings = json_set(cfg)
 
-try:
-    files = rendered_with(set_csp)
-    ok, output = nginx_accepts(files)
-    check("a content security policy renders and loads", ok, output)
-except Exception as exc:
-    check("a content security policy renders and loads", False, str(exc))
+with session_scope() as s:
+    have_sites = s.query(VirtualHost).count()
+    have_https = s.query(VirtualHost).filter(VirtualHost.listen_https.is_(True)).count()
+    have_443 = [p for p in s.query(Pool).all()
+                if any(m.enabled and m.port == 443 for m in p.members)]
+
+if not have_sites:
+    skip("a content security policy renders and loads",
+         "no sites on this node, which is normal for a standby")
+else:
+    try:
+        files = rendered_with(set_csp)
+        ok, output = nginx_accepts(files)
+        check("a content security policy renders and loads", ok, output)
+    except Exception as exc:
+        check("a content security policy renders and loads", False, str(exc))
 
 # TLS 1.3 only must not write a 1.2 cipher line
 def tls13_only(session):
@@ -143,22 +168,31 @@ def tls13_only(session):
     host.settings = json_set(cfg)
     host.name = host.name  # touch
 
-try:
-    files = rendered_with(tls13_only)
-    https_files = [c for p, c in files.items() if p.startswith("sites/") and "ssl_protocols TLSv1.3;" in c]
-    bad = [c for c in https_files if "\n    ssl_ciphers " in c]
-    check("tls 1.3 only writes no 1.2 cipher list", https_files and not bad,
-          "ssl_ciphers is ignored by 1.3 and should not be written")
-except Exception as exc:
-    check("tls 1.3 only writes no 1.2 cipher list", False, str(exc))
+if not have_https:
+    skip("tls 1.3 only writes no 1.2 cipher list",
+         "no https site on this node to render")
+else:
+    try:
+        files = rendered_with(tls13_only)
+        https_files = [c for p, c in files.items()
+                       if p.startswith("sites/") and "ssl_protocols TLSv1.3;" in c]
+        bad = [c for c in https_files if "\n    ssl_ciphers " in c]
+        check("tls 1.3 only writes no 1.2 cipher list", bool(https_files) and not bad,
+              "ssl_ciphers is ignored by 1.3 and should not be written")
+    except Exception as exc:
+        check("tls 1.3 only writes no 1.2 cipher list", False, str(exc))
 
 # a pool on 443 speaks https without anybody setting it
-with session_scope() as s:
-    pools = s.query(Pool).all()
-    on443 = [p for p in pools if any(m.enabled and m.port == 443 for m in p.members)]
-    wrong = [p.name for p in on443 if not p.uses_backend_tls]
-    check("a backend on 443 gets https without being told", on443 and not wrong,
-          f"these have a 443 member and are still plain http: {wrong}")
+if not have_443:
+    skip("a backend on 443 gets https without being told",
+         "no pool here has a backend on 443")
+else:
+    with session_scope() as s:
+        on443 = [p for p in s.query(Pool).all()
+                 if any(m.enabled and m.port == 443 for m in p.members)]
+        wrong = [p.name for p in on443 if not p.uses_backend_tls]
+        check("a backend on 443 gets https without being told", not wrong,
+              f"these have a 443 member and are still plain http: {wrong}")
 
 print()
 print("  live behaviour")
@@ -183,7 +217,8 @@ for name in sites:
 
 print()
 failed = [name for name, ok, _ in results if not ok]
-print(f"  {len(results) - len(failed)} of {len(results)} passed")
+print(f"  {len(results) - len(failed)} of {len(results)} passed"
+      + (f", {len(skipped)} skipped for nothing to check" if skipped else ""))
 print()
 print("  needs a person, because it applies or restarts something:")
 print("    - apply twice and confirm the certificates are still there")
