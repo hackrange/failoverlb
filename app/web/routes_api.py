@@ -683,6 +683,7 @@ POOL_FIELDS = {
     "health_check_rise", "health_check_fall", "health_check_verify_tls",
     "health_check_port", "min_healthy_members", "settings",
     "token_enabled", "backend_tls", "backend_tls_name",
+    "backend_kind", "backend_tls_verify", "backend_tls_ca",
 }
 
 MEMBER_FIELDS = {
@@ -964,8 +965,26 @@ def _apply_pool_fields(pool, payload):
     # token_enabled can be switched off here, which stops nginx sending the
     # header without throwing the secret away.  Turning it on does nothing on
     # its own: there has to be a token as well, which is its own endpoint.
+    if "backend_kind" in payload:
+        if payload["backend_kind"] not in ("servers", "site"):
+            raise HTTPException(status_code=400,
+                                detail="backend kind has to be servers or site")
+        pool.backend_kind = payload["backend_kind"]
+
+    # A path that goes straight into a directive, so it has to look like a path
+    # and nothing else.  Blank means the system bundle.
+    if "backend_tls_ca" in payload:
+        raw = (payload["backend_tls_ca"] or "").strip()
+        if raw and not re.fullmatch(r"/[A-Za-z0-9._/-]{1,500}", raw):
+            raise HTTPException(
+                status_code=400,
+                detail=("the CA file has to be an absolute path.  Leave it blank for the "
+                        "system list, which is what a public certificate needs."),
+            )
+        pool.backend_tls_ca = raw or None
+
     for field in ("hash_consistent", "health_check_enabled", "health_check_verify_tls",
-                  "token_enabled"):
+                  "token_enabled", "backend_tls_verify"):
         if field in payload:
             setattr(pool, field, bool(payload[field]))
 
@@ -1090,6 +1109,10 @@ def _pool_detail(p):
         "backend_tls": p.uses_backend_tls,
         "backend_tls_set": bool(p.backend_tls_set),
         "backend_tls_name": p.backend_tls_name,
+        "backend_kind": p.backend_kind or "servers",
+        "backend_tls_verify": bool(p.backend_tls_verify),
+        "backend_tls_ca": p.backend_tls_ca,
+        "backend_name": p.backend_name,
         "health_check": {
             "enabled": p.health_check_enabled,
             "type": p.effective_health_check_type,

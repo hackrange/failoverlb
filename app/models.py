@@ -15,6 +15,7 @@ change queue counts against.
 """
 
 import enum
+import ipaddress
 import json
 from datetime import datetime, timezone
 
@@ -480,6 +481,31 @@ class Pool(Base):
     # somebody who meant it.
     backend_tls_set = Column(Boolean, default=False)
 
+    # What is on the other end, which decides a handful of fiddly things that
+    # nobody should have to set one at a time.
+    #
+    #   servers: boxes running your app.  They answer to whatever name the
+    #            visitor asked for, so the Host header is passed straight
+    #            through and their redirects already point at your site.
+    #   site:    somebody else's website, on its own name.  It only answers to
+    #            that name, so the Host header has to be that name, and its
+    #            redirects point at itself and have to be pointed back.
+    #
+    # Getting this wrong does not fail loudly.  It serves the backend's default
+    # site, or bounces your visitor onto the backend's own address, and both
+    # look like the proxy working.
+    backend_kind = Column(String(20), default="servers")   # servers, site
+
+    # Encrypting the hop and checking who is on the far end of it are two
+    # different things.  On by default, because a proxy that would talk to
+    # anybody holding any certificate is not doing the job people assume it is.
+    backend_tls_verify = Column(Boolean, default=True)
+
+    # Blank means the system CA bundle, which is what a public certificate
+    # needs.  Point it at your own CA file for an internal one.  nginx ships no
+    # default here, so leaving it out makes verification fail rather than pass.
+    backend_tls_ca = Column(String(500))
+
     # Which name to put in SNI and check the backend's certificate against.
     #
     # This needs saying because nginx's default is wrong for us.  It sends the
@@ -612,6 +638,27 @@ class Pool(Base):
         if self.backend_tls_set:
             return bool(self.backend_tls)
         return any(m.enabled and m.port == 443 for m in self.members)
+
+    @property
+    def backend_name(self):
+        """
+        The backend's own hostname, when it has one.
+
+        Used for SNI, for checking its certificate, and for the Host header when
+        this pool is somebody else's site.  What was typed wins, otherwise the
+        first enabled member that is a name rather than an address, since the
+        members of a pool answer to the same name.
+        """
+        explicit = (self.backend_tls_name or "").strip()
+        if explicit:
+            return explicit
+        for member in sorted(self.members, key=lambda m: m.id or 0):
+            if not member.enabled:
+                continue
+            address = (member.address or "").strip()
+            if address and not _looks_like_address(address):
+                return address
+        return ""
 
     @property
     def effective_health_check_type(self):
@@ -1233,3 +1280,21 @@ class HealthEvent(Base):
     __table_args__ = (
         Index("ix_health_pool_time", "pool_name", "timestamp"),
     )
+
+
+def _looks_like_address(value: str) -> bool:
+    """
+    Is this an IP address rather than a hostname.
+
+    Brackets come off first, since that is how an IPv6 member is written.  It
+    changes what we can send as SNI and what we can put in a Host header, and
+    both want a name.
+    """
+    candidate = str(value).strip()
+    if candidate.startswith("[") and candidate.endswith("]"):
+        candidate = candidate[1:-1]
+    try:
+        ipaddress.ip_address(candidate)
+        return True
+    except ValueError:
+        return False

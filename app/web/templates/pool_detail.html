@@ -177,6 +177,28 @@
 
       <h3 style="font-size:0.92rem; margin:18px 0 8px">Connections to the backends</h3>
 
+      <div class="field" style="margin-bottom:14px">
+        <label for="p-backendkind">
+          What is on the other end
+          <button class="help-btn" data-help-static="h-backendkind"
+                  data-help-title="What is on the other end" data-help-wide aria-label="Help">?</button>
+        </label>
+        <select id="p-backendkind">
+          <option value="servers" {{ 'selected' if (pool.backend_kind or 'servers')=='servers' }}>
+            Servers running my app, answering to my site's name
+          </option>
+          <option value="site" {{ 'selected' if pool.backend_kind=='site' }}>
+            Another website, on its own name
+          </option>
+        </select>
+        <div class="hint">
+          Servers running your app get the name your visitor typed, so they serve
+          the right site.  Another website only answers to its own name, so it
+          gets that instead, and its redirects get pointed back at you rather
+          than walking your visitor onto its address.
+        </div>
+      </div>
+
       <div class="checkline">
         <input type="checkbox" id="p-backendtls" {{ 'checked' if pool.uses_backend_tls }}>
         <label for="p-backendtls">
@@ -190,14 +212,36 @@
         backend only speaks TLS, which a member on port 443 usually does.
       </p>
 
-      <div class="field" id="wrap-backendtlsname" style="display:none; margin-bottom:14px">
-        <label for="p-backendtlsname">Certificate name to expect</label>
-        <input type="text" id="p-backendtlsname" value="{{ pool.backend_tls_name or '' }}"
-               placeholder="taken from the members">
-        <div class="hint">
-          The name sent as SNI and checked against the backend's certificate.
-          Blank works out to the first member that is a hostname, which is right
-          unless your members answer to different names.
+      <div id="wrap-backendtlsname" style="display:none">
+        <div class="checkline" style="margin-left:23px">
+          <input type="checkbox" id="p-backendtlsverify" {{ 'checked' if pool.backend_tls_verify }}>
+          <label for="p-backendtlsverify">Check the backend's certificate is real</label>
+        </div>
+        <p class="small muted" style="margin:-4px 0 14px 46px">
+          Encrypting the hop and knowing who is on the far end are two different
+          things.  Turn this off only for a backend with a self signed
+          certificate that you cannot point at a CA file below.
+        </p>
+
+        <div class="form-grid" style="margin-bottom:14px">
+          <div class="field">
+            <label for="p-backendtlsname">Certificate name to expect</label>
+            <input type="text" id="p-backendtlsname" value="{{ pool.backend_tls_name or '' }}"
+                   placeholder="{{ pool.backend_name or 'taken from the members' }}">
+            <div class="hint">
+              Sent as SNI and checked against the certificate.  Blank works out to
+              the first member that is a hostname.
+            </div>
+          </div>
+          <div class="field">
+            <label for="p-backendtlsca">CA file</label>
+            <input type="text" id="p-backendtlsca" value="{{ pool.backend_tls_ca or '' }}"
+                   placeholder="the system list">
+            <div class="hint">
+              Blank uses the system list, which is what a certificate from a
+              public CA needs.  Point it at your own CA file for an internal one.
+            </div>
+          </div>
         </div>
       </div>
 
@@ -593,6 +637,35 @@ exactly where they were.</p>
   </div>
 </div>
 
+<div hidden id="h-backendkind">
+  <div class="help-section">
+    <p>One question that settles three fiddly things, because getting any of them wrong
+       looks like the proxy working.</p>
+  </div>
+  <div class="help-section">
+    <h4>Servers running my app</h4>
+    <p>The normal case.  Several boxes behind one name, all serving the site your visitor
+       asked for.  They get the visitor's name in the Host header, so they serve the right
+       site and build links that point back at you.  Their redirects already point at your
+       site, so nothing needs rewriting.</p>
+  </div>
+  <div class="help-section">
+    <h4>Another website</h4>
+    <p>You are putting your name in front of something that already lives on its own name.
+       It only answers to that name, so that is what goes in the Host header, and it is what
+       we check its certificate against.</p>
+    <p>Its redirects point at itself.  Left alone, the first redirect walks your visitor off
+       your site and onto the backend's address, and because that address works, it reads as
+       fine until somebody looks at the address bar.  So those get pointed back at you.</p>
+  </div>
+  <div class="help-section">
+    <h4>What goes wrong if you pick the wrong one</h4>
+    <p>Nothing that says "wrong Host header".  You get the backend's default site, or a 404,
+       or a login page that redirects somewhere strange.  All three look like a problem with
+       the backend, which is where the next hour goes.</p>
+  </div>
+</div>
+
 <div hidden id="h-backendtls">
   <div class="help-section">
     <p>Whether nginx speaks http or https on the hop from here to your backends.</p>
@@ -811,6 +884,7 @@ document.addEventListener("DOMContentLoaded", function () {
     syncBackendTls();
     markDirty();
   });
+  document.getElementById("p-backendkind").addEventListener("change", markDirty);
   syncBackendTls();
 
   document.querySelectorAll("input, select, textarea").forEach(function (el) {
@@ -837,6 +911,9 @@ document.addEventListener("DOMContentLoaded", function () {
         min_healthy_members: num("p-minhealthy"),
         backend_tls: chk("p-backendtls"),
         backend_tls_name: str("p-backendtlsname") || null,
+        backend_kind: document.getElementById("p-backendkind").value,
+        backend_tls_verify: chk("p-backendtlsverify"),
+        backend_tls_ca: str("p-backendtlsca") || null,
 
         health_check_enabled: chk("h-enabled"),
         health_check_type: document.getElementById("h-type").value,
