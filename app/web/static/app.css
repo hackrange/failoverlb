@@ -449,6 +449,20 @@ input:disabled, select:disabled { background: var(--bg-sunk); color: var(--text-
 .help-section li { margin-bottom: 4px; }
 
 /* ------------------------------------------------------------------ notices */
+/* Make the hidden attribute actually hide things.
+ *
+ * The browser's own rule is [hidden] { display: none }, and any author rule
+ * with a display on it beats that, because author styles win over the user
+ * agent stylesheet.  .notice sets display: flex, so every notice marked hidden
+ * was on screen the whole time regardless of what the code thought.
+ *
+ * That is how the "saved but not live" banner ended up permanently visible
+ * while the page it sat above correctly said there was nothing waiting, and
+ * the same was true of both "unsaved changes" notices.  There was already a
+ * .modal-backdrop[hidden] rule further down, which is somebody meeting this
+ * once and fixing it where they found it.  This does it for everything. */
+[hidden] { display: none !important; }
+
 .notice {
     padding: 10px 14px;
     border-radius: var(--radius);

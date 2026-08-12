@@ -274,7 +274,7 @@ def _pending_config(session) -> dict:
 
 
 @router.get("/config/pending")
-async def pending_config_diff(request: Request, db: DBSession = Depends(get_db)):
+async def pending_config_diff(g: ObjectGuard = Depends(guard)):
     """
     Show what applying would actually change, line by line.
 
@@ -286,10 +286,8 @@ async def pending_config_diff(request: Request, db: DBSession = Depends(get_db))
     fresh render of it, so this is a genuine before and after rather than two
     guesses about the same thing.
     """
-    current_user(request, db)
-
-    files, _checksum, _snapshot = render_current(db)
-    latest = db.query(ConfigVersion).order_by(ConfigVersion.version.desc()).first()
+    files, _checksum, _snapshot = render_current(g.session)
+    latest = g.session.query(ConfigVersion).order_by(ConfigVersion.version.desc()).first()
     previous = json.loads(latest.rendered or "{}") if latest else {}
 
     changes = []
