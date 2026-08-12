@@ -1409,6 +1409,121 @@ def _write_upgrade_state(**fields):
     atomic_write(UPGRADE_STATE, json.dumps(current, indent=1), mode=0o644)
 
 
+# The build runs as its own unit rather than as a child of this agent.  See
+# nginx-rebuild.service for why; the short version is that this agent runs with
+# ProtectSystem=strict and a source build has to write where a package manager
+# writes.  A child process inherits that sandbox, so the build has to be handed
+# to systemd instead of forked from here.
+REBUILD_UNIT = "nginx-rebuild.service"
+REVERT_UNIT = "nginx-revert.service"
+
+# On tmpfs, which the agent can write and which clears at reboot.  A build that
+# was interrupted by a reboot did not finish, and coming back up with no marker
+# is the honest answer.
+REBUILD_ENV = Path("/run/nginxmgr/rebuild.env")
+REBUILD_MARKER = Path("/run/nginxmgr/rebuild.started")
+
+# Written by the unit itself as it stops.  See nginx-rebuild.service: systemd
+# unloads a finished oneshot unit and every property it has resets to zero, so
+# asking systemd after the event cannot tell a successful build from one that
+# never happened.  This file existing is what says the build is over.
+REBUILD_RESULT = Path("/run/nginxmgr/rebuild.result")
+
+
+def _have_systemd():
+    return Path("/run/systemd/system").is_dir()
+
+
+def _unit_props(unit, names):
+    """Ask systemd about a unit.  Missing properties come back as empty."""
+    out = run(["systemctl", "show", unit, "-p", ",".join(names)])
+    props = {}
+    for line in (out["stdout"] or "").splitlines():
+        key, _, value = line.partition("=")
+        if key:
+            props[key] = value
+    return props
+
+
+def _systemd_build_state():
+    """
+    How the build unit is doing, as the same shape the file based path returns.
+
+    The trap here is that a unit which has never run looks exactly like one that
+    ran and succeeded: ActiveState=inactive, Result=success, ExecMainStatus=0.
+    Reading that as a finished build would report success for a build that was
+    never started, which is the failure this whole exercise turned up in the
+    first place.  So a build only counts as ours if the unit's own start
+    timestamp is at or after the moment we asked for it.
+    """
+    marker = {}
+    if REBUILD_MARKER.is_file():
+        try:
+            marker = json.loads(REBUILD_MARKER.read_text())
+        except (json.JSONDecodeError, OSError):
+            marker = {}
+
+    if not marker:
+        return {"state": "idle"}
+
+    props = _unit_props(REBUILD_UNIT, ["LoadState", "ActiveState", "SubState"])
+
+    if props.get("LoadState") in ("not-found", "masked", "error", "", None):
+        return {
+            "state": "unknown",
+            "error": (
+                f"{REBUILD_UNIT} is not installed on this box.  It ships in "
+                f"host-agent/ and install.sh puts it in place; an install from "
+                f"before it existed will not have it."
+            ),
+        }
+
+    base = {
+        "state": "running",
+        "started": marker.get("started"),
+        "nginx_version": marker.get("nginx_version"),
+        "openssl_version": marker.get("openssl_version"),
+    }
+
+    if props.get("ActiveState") in ("activating", "active", "reloading", "deactivating"):
+        return base
+
+    # Not running.  Either it has finished and left its result behind, or
+    # systemd has not got round to starting it yet.
+    if REBUILD_RESULT.is_file():
+        try:
+            recorded = REBUILD_RESULT.read_text().split()
+        except OSError:
+            recorded = []
+
+        result = recorded[0] if recorded else "unknown"
+        status = recorded[1] if len(recorded) > 1 else ""
+
+        return {
+            **base,
+            "state": "finished",
+            "ok": result == "success" and status in ("0", ""),
+            "finished": True,
+            "result": result,
+            "exit_status": status,
+        }
+
+    if props.get("ActiveState") == "failed":
+        # Failed before it could write a result, which usually means it never
+        # got as far as running the installer at all.
+        return {
+            **base,
+            "state": "finished",
+            "ok": False,
+            "finished": True,
+            "result": "failed",
+            "error": f"{REBUILD_UNIT} failed to start.  See journalctl -u {REBUILD_UNIT}.",
+        }
+
+    # Asked for, not begun.  Queued behind something, or systemd is slow.
+    return base
+
+
 def v_nginx_upgrade(req):
     """
     Rebuild nginx from source, at a version and module list we are given.
@@ -1452,6 +1567,55 @@ def v_nginx_upgrade(req):
     if openssl_version:
         env["OPENSSL_VERSION"] = str(openssl_version)
 
+    if _have_systemd():
+        # Hand it to systemd.  The versions go in an environment file rather
+        # than on a command line, so nothing the caller sent is ever parsed as
+        # a shell word, and both have already been checked against a version
+        # shaped pattern above.
+        REBUILD_ENV.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write(
+            REBUILD_ENV,
+            "".join(f"{k}={v}\n" for k, v in env.items()),
+            mode=0o600,
+        )
+
+        # Last build's outcome goes before this one is asked for, or the first
+        # status call would read the old result and report the new build as
+        # already finished.
+        REBUILD_RESULT.unlink(missing_ok=True)
+
+        # Written before the unit is asked to start, so that a build which
+        # begins between these two lines still counts as ours.  The other way
+        # round leaves a window where a finished build looks like it was never
+        # asked for.
+        atomic_write(
+            REBUILD_MARKER,
+            json.dumps({
+                "started": datetime.now(timezone.utc).isoformat(),
+                "monotonic_us": int(time.monotonic() * 1_000_000),
+                "nginx_version": nginx_version,
+                "openssl_version": openssl_version,
+            }),
+            mode=0o600,
+        )
+
+        log.warning("starting an nginx rebuild through %s: %s",
+                    REBUILD_UNIT, env or "same versions, module change")
+
+        # --no-block, because a build is twenty minutes and this call has to
+        # come back now.  Failures show up through the status verb.
+        out = run(["systemctl", "start", "--no-block", REBUILD_UNIT])
+        if out["rc"] != 0:
+            REBUILD_MARKER.unlink(missing_ok=True)
+            raise AgentError(
+                f"could not start {REBUILD_UNIT}: "
+                f"{(out['stderr'] or out['stdout']).strip()[:400]}",
+                "build_start_failed",
+            )
+
+        return {"started": True, "versions": env, "unit": REBUILD_UNIT}
+
+    # No systemd.  Nothing is sandboxing us either, so the old way still works.
     _write_upgrade_state(
         state="running",
         started=datetime.now(timezone.utc).isoformat(),
@@ -1544,7 +1708,7 @@ PYEND
 
 def v_nginx_upgrade_status(req):
     """How the build is going, and the tail of its output."""
-    state = _read_upgrade_state()
+    state = _systemd_build_state() if _have_systemd() else _read_upgrade_state()
 
     tail = ""
     if UPGRADE_LOG.is_file():
@@ -1577,6 +1741,23 @@ def v_nginx_revert(req):
     """
     if not INSTALLER.is_file():
         raise AgentError(f"no installer script at {INSTALLER}", "missing_installer")
+
+    if _have_systemd():
+        # Same reasoning as the build: a revert copies a binary back over
+        # /usr/sbin/nginx, which this agent's sandbox forbids.  Run it as a unit.
+        # No --no-block here, because a revert is quick and the caller wants to
+        # know whether it worked.
+        out = run(["systemctl", "start", REVERT_UNIT], timeout=300)
+        tail = ""
+        if UPGRADE_LOG.is_file():
+            try:
+                tail = "\n".join(UPGRADE_LOG.read_text(errors="replace").splitlines()[-40:])
+            except OSError:
+                pass
+        return {
+            "ok": out["rc"] == 0,
+            "output": (tail or (out["stdout"] + out["stderr"])).strip()[-4000:],
+        }
 
     result = run([str(INSTALLER), "revert"], timeout=300)
     return {

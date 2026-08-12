@@ -235,6 +235,23 @@ chmod 0750 /usr/local/lib/nginx-fleet-manager
 
 install -m 0644 "$SCRIPT_DIR/host-agent/nginx-mgr-agent.service" "$AGENT_UNIT"
 
+# The build and revert units.  These run unsandboxed, on purpose, because a
+# source build writes where a package manager writes and the agent must not be
+# allowed to.  The reasoning is in the files themselves, which is why they are
+# shipped rather than assembled at run time.
+install -m 0644 "$SCRIPT_DIR/host-agent/nginx-rebuild.service" \
+        /etc/systemd/system/nginx-rebuild.service
+install -m 0644 "$SCRIPT_DIR/host-agent/nginx-revert.service" \
+        /etc/systemd/system/nginx-revert.service
+
+# Both units name the installer by its shipped path.  If it lives somewhere
+# else on this box, point them at it, the same as the agent unit above.
+if [[ -f "$INSTALLER_PATH" && "$INSTALLER_PATH" != "/opt/nginx-installer.sh" ]]; then
+    sed -i "s|^ExecStart=/opt/nginx-installer.sh|ExecStart=${INSTALLER_PATH}|" \
+        /etc/systemd/system/nginx-rebuild.service \
+        /etc/systemd/system/nginx-revert.service
+fi
+
 # The unit ships with a default installer path.  Point it at wherever it really
 # is on this box.
 if [[ -f "$INSTALLER_PATH" ]]; then

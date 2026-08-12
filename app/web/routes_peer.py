@@ -486,7 +486,20 @@ async def peer_agent(request: Request):
     try:
         return await get_agent().call(verb, timeout=120, **args)
     except AgentError as exc:
-        return {"ok": False, "error": str(exc)}
+        # This has to be a status, not a two hundred with ok=false in the body.
+        #
+        # Calling the agent on this node raises.  Calling it on a peer used to
+        # return that envelope instead, and PeerClient hands a body straight
+        # back, so the caller saw no exception and carried on as though the verb
+        # had worked.  The upgrade walk did exactly that: lb02 refused to start
+        # a build, the walk marked it "building" anyway, and it sat there for its
+        # full forty five minute timeout before reporting that the build had not
+        # finished in time.  The real reason was in the agent log the whole time.
+        #
+        # Since the walk does standbys first, that was the path it always took
+        # first, and the node you clicked from was the only one that reported a
+        # refused build honestly.
+        raise HTTPException(status_code=502, detail=str(exc))
 
 
 # ==============================================================================

@@ -32,7 +32,7 @@ import time
 from datetime import timedelta
 
 from app.core.agent_client import AgentError, AgentUnavailable, get_agent
-from app.core.cluster import NodeUnreachable, PeerClient, get_cluster
+from app.core.cluster import ClusterError, NodeUnreachable, PeerClient, get_cluster
 from app.db import session_scope
 from app.models import Node, NodeState, Pool, utcnow
 
@@ -235,7 +235,7 @@ class UpgradeRunner:
                 "nginx_version": self.state["target"].get("nginx_version"),
                 "openssl_version": self.state["target"].get("openssl_version"),
             })
-        except (AgentError, NodeUnreachable) as exc:
+        except (AgentError, NodeUnreachable, ClusterError) as exc:
             return False, f"could not start the build: {exc}"
 
         self.state["nodes"][name] = {"state": "building", "since": time.time()}
@@ -248,7 +248,7 @@ class UpgradeRunner:
 
             try:
                 status = await self._call(name, "nginx_upgrade_status", {"lines": 12})
-            except (AgentError, NodeUnreachable) as exc:
+            except (AgentError, NodeUnreachable, ClusterError) as exc:
                 # A node going quiet mid build is expected for a moment when the
                 # service restarts at the end.  Keep waiting rather than calling
                 # it a failure straight away.
@@ -281,7 +281,7 @@ class UpgradeRunner:
 
         try:
             status = await self._call(name, "status", {})
-        except (AgentError, NodeUnreachable) as exc:
+        except (AgentError, NodeUnreachable, ClusterError) as exc:
             return False, f"the build finished but the node is not answering: {exc}"
 
         active = status.get("service_active")
@@ -290,7 +290,7 @@ class UpgradeRunner:
 
         try:
             test = await self._call(name, "config_test", {})
-        except (AgentError, NodeUnreachable) as exc:
+        except (AgentError, NodeUnreachable, ClusterError) as exc:
             return False, f"could not test the config afterwards: {exc}"
 
         if not test.get("ok"):
@@ -330,7 +330,7 @@ class UpgradeRunner:
         """Put the previous build back on one node."""
         try:
             result = await self._call(name, "nginx_revert", {})
-        except (AgentError, NodeUnreachable) as exc:
+        except (AgentError, NodeUnreachable, ClusterError) as exc:
             raise UpgradeError(f"could not revert {name}: {exc}")
 
         from app.core import audit

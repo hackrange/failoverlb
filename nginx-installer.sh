@@ -126,6 +126,11 @@ PREFIX="/etc/nginx"
 SBIN="/usr/sbin/nginx"
 BUILD_ROOT="/usr/local/src/nginx-build"
 BACKUP_ROOT="/var/backups/nginx-installer"
+
+# Source tarballs live here between builds.  BUILD_ROOT gets cleared at the
+# start of every build, so without this each one re-downloads nginx and the
+# whole of openssl.
+CACHE_DIR="/var/cache/nginx-installer"
 WEBROOT="/var/www/html"
 ACME_WEBROOT="/var/www/certbot"
 RUN_USER="www-data"
@@ -175,12 +180,39 @@ check_ubuntu() {
   esac
 }
 
-# Grab a file with a couple retries so a flaky network does not kill the build.
+# Grab a file, keeping a copy so the next build does not go out to the network
+# for the same fifty megabytes.
+#
+# Both callers pass a tarball.  The cached copy is only used if it still unpacks,
+# which catches a half written file from an interrupted build; a corrupt cache
+# that failed the build every time until somebody worked out to delete it would
+# be a worse bug than the one this fixes.
+#
+# The retries got longer after a real failure.  Both boxes sit behind one
+# address, so three builds in a row means three pulls of the same file from the
+# same place in a few minutes, and the third came back empty.  Five tries with a
+# wait between them costs nothing on a good day and saves a twenty minute build
+# on a bad one.
 fetch() {
-  local url="$1" out="$2"
+  local url="$1" out="$2" name cached
+  name="$(basename "$out")"
+  cached="${CACHE_DIR}/${name}"
+
+  if [[ -s "$cached" ]] && tar tzf "$cached" >/dev/null 2>&1; then
+    log "Using the cached ${name}, no download needed."
+    cp -a "$cached" "$out"
+    return
+  fi
+
   log "Downloading $url"
-  wget --https-only --tries=3 --timeout=30 -qO "$out" "$url" \
+  wget --https-only --tries=5 --waitretry=15 --timeout=60 -qO "$out" "$url" \
     || die "Could not download $url"
+
+  # Keep it, but never let a caching problem fail an otherwise good build.
+  if tar tzf "$out" >/dev/null 2>&1; then
+    mkdir -p "$CACHE_DIR"
+    cp -a "$out" "${cached}.part" 2>/dev/null && mv "${cached}.part" "$cached" 2>/dev/null || true
+  fi
 }
 
 
@@ -248,12 +280,52 @@ protect_from_apt() {
     warn "Use remove, not purge.  Purge deletes the config in ${PREFIX}."
   fi
 
+  # Hold the real names so apt will not quietly put them back on an upgrade.
+  local pkg
+  for pkg in nginx nginx-common nginx-core nginx-full; do
+    apt-mark hold "$pkg" >/dev/null 2>&1 || true
+  done
+  log "Held: nginx nginx-common nginx-core nginx-full"
+
+  # Last line of defense.  With this in place dpkg writes any nginx binary it
+  # ships to ${SBIN}.distrib and ours stays put.  No --rename on purpose, we do
+  # not want it moving the binary we just built.
+  if ! dpkg-divert --list "$SBIN" 2>/dev/null | grep -q .; then
+    dpkg-divert --local --divert "${SBIN}.distrib" --add "$SBIN" >/dev/null
+    log "Diverted any packaged nginx to ${SBIN}.distrib"
+  fi
+}
+
+
+# The stand in package, registered once the binary it describes actually exists.
+#
+# This used to run up front, alongside the holds above, and it recorded the
+# version we were about to build rather than the one we had.  A build that then
+# failed left the box telling dpkg it was running the new nginx while the old
+# binary carried on serving.  That is worse than an ugly failure: anything that
+# reads package versions, an inventory, a vulnerability scan, a person running
+# dpkg -l, was told the upgrade had happened.  It found us on a box whose
+# openssl download had timed out, which is a thing that will happen again.
+#
+# So it runs after the build, and it takes the version from the binary rather
+# than from what we were aiming at, because those are only the same thing when
+# everything worked.
+register_stand_in_package() {
+  local installed
+  installed="$(dpkg-query -W -f='${Package} ${Status} ${Version}\n' nginx nginx-core nginx-common 2>/dev/null \
+    | awk '$4 == "installed" && $5 !~ /^9:/ { printf "%s ", $1 }' || true)"
+
   # Build a tiny package named nginx that owns no files.  Apt sees the name as
   # installed, so a dependency on nginx is satisfied without the real thing.
   # The epoch of 9 keeps it sorted above anything Ubuntu will ever ship, so an
   # upgrade never decides ours is the older one.
-  local stub ver
-  ver="9:${NGINX_VERSION}-source"
+  local stub ver built
+  built="$("$SBIN" -v 2>&1 | sed -n 's|.*nginx/\([0-9][0-9.]*\).*|\1|p')"
+  if [[ -z "$built" ]]; then
+    warn "Could not read a version out of ${SBIN}, leaving the stand in package alone."
+    return
+  fi
+  ver="9:${built}-source"
   stub="$(mktemp -d)"
   mkdir -p "${stub}/nginx/DEBIAN"
   cat > "${stub}/nginx/DEBIAN/control" <<EOF
@@ -278,21 +350,6 @@ EOF
     dpkg -i "${stub}/nginx.deb" >/dev/null
   fi
   rm -rf "$stub"
-
-  # Hold the real names so apt will not quietly put them back on an upgrade.
-  local pkg
-  for pkg in nginx nginx-common nginx-core nginx-full; do
-    apt-mark hold "$pkg" >/dev/null 2>&1 || true
-  done
-  log "Held: nginx nginx-common nginx-core nginx-full"
-
-  # Last line of defense.  With this in place dpkg writes any nginx binary it
-  # ships to ${SBIN}.distrib and ours stays put.  No --rename on purpose, we do
-  # not want it moving the binary we just built.
-  if ! dpkg-divert --list "$SBIN" 2>/dev/null | grep -q .; then
-    dpkg-divert --local --divert "${SBIN}.distrib" --add "$SBIN" >/dev/null
-    log "Diverted any packaged nginx to ${SBIN}.distrib"
-  fi
 }
 
 
@@ -895,6 +952,11 @@ cmd_install() {
   backup_current
   build_lua_support
   build_nginx
+
+  # Now that ${SBIN} really is the new build, tell dpkg so.  Before this point
+  # the box has not changed version and must not claim to have.
+  register_stand_in_package
+
   make_dirs
   write_main_conf
   write_ssl_snippet
