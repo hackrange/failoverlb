@@ -107,8 +107,14 @@ class GslbServer:
     speaks UDP simply fails for those names.
     """
 
-    def __init__(self, address="0.0.0.0", port=53):
-        self.address = address
+    def __init__(self, address=None, port=53):
+        # The node's own address rather than everything, and that is not a
+        # detail.  Ubuntu and most others run a stub resolver on 127.0.0.53,
+        # so binding 0.0.0.0 collides with it and the listener never starts.
+        # Binding the address the world reaches this box on sidesteps that
+        # entirely, and is what an authoritative server should be answering on
+        # anyway: nothing should be asking it over loopback.
+        self.address = address or _own_address()
         self.port = port
         self.data = ZoneData()
         self._udp = None
@@ -494,6 +500,23 @@ def _live_values(record, healthy_node_ids):
 def _as_target(value: str) -> str:
     value = (value or "").strip()
     return value if value.endswith(".") else value + "."
+
+
+def _own_address() -> str:
+    """
+    This node's address, as the cluster knows it.
+
+    Falls back to everything only when there is nothing configured, which is a
+    fresh install that has no zones to serve either.
+    """
+    try:
+        from app.config import get_settings
+        addr = (get_settings().node_address or "").strip()
+        if addr:
+            return addr
+    except Exception:
+        pass
+    return "0.0.0.0"
 
 
 def healthy_node_ids(session) -> set:
