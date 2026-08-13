@@ -46,6 +46,9 @@ from app.models import (
     ConnLimitZone,
     ErrorPageImage,
     ErrorPageTemplate,
+    GslbAnswer,
+    GslbRecord,
+    GslbZone,
     HealthEvent,
     Location,
     MapBlock,
@@ -2703,6 +2706,398 @@ async def nginx_metrics(g: ObjectGuard = Depends(guard)):
     g.require("view")
     from app.core.metrics import get_collector
     return {"nodes": get_collector().snapshot()}
+
+
+# ==============================================================================
+# GSLB, answering DNS so a name follows the healthy nodes
+# ==============================================================================
+
+GSLB_ZONE_FIELDS = {"name", "enabled", "description", "soa_primary",
+                    "soa_contact", "soa_refresh", "soa_retry", "soa_expire",
+                    "soa_minimum", "nameservers"}
+GSLB_RECORD_FIELDS = {"name", "enabled", "description", "record_type", "ttl",
+                      "policy", "when_all_down"}
+GSLB_ANSWER_FIELDS = {"value", "node_id", "priority", "enabled"}
+
+RECORD_TYPES = ("A", "AAAA", "CNAME")
+POLICIES = ("all", "failover")
+WHEN_DOWN = ("serve_all", "serve_none")
+
+
+def _gslb_zone_json(z, session=None):
+    return {
+        "id": z.id,
+        "name": z.name,
+        "enabled": z.enabled,
+        "description": z.description,
+        "soa_primary": z.soa_primary or "",
+        "soa_contact": z.soa_contact,
+        "soa_refresh": z.soa_refresh,
+        "soa_retry": z.soa_retry,
+        "soa_expire": z.soa_expire,
+        "soa_minimum": z.soa_minimum,
+        "soa_serial": z.soa_serial,
+        "nameservers": z.nameserver_list(),
+        "records": [_gslb_record_json(r) for r in z.records],
+    }
+
+
+def _gslb_record_json(r):
+    return {
+        "id": r.id,
+        "name": r.name,
+        "fqdn": r.fqdn(),
+        "enabled": r.enabled,
+        "description": r.description,
+        "record_type": r.record_type,
+        "ttl": r.ttl,
+        "policy": r.policy,
+        "when_all_down": r.when_all_down,
+        "answers": [
+            {"id": a.id, "value": a.value, "node_id": a.node_id,
+             "node_name": a.node.name if a.node else None,
+             "priority": a.priority, "enabled": a.enabled}
+            for a in r.answers
+        ],
+    }
+
+
+@router.get("/gslb/zones")
+async def list_gslb_zones(g: ObjectGuard = Depends(guard)):
+    from app.core import gslb
+
+    server = gslb.get_server()
+    return {
+        "zones": [_gslb_zone_json(z) for z in g.list(GslbZone)],
+        # What the listener is actually doing, because a zone that exists in
+        # the database and a zone the world can resolve are different things
+        # and the gap between them is the whole of what goes wrong here.
+        "server": {
+            "listening": bool(server._running),
+            "address": server.address,
+            "port": server.port,
+            "zones_loaded": len(server.data.zones),
+            "built_at": server.data.built_at,
+            "stats": server.stats,
+        },
+        # Which nodes would be handed out right now.
+        "healthy_nodes": sorted(gslb.healthy_node_ids(g.session)),
+    }
+
+
+@router.get("/gslb/zones/{zone_id}")
+async def get_gslb_zone(zone_id: str, g: ObjectGuard = Depends(guard)):
+    return _gslb_zone_json(g.get(GslbZone, zone_id))
+
+
+@router.post("/gslb/zones")
+async def create_gslb_zone(request: Request, g: ObjectGuard = Depends(changing)):
+    g.require("edit_sites")
+    payload = pick_fields(await request.json(), GSLB_ZONE_FIELDS)
+
+    name = _gslb_zone_name(payload.get("name"))
+    if g.session.query(GslbZone).filter(GslbZone.name == name).first():
+        raise HTTPException(status_code=409,
+                            detail=f"there is already a zone called {name}")
+
+    zone = GslbZone(name=name)
+    _apply_gslb_zone(g, zone, payload)
+    g.session.add(zone)
+    g.session.commit()
+
+    audit.record("gslb.zone.create", user=g.user, object_type="gslb_zone",
+                 object_name=name, changes=payload)
+    _gslb_reload()
+    return _gslb_zone_json(zone)
+
+
+@router.put("/gslb/zones/{zone_id}")
+async def update_gslb_zone(zone_id: str, request: Request,
+                           g: ObjectGuard = Depends(changing)):
+    zone = g.get(GslbZone, zone_id, "edit_sites")
+    payload = pick_fields(await request.json(), GSLB_ZONE_FIELDS)
+    _apply_gslb_zone(g, zone, payload)
+    # Every change bumps the serial.  Nothing here transfers a zone today, so
+    # it changes nothing that works, and a zone whose serial never moves is a
+    # zone no secondary could ever be added to later.
+    zone.soa_serial = (zone.soa_serial or 1) + 1
+    g.session.commit()
+
+    audit.record("gslb.zone.update", user=g.user, object_type="gslb_zone",
+                 object_name=zone.name, changes=payload)
+    _gslb_reload()
+    return _gslb_zone_json(zone)
+
+
+@router.delete("/gslb/zones/{zone_id}")
+async def delete_gslb_zone(zone_id: str, g: ObjectGuard = Depends(changing)):
+    zone = g.get(GslbZone, zone_id, "edit_sites")
+    name = zone.name
+    g.session.delete(zone)
+    g.session.commit()
+    audit.record("gslb.zone.delete", user=g.user, object_type="gslb_zone",
+                 object_name=name)
+    _gslb_reload()
+    return {"ok": True, "deleted": name}
+
+
+def _gslb_zone_name(raw) -> str:
+    name = str(raw or "").strip().strip(".").lower()
+    if not name or len(name) > 253:
+        raise HTTPException(status_code=400, detail="give the zone a name")
+    if not hostnames.HOST_RE.match(name) or "." not in name:
+        raise HTTPException(
+            status_code=400,
+            detail=("that is not a domain name.  A zone looks like "
+                    "gslb.example.com, and it is nearly always a name below "
+                    "one you already own rather than the whole domain."))
+    return name
+
+
+def _apply_gslb_zone(g, zone, payload):
+    if "name" in payload:
+        name = _gslb_zone_name(payload["name"])
+        clash = g.session.query(GslbZone).filter(GslbZone.name == name).first()
+        if clash and clash.id != zone.id:
+            raise HTTPException(status_code=409,
+                                detail=f"there is already a zone called {name}")
+        zone.name = name
+
+    if "description" in payload:
+        zone.description = (payload.get("description") or "")[:500] or None
+    if "enabled" in payload:
+        zone.enabled = bool(payload["enabled"])
+
+    for field, low, high in (("soa_refresh", 60, 86400),
+                             ("soa_retry", 60, 86400),
+                             ("soa_expire", 3600, 2419200),
+                             ("soa_minimum", 1, 86400)):
+        if field in payload:
+            try:
+                value = int(payload[field])
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400,
+                                    detail=f"{field} has to be a number of seconds")
+            if not low <= value <= high:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{field} has to be between {low} and {high} seconds")
+            setattr(zone, field, value)
+
+    for field in ("soa_primary", "soa_contact"):
+        if field in payload:
+            value = str(payload[field] or "").strip().strip(".")
+            if value and not hostnames.HOST_RE.match(value.replace("@", ".")):
+                raise HTTPException(status_code=400,
+                                    detail=f"{field} does not look like a name")
+            setattr(zone, field, value or None)
+
+    if "nameservers" in payload:
+        raw = payload["nameservers"]
+        if isinstance(raw, str):
+            raw = [n.strip() for n in raw.replace(",", " ").split() if n.strip()]
+        cleaned = []
+        for entry in raw or []:
+            name = str(entry).strip().strip(".").lower()
+            if not name:
+                continue
+            if not hostnames.HOST_RE.match(name):
+                raise HTTPException(status_code=400,
+                                    detail=f"{entry} is not a nameserver name")
+            if name not in cleaned:
+                cleaned.append(name)
+        # Said rather than refused, because a zone can be built before the
+        # delegation is in place and refusing would force the wrong order.
+        zone.nameservers = json.dumps(cleaned)
+
+
+@router.post("/gslb/zones/{zone_id}/records")
+async def create_gslb_record(zone_id: str, request: Request,
+                             g: ObjectGuard = Depends(changing)):
+    zone = g.get(GslbZone, zone_id, "edit_sites")
+    payload = pick_fields(await request.json(), GSLB_RECORD_FIELDS)
+
+    record = GslbRecord(zone_id=zone.id)
+    _apply_gslb_record(record, payload)
+    g.session.add(record)
+    g.session.commit()
+
+    audit.record("gslb.record.create", user=g.user, object_type="gslb_record",
+                 object_name=record.fqdn(zone.name), changes=payload)
+    _gslb_reload()
+    return _gslb_record_json(record)
+
+
+@router.put("/gslb/records/{record_id}")
+async def update_gslb_record(record_id: str, request: Request,
+                             g: ObjectGuard = Depends(changing)):
+    record = g.get(GslbRecord, record_id, "edit_sites")
+    payload = pick_fields(await request.json(), GSLB_RECORD_FIELDS)
+    _apply_gslb_record(record, payload)
+    g.session.commit()
+    audit.record("gslb.record.update", user=g.user, object_type="gslb_record",
+                 object_name=record.fqdn(), changes=payload)
+    _gslb_reload()
+    return _gslb_record_json(record)
+
+
+@router.delete("/gslb/records/{record_id}")
+async def delete_gslb_record(record_id: str, g: ObjectGuard = Depends(changing)):
+    record = g.get(GslbRecord, record_id, "edit_sites")
+    name = record.fqdn()
+    g.session.delete(record)
+    g.session.commit()
+    audit.record("gslb.record.delete", user=g.user, object_type="gslb_record",
+                 object_name=name)
+    _gslb_reload()
+    return {"ok": True, "deleted": name}
+
+
+def _apply_gslb_record(record, payload):
+    if "name" in payload:
+        label = str(payload["name"] or "@").strip().strip(".").lower() or "@"
+        if label not in ("@", "*"):
+            check = label[2:] if label.startswith("*.") else label
+            if not hostnames.HOST_RE.match(check):
+                raise HTTPException(
+                    status_code=400,
+                    detail=("that is not a name.  Use @ for the zone itself, a "
+                            "label like www, or * for a wildcard."))
+        record.name = label
+
+    if "record_type" in payload:
+        value = str(payload["record_type"] or "A").upper()
+        if value not in RECORD_TYPES:
+            raise HTTPException(status_code=400,
+                                detail=f"the type is one of {', '.join(RECORD_TYPES)}")
+        record.record_type = value
+
+    if "ttl" in payload:
+        try:
+            ttl = int(payload["ttl"])
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="the ttl is a number of seconds")
+        if not 1 <= ttl <= 86400:
+            raise HTTPException(status_code=400,
+                                detail="the ttl has to be between 1 and 86400 seconds")
+        record.ttl = ttl
+
+    if "policy" in payload:
+        if payload["policy"] not in POLICIES:
+            raise HTTPException(status_code=400,
+                                detail=f"the policy is one of {', '.join(POLICIES)}")
+        record.policy = payload["policy"]
+
+    if "when_all_down" in payload:
+        if payload["when_all_down"] not in WHEN_DOWN:
+            raise HTTPException(status_code=400,
+                                detail="that is not something to do when everything is down")
+        record.when_all_down = payload["when_all_down"]
+
+    for field in ("enabled",):
+        if field in payload:
+            setattr(record, field, bool(payload[field]))
+    if "description" in payload:
+        record.description = (payload.get("description") or "")[:500] or None
+
+
+@router.post("/gslb/records/{record_id}/answers")
+async def create_gslb_answer(record_id: str, request: Request,
+                             g: ObjectGuard = Depends(changing)):
+    record = g.get(GslbRecord, record_id, "edit_sites")
+    payload = pick_fields(await request.json(), GSLB_ANSWER_FIELDS)
+
+    answer = GslbAnswer(record_id=record.id)
+    _apply_gslb_answer(g, record, answer, payload)
+    g.session.add(answer)
+    g.session.commit()
+
+    audit.record("gslb.answer.add", user=g.user, object_type="gslb_record",
+                 object_name=record.fqdn(), changes=payload)
+    _gslb_reload()
+    return _gslb_record_json(record)
+
+
+@router.delete("/gslb/answers/{answer_id}")
+async def delete_gslb_answer(answer_id: str, g: ObjectGuard = Depends(changing)):
+    answer = g.get(GslbAnswer, answer_id, "edit_sites")
+    record = answer.record
+    g.session.delete(answer)
+    g.session.commit()
+    audit.record("gslb.answer.remove", user=g.user, object_type="gslb_record",
+                 object_name=record.fqdn() if record else "?")
+    _gslb_reload()
+    return {"ok": True}
+
+
+def _apply_gslb_answer(g, record, answer, payload):
+    if "value" in payload:
+        value = str(payload["value"] or "").strip()
+        if not value:
+            raise HTTPException(status_code=400, detail="an answer needs a value")
+
+        if record.record_type in ("A", "AAAA"):
+            try:
+                parsed = ipaddress.ip_address(value)
+            except ValueError:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"an {record.record_type} answer has to be an address")
+            wanted = 4 if record.record_type == "A" else 6
+            if parsed.version != wanted:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(f"that is an IPv{parsed.version} address and this is an "
+                            f"{record.record_type} record, which carries IPv{wanted}"))
+        else:
+            if not hostnames.HOST_RE.match(value.strip(".")):
+                raise HTTPException(status_code=400,
+                                    detail="a CNAME answer has to be a name")
+        answer.value = value
+
+    if "node_id" in payload:
+        node_id = payload["node_id"]
+        if node_id in (None, "", 0):
+            answer.node_id = None
+        else:
+            answer.node_id = g.get(Node, node_id).id
+
+    if "priority" in payload:
+        try:
+            answer.priority = max(0, min(int(payload["priority"]), 65535))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="the priority is a number")
+
+    if "enabled" in payload:
+        answer.enabled = bool(payload["enabled"])
+
+    if record.record_type == "CNAME":
+        others = [a for a in record.answers if a.id != answer.id]
+        if others:
+            raise HTTPException(
+                status_code=409,
+                detail=("a CNAME can only have one answer.  That is the rule in "
+                        "DNS itself, not ours: a name is either an alias for one "
+                        "other name or it is not an alias."))
+
+
+def _gslb_reload():
+    """
+    Rebuild the listener's snapshot straight away rather than waiting.
+
+    The timer would pick it up within ten seconds, and somebody who just saved
+    a record and immediately ran dig would see the old answer and reasonably
+    conclude it had not worked.
+    """
+    try:
+        from app.core import gslb
+
+        gslb.refresh()
+        server = gslb.get_server()
+        if server.data.zones and not server._running:
+            server.start()
+    except Exception as exc:
+        log.error("could not reload the gslb zones: %s", exc)
 
 
 # ==============================================================================
