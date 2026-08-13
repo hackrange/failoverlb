@@ -1381,6 +1381,83 @@ def v_nginx_metrics(req):
     return {"ok": True, "metrics": metrics, "raw": text}
 
 
+# Our own nftables table.  A table of our own means the whole thing can be
+# removed in one command without touching a rule anybody else wrote, which
+# matters on a box where a firewall is somebody's job.
+NFT_TABLE = "nginxmgr"
+
+
+def v_dns_redirect(req):
+    """
+    Send port 53 to the port the manager is really listening on.
+
+    The manager cannot bind 53.  It runs unprivileged with no-new-privileges
+    set, which makes the kernel ignore file capabilities, so the usual setcap
+    route does nothing.  Turning that hardening off would weaken the most
+    exposed component in the system to save one rule here.
+
+    A destination NAT rewrites where the packet is headed and leaves the source
+    alone, so the DNS server still sees the real client address.  Proxying
+    through nginx would have cost that, and would also have meant a node whose
+    nginx was stopped could not answer a query telling the world to use the
+    other node, which is exactly when the answer matters most.
+    """
+    address = str(req.get("address", "")).strip()
+    try:
+        port = int(req.get("port", 5353))
+    except (TypeError, ValueError):
+        raise AgentError("that is not a port", "bad_request")
+    if not 1024 <= port <= 65535:
+        raise AgentError("the target port has to be above 1023", "bad_request")
+    if address and not re.fullmatch(r"[0-9.]{7,15}", address):
+        raise AgentError("that is not an address we will write a rule for", "bad_request")
+
+    if not shutil.which("nft"):
+        raise AgentError("nftables is not installed on this box", "not_found")
+
+    # Built fresh every time rather than added to.  Appending would stack a new
+    # rule on every restart, and the last one written is not necessarily the one
+    # that matches.
+    daddr = f"ip daddr {address} " if address else ""
+    ruleset = f"""table ip {NFT_TABLE} {{
+    chain prerouting {{
+        type nat hook prerouting priority dstnat; policy accept;
+        {daddr}udp dport 53 redirect to :{port}
+        {daddr}tcp dport 53 redirect to :{port}
+    }}
+    chain output {{
+        type nat hook output priority dstnat; policy accept;
+        {daddr}udp dport 53 redirect to :{port}
+        {daddr}tcp dport 53 redirect to :{port}
+    }}
+}}
+"""
+
+    run(["nft", "delete", "table", "ip", NFT_TABLE])      # fine if it is absent
+    result = run(["nft", "-f", "-"], input_text=ruleset)
+    if result["rc"] != 0:
+        raise AgentError(f"could not install the dns redirect: {result['stderr'].strip()}",
+                         "io_error")
+
+    return {"installed": True, "address": address or "any", "port": port}
+
+
+def v_dns_redirect_clear(req):
+    """Take the redirect away, so port 53 goes back to whatever else wants it."""
+    if not shutil.which("nft"):
+        return {"removed": False, "note": "nftables is not installed"}
+    run(["nft", "delete", "table", "ip", NFT_TABLE])
+    return {"removed": True}
+
+
+def v_dns_redirect_status(req):
+    """What rule is actually in place, as opposed to what we think we wrote."""
+    if not shutil.which("nft"):
+        return {"present": False, "note": "nftables is not installed"}
+    result = run(["nft", "list", "table", "ip", NFT_TABLE])
+    return {"present": result["rc"] == 0, "ruleset": result["stdout"].strip()}
+
+
 def v_public_ip(req):
     """
     Work out what public address this box goes out as.
@@ -1921,6 +1998,9 @@ VERBS = {
     "list_backups": v_list_backups,
     "rollback": v_rollback,
     "nginx_metrics": v_nginx_metrics,
+    "dns_redirect": v_dns_redirect,
+    "dns_redirect_clear": v_dns_redirect_clear,
+    "dns_redirect_status": v_dns_redirect_status,
     "public_ip": v_public_ip,
     "local_addresses": v_local_addresses,
     "write_hook_scripts": v_write_hook_scripts,

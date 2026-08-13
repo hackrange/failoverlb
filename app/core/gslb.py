@@ -107,15 +107,29 @@ class GslbServer:
     speaks UDP simply fails for those names.
     """
 
-    def __init__(self, address=None, port=53):
+    def __init__(self, address=None, port=None):
+        self.address = address or _own_address()
         # The node's own address rather than everything, and that is not a
         # detail.  Ubuntu and most others run a stub resolver on 127.0.0.53,
         # so binding 0.0.0.0 collides with it and the listener never starts.
         # Binding the address the world reaches this box on sidesteps that
         # entirely, and is what an authoritative server should be answering on
         # anyway: nothing should be asking it over loopback.
-        self.address = address or _own_address()
-        self.port = port
+        # A port anybody may bind, and the agent puts a redirect in front of it.
+        #
+        # Port 53 cannot be bound from in here and that is by design, not an
+        # oversight to work around.  The container runs unprivileged with
+        # no-new-privileges set, which makes the kernel ignore file
+        # capabilities outright, so the usual setcap trick is inert.  Turning
+        # that hardening off for a chart of a feature would be trading the
+        # thing that protects the most exposed component in the system.
+        #
+        # So this listens high and asks the agent, which is the root part and
+        # exists for exactly this, to redirect 53 to it.  A destination NAT
+        # rewrites where the packet is going and leaves who it came from alone,
+        # so the client address survives, which the capability route also gave
+        # us and the alternative of proxying through nginx did not.
+        self.port = int(port or 5353)
         self.data = ZoneData()
         self._udp = None
         self._tcp = None
@@ -539,6 +553,27 @@ def healthy_node_ids(session) -> set:
             continue
         out.add(node.id)
     return out
+
+
+async def ensure_redirect(server=None):
+    """
+    Ask the agent to point port 53 at wherever we are listening.
+
+    Called after the listener is up rather than before, so a rule never exists
+    with nothing behind it.  A box with a redirect and no listener answers
+    nothing at all, which looks exactly like the machine being down.
+    """
+    from app.core.agent_client import get_agent
+
+    server = server or get_server()
+    if not server._running:
+        return {"installed": False, "note": "the listener is not up"}
+    try:
+        return await get_agent().call("dns_redirect", timeout=30,
+                                      address=server.address, port=server.port)
+    except Exception as exc:
+        log.error("could not install the dns redirect, so port 53 is not ours: %s", exc)
+        return {"installed": False, "error": str(exc)}
 
 
 def refresh(server=None):

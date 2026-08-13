@@ -393,6 +393,7 @@ def start_scheduler():
         gslb.refresh()
         if gslb.get_server().data.zones:
             gslb.get_server().start()
+            await gslb.ensure_redirect()
     except Exception as exc:
         log.error("the dns listener did not start, so gslb is off: %s", exc)
 

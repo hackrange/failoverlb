@@ -95,20 +95,6 @@ RUN pip install --no-cache-dir pyflakes==3.2.0 \
 RUN mkdir -p /data && chown -R nginxmgr:nginxmgr /data /app
 VOLUME ["/data"]
 
-# Let an unprivileged process answer on port 53, and nothing else.
-#
-# cap_add in the compose file is necessary and is not sufficient, which is the
-# part that costs an afternoon.  It puts the capability in the container's
-# bounding set, and then dropping to a non root user clears the effective and
-# permitted sets, so the process still gets EACCES.  A capability only survives
-# that drop if the binary itself carries it.
-#
-# So the bit is set on the interpreter here.  It is the narrowest permission
-# that exists for this: binding a low port, nothing about files, devices or
-# other processes.  Without the matching cap_add the container has nothing to
-# inherit and this is inert, so both halves are needed and both say so.
-RUN apt-get update     && apt-get install -y --no-install-recommends libcap2-bin     && setcap cap_net_bind_service=+ep "$(readlink -f "$(command -v python3)")"     && apt-get purge -y libcap2-bin     && apt-get autoremove -y     && rm -rf /var/lib/apt/lists/*
-
 USER nginxmgr
 
 EXPOSE 7443
