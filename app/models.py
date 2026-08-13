@@ -964,6 +964,153 @@ class ErrorPageImage(Base):
     created_at = Column(DateTime, default=utcnow)
 
 
+class GslbZone(Base):
+    """
+    A DNS zone this fleet answers for, so a name can follow the healthy nodes.
+
+    This is the piece that makes traffic failover possible rather than only
+    manager failover.  Everything else here can move which node is in charge of
+    writing config, and none of it can move where the traffic goes, because
+    that is decided by whatever the client resolved before it connected.
+
+    The industry word is GSLB, global server load balancing.  F5 sell it as
+    GTM, Citrix and most others call it GSLB.  The technique is the same
+    everywhere: be authoritative for a name, know which things behind it are
+    up, and answer with only those on a short TTL.
+
+    Normally a child of a zone somebody already owns.  You keep example.com at
+    your registrar or at Route 53, delegate `gslb.example.com` down to these
+    boxes with NS records, and point the public names at it with CNAMEs.  That
+    way a load balancer being unreachable costs you the names deliberately put
+    behind it and not the whole domain.
+    """
+
+    __tablename__ = "gslb_zones"
+
+    id = Column(Integer, primary_key=True)
+    # The zone apex, stored without a trailing dot and matched case blind.
+    name = Column(String(253), unique=True, nullable=False, index=True)
+    enabled = Column(Boolean, default=True)
+    description = Column(String(500))
+
+    # The SOA.  A zone with no SOA is not a zone, and resolvers do read these:
+    # the last field is how long a negative answer may be cached, which is what
+    # decides how long a name that does not exist keeps not existing.
+    soa_primary = Column(String(253))        # blank means the first nameserver
+    soa_contact = Column(String(253), default="hostmaster")
+    soa_refresh = Column(Integer, default=3600)
+    soa_retry = Column(Integer, default=600)
+    soa_expire = Column(Integer, default=604800)
+    soa_minimum = Column(Integer, default=30)
+    soa_serial = Column(Integer, default=1)
+
+    # The nameservers this zone claims, as a json list of names.  These have to
+    # match the NS records the parent zone delegates to, or resolvers get a
+    # different answer depending on who they ask, which is a bad afternoon.
+    nameservers = Column(Text, default="[]")
+
+    created_at = Column(DateTime, default=utcnow)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
+
+    records = relationship("GslbRecord", back_populates="zone",
+                           cascade="all, delete-orphan")
+
+    def nameserver_list(self):
+        return json_get(self.nameservers, [])
+
+
+class GslbRecord(Base):
+    """
+    One name inside a zone, and how to decide what to answer for it.
+
+    The answers are not a fixed list.  Each one is tied to something whose
+    health is known, and the ones that are not healthy are left out of the
+    reply.  That is the whole feature: a client that resolves during an outage
+    is told about the boxes that are actually up.
+    """
+
+    __tablename__ = "gslb_records"
+
+    id = Column(Integer, primary_key=True)
+    zone_id = Column(Integer, ForeignKey("gslb_zones.id", ondelete="CASCADE"),
+                     nullable=False)
+    zone = relationship("GslbZone", back_populates="records")
+
+    # The label inside the zone.  "@" is the zone itself, "www" is
+    # www.<zone>, and "*" is a wildcard.
+    name = Column(String(253), nullable=False, default="@")
+    enabled = Column(Boolean, default=True)
+    description = Column(String(500))
+
+    # A, AAAA or CNAME.  CNAME has no health behind it and is here because a
+    # zone usually needs one or two.
+    record_type = Column(String(10), default="A")
+
+    # How long a resolver may keep the answer.  Short, because the whole point
+    # is changing it.  Worth knowing that this is a request and not a rule:
+    # resolvers clamp very low values, browsers cache separately, and some
+    # runtimes cache for the life of the process.  Thirty seconds buys most
+    # clients moving within a minute or two, and a tail that is worse.
+    ttl = Column(Integer, default=30)
+
+    # all      every healthy answer, which is round robin across what is up
+    # failover the healthy answer with the lowest priority number, and only
+    #          that one, so traffic sits on the primary until it goes away
+    policy = Column(String(20), default="all")
+
+    # What to do when nothing behind it is healthy.  Answering with everything
+    # is usually right: a name that resolves to a broken box gives the visitor
+    # an error they can retell, and a name that resolves to nothing looks to
+    # them like the whole company has vanished.
+    when_all_down = Column(String(20), default="serve_all")
+
+    created_at = Column(DateTime, default=utcnow)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
+
+    answers = relationship("GslbAnswer", back_populates="record",
+                           cascade="all, delete-orphan",
+                           order_by="GslbAnswer.priority")
+
+    def fqdn(self, zone_name=None) -> str:
+        zone_name = zone_name or (self.zone.name if self.zone else "")
+        label = (self.name or "@").strip()
+        if label in ("@", ""):
+            return zone_name
+        return f"{label}.{zone_name}"
+
+
+class GslbAnswer(Base):
+    """
+    One address this name could be answered with, and how we know it is alive.
+
+    Tied to a cluster node by preference, because then the health is something
+    this system already tracks minute by minute.  A plain address with no node
+    behind it is allowed and is always treated as healthy, which is right for
+    something outside the fleet that we have no way to check.
+    """
+
+    __tablename__ = "gslb_answers"
+
+    id = Column(Integer, primary_key=True)
+    record_id = Column(Integer, ForeignKey("gslb_records.id", ondelete="CASCADE"),
+                       nullable=False)
+    record = relationship("GslbRecord", back_populates="answers")
+
+    # For an A or AAAA this is an address.  For a CNAME it is the target name.
+    value = Column(String(253), nullable=False)
+
+    # Which node's health decides whether this answer is given out.  Null means
+    # nothing is watching it, and it is always handed out.
+    node_id = Column(Integer, ForeignKey("nodes.id", ondelete="SET NULL"))
+    node = relationship("Node")
+
+    # Lower goes first under the failover policy.  Ignored by the others.
+    priority = Column(Integer, default=10)
+    enabled = Column(Boolean, default=True)
+
+    created_at = Column(DateTime, default=utcnow)
+
+
 class RateLimitZone(Base):
     """
     A named rate limit that sites can point at.

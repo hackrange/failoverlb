@@ -30,6 +30,27 @@ services:
     #   3. Peers talk to each other on the host's real addresses.
     network_mode: host
 
+    # The one capability this container has, and it is here so a name can be
+    # answered on port 53.
+    #
+    # Ports below 1024 need permission that an unprivileged process does not
+    # have, and this container runs as uid 10001 on purpose: it is the big pile
+    # of code with a web server in it, so it is the thing most likely to get
+    # popped, and the root part of this system is the small agent instead.
+    #
+    # NET_BIND_SERVICE is the narrowest thing that does the job.  It allows
+    # binding a low port and nothing else: no filesystem, no devices, no other
+    # process.  The alternative was to have nginx listen on 53 and proxy to a
+    # high port, which keeps this container exactly as it was and throws away
+    # the client address, and a GSLB wants that address for its logs and for
+    # any steering by location later.
+    #
+    # If that trade is ever judged the wrong way round, the way out is to move
+    # the dns listener into its own small container with this capability and
+    # nothing else, the same shape as the agent.
+    cap_add:
+      - NET_BIND_SERVICE
+
     environment:
       # ---- who this node is ---------------------------------------------
       NFM_NODE_NAME: ${NFM_NODE_NAME:?set NFM_NODE_NAME in .env}

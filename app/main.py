@@ -34,6 +34,7 @@ from app.core.agent_client import AgentError, get_agent
 from app.core.capabilities import set_local_capabilities
 from app.core.cluster import get_cluster
 from app.core.crypto import ClusterCA
+from app.core import gslb
 from app.core.metrics import get_collector
 from app.db import init_db, session_scope
 from app.models import Node, NodeRole, NodeState, utcnow
@@ -378,6 +379,33 @@ def start_scheduler():
         "interval",
         seconds=settings.cert_check_interval,
         id="certs",
+        max_instances=1,
+        coalesce=True,
+    )
+
+    # Bring the dns listener up, if anything is configured to be served.
+    #
+    # A failure here is logged and stepped over rather than raised.  Port 53
+    # may be taken by a resolver the distribution installed, and a manager that
+    # refuses to start because of that would take the whole GUI away over a
+    # feature most fleets will never turn on.
+    try:
+        gslb.refresh()
+        if gslb.get_server().data.zones:
+            gslb.get_server().start()
+    except Exception as exc:
+        log.error("the dns listener did not start, so gslb is off: %s", exc)
+
+    # Keep the dns answers in step with which nodes are actually serving.
+    #
+    # Ten seconds because the whole point of this feature is a short TTL, and a
+    # snapshot that lags the TTL would hand out an address for a box that has
+    # been down since before the answer was cached.
+    scheduler.add_job(
+        gslb.refresh,
+        "interval",
+        seconds=10,
+        id="gslb_zones",
         max_instances=1,
         coalesce=True,
     )
