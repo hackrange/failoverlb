@@ -272,6 +272,49 @@ else:
           "is_empty said yes on a node that has sites, so a restore would "
           "overwrite a real config")
 
+# Every config table has to be in the snapshot, and this is checked by walking
+# the models rather than by listing them here, because a list here would have
+# the same hole as the one it is checking.
+#
+# The hole is easy to make and quiet.  The GSLB tables were added, the feature
+# worked perfectly on the node it was built on, and the zones were in no
+# snapshot at all: they never reached the standby and were in no backup.  For a
+# failover feature that means the spare nameserver answers nothing, which is
+# discovered at the one moment it was supposed to help.
+#
+# Anything deliberately kept off a snapshot goes in the set below with a reason
+# next to it, so leaving a table out stays a decision rather than an oversight.
+NOT_REPLICATED = {
+    # The fleet's own bookkeeping.  Each box keeps its own view of who is in
+    # the cluster and what it has applied, and copying one node's view onto
+    # another is how two boxes end up disagreeing about which of them is which.
+    "Node", "JoinToken", "ConfigVersion", "PendingChange",
+    # Written where it happened and read there.  An audit log that travelled
+    # would say a thing was done on a box that never did it.
+    "AuditLog", "HealthEvent", "Session",
+    # Per box on purpose: ports, addresses, and the rest of the local install.
+    "SystemSetting",
+    # Users do travel, through their own path, so that the per box columns like
+    # lockout state stay on the box that saw the failed logins.
+    "User",
+}
+
+from app.core.snapshot import TABLES as _SNAP_TABLES
+from app import models as _models
+from app.models import Base as _Base
+
+_covered = {model.__name__ for _key, model in _SNAP_TABLES}
+_missing = sorted(
+    name for name, obj in vars(_models).items()
+    if isinstance(obj, type) and issubclass(obj, _Base) and obj is not _Base
+    and getattr(obj, "__tablename__", None)
+    and name not in _covered and name not in NOT_REPLICATED
+)
+check("every config table is in the snapshot", not _missing,
+      f"{', '.join(_missing)} would not reach a standby and would not be in a "
+      f"backup.  Add it to TABLES in snapshot.py, or to NOT_REPLICATED in this "
+      f"check with the reason it stays on one box.")
+
 print()
 print("  accounts reach every node, and cannot lock everybody out")
 

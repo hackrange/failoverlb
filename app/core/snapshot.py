@@ -79,6 +79,9 @@ from app.models import (
     ConnLimitZone,
     ErrorPageImage,
     ErrorPageTemplate,
+    GslbAnswer,
+    GslbRecord,
+    GslbZone,
     Location,
     MapBlock,
     Pool,
@@ -108,6 +111,11 @@ TABLES = [
     ("hosts", VirtualHost),
     ("locations", Location),
     ("streams", StreamServer),
+    # Parents before children, because a restore replays this in order and a
+    # record with no zone to hang off is dropped.
+    ("gslb_zones", GslbZone),
+    ("gslb_records", GslbRecord),
+    ("gslb_answers", GslbAnswer),
 ]
 
 # Encrypted at rest with a key that belongs to one node, so they have to be
