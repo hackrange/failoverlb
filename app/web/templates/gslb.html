@@ -216,7 +216,9 @@ document.addEventListener("DOMContentLoaded", function () {
     // without it, which is a loop, and it is the second thing people miss.
     ns.forEach(function (n, i) {
       const node = NODES[i];
-      if (node) { lines.push(n + ".   300   IN   A    " + node.address); }
+      if (!node) { return; }
+      if (node.address_v4) { lines.push(n + ".   300   IN   A     " + node.address_v4); }
+      if (node.address_v6) { lines.push(n + ".   300   IN   AAAA  " + node.address_v6); }
     });
     return '<div class="deleg"><div class="small"><strong>At your domain host, ' +
       "in the <span class='mono'>" + esc(parent) + "</span> zone, create these:" +
@@ -302,7 +304,9 @@ document.addEventListener("DOMContentLoaded", function () {
     a = a || { value: "", node_id: "", priority: 10, enabled: true };
     const opts = ['<option value="">not tied to a node</option>'].concat(
       NODES.map(function (n) {
-        return '<option value="' + esc(n.id) + '" data-address="' + esc(n.address) + '"' +
+        return '<option value="' + esc(n.id) +
+               '" data-v4="' + esc(n.address_v4) + '"' +
+               ' data-v6="' + esc(n.address_v6) + '"' +
                (a.node_id === n.id ? " selected" : "") + ">" + esc(n.name) + "</option>";
       })).join("");
     return '<div class="answer-row" data-answer>' +
@@ -405,12 +409,18 @@ document.addEventListener("DOMContentLoaded", function () {
     // Picking a node fills in its address, because that is what the answer is
     // nearly always meant to be and retyping it is just a chance to get it
     // wrong.  Only when the box is empty, so a deliberate value is never eaten.
+    //
+    // Which address depends on the record type, and it has to: these nodes have
+    // a public IPv6 as well as an IPv4, and putting the v6 one in an A record
+    // gives you a field that looks filled in and will not save.
     el("r-answers").addEventListener("change", function (ev) {
       const pick = ev.target.closest("[data-node]");
       if (!pick) { return; }
       const box = pick.closest("[data-answer]").querySelector("[data-value]");
       const opt = pick.options[pick.selectedIndex];
-      if (!box.value && opt && opt.dataset.address) { box.value = opt.dataset.address; }
+      if (box.value || !opt) { return; }
+      const want = el("r-type").value === "AAAA" ? opt.dataset.v6 : opt.dataset.v4;
+      if (want) { box.value = want; }
     });
   }
 

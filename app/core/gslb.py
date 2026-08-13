@@ -576,6 +576,78 @@ async def ensure_redirect(server=None):
         return {"installed": False, "error": str(exc)}
 
 
+async def clear_redirect(server=None):
+    """
+    Give port 53 back, for when there is nothing left to answer for.
+
+    A redirect pointing at a listener that has stopped is worse than no
+    redirect: the box takes port 53 and then answers nothing on it, so anything
+    still asking gets silence rather than moving on to another nameserver.
+    """
+    from app.core.agent_client import get_agent
+
+    try:
+        return await get_agent().call("dns_redirect_clear", timeout=30)
+    except Exception as exc:
+        log.error("could not take the dns redirect off: %s", exc)
+        return {"cleared": False, "error": str(exc)}
+
+
+async def reconcile(server=None):
+    """
+    Make the listener match the zones, whenever either one changes.
+
+    Starting the listener used to happen once, at boot, and only if a zone was
+    already in the database.  That is the wrong moment for the case that
+    matters most.  A node joining an existing cluster comes up empty and gets
+    its config a few seconds later, so it always lost that race and then never
+    looked again: it would sit there, part of the cluster, healthy in every
+    view, and never answer a single DNS query until somebody restarted it.
+
+    The node that stays quiet is the standby, which is the one whose whole job
+    is to keep answering after the other one dies.  So the fleet looks like it
+    has two nameservers and has one, and finds out which at the worst moment.
+
+    Running it on the same timer as the refresh means a zone added on any node
+    brings that node's listener up within a few seconds, and the last zone
+    being deleted hands port 53 back.
+    """
+    server = server or get_server()
+    data = refresh(server)
+    wanted = bool(data.zones)
+
+    if wanted and not server._running:
+        try:
+            server.start()
+        except Exception as exc:
+            log.error("the dns listener would not start: %s", exc)
+            return
+        log.info("a zone turned up, so the dns listener is coming up now")
+        await ensure_redirect(server)
+        return
+
+    if not wanted and server._running:
+        log.info("no zones left here, stopping the dns listener")
+        await clear_redirect(server)
+        server.stop()
+        return
+
+    if wanted and server._running:
+        # Re-assert the firewall rule if something else cleared it, which a
+        # reboot or anybody flushing nftables will do.  Asked about first
+        # rather than just rewritten, because writing it means dropping the
+        # table and rebuilding it, and doing that every few seconds would put a
+        # small hole in the one thing this is here to keep up.
+        from app.core.agent_client import get_agent
+        try:
+            status = await get_agent().call("dns_redirect_status", timeout=15)
+            if not status.get("installed"):
+                log.info("the dns redirect had gone, putting it back")
+                await ensure_redirect(server)
+        except Exception as exc:
+            log.debug("could not check the dns redirect: %s", exc)
+
+
 def refresh(server=None):
     """
     Rebuild the snapshot the server answers from.

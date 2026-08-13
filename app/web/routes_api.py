@@ -2787,20 +2787,43 @@ async def list_gslb_zones(g: ObjectGuard = Depends(guard)):
         # reason it should, but an answer is stored against one, so the picker
         # has to get them from somewhere.
         #
-        # public_ip first, because the address a node uses to reach its peers is
-        # often a private one, and putting a private address in public DNS is a
-        # mistake nobody notices until somebody outside cannot reach the site.
+        # Split by family rather than offered as one address, because the
+        # record type decides which one is even legal.  A node's public address
+        # here is quite often the IPv6 one, and handing that to an A record
+        # produces something that looks filled in and cannot be saved.
         "nodes": [
             {
                 "id": n.id,
                 "name": n.name,
-                "address": n.public_ip or n.address,
+                "address_v4": _pick_family(n, 4),
+                "address_v6": _pick_family(n, 6),
                 "peer_address": n.address,
-                "public_ip": n.public_ip,
             }
             for n in g.session.query(Node).order_by(Node.name).all()
         ],
     }
+
+
+def _pick_family(node, family: int):
+    """
+    The address of this node worth putting in public DNS, for one family.
+
+    The public one first where we know it, because the address a node uses to
+    reach its peers is often private, and a private address in public DNS is a
+    mistake nobody notices until somebody outside cannot get in.
+    """
+    import ipaddress
+
+    for candidate in (node.public_ip, node.address):
+        if not candidate:
+            continue
+        try:
+            parsed = ipaddress.ip_address(str(candidate).strip())
+        except ValueError:
+            continue
+        if parsed.version == family:
+            return str(parsed)
+    return ""
 
 
 @router.get("/gslb/zones/{zone_id}")

@@ -408,13 +408,19 @@ def start_scheduler():
     except Exception as exc:
         log.error("the dns listener did not start, so gslb is off: %s", exc)
 
-    # Keep the dns answers in step with which nodes are actually serving.
+    # Keep the dns answers in step with which nodes are actually serving, and
+    # the listener in step with whether there is anything to serve.
     #
     # Ten seconds because the whole point of this feature is a short TTL, and a
     # snapshot that lags the TTL would hand out an address for a box that has
     # been down since before the answer was cached.
+    #
+    # reconcile rather than refresh, because the block above only starts the
+    # listener if a zone is already in the database at boot.  A node joining an
+    # existing cluster is empty at that moment and gets its config seconds
+    # later, so it lost that race every time and never looked again.
     scheduler.add_job(
-        gslb.refresh,
+        gslb.reconcile,
         "interval",
         seconds=10,
         id="gslb_zones",
