@@ -144,7 +144,12 @@
 </style>
 
 <script nonce="{{ csp_nonce }}">
-(function () {
+// Waiting for DOMContentLoaded is not about the elements being there.  app.js
+// is the last thing in the layout, after this block, so an inline script that
+// runs straight away runs before window.NFM exists.  Everything here goes
+// through NFM, so without the wait the whole page does nothing and the only
+// sign of it is a table that never stops saying it is loading.
+document.addEventListener("DOMContentLoaded", function () {
   const BASE = document.querySelector('meta[name=nfm-base]').content;
   const MESSAGES = {{ messages | tojson }};
   const DEFAULT_CODES = {{ default_codes | tojson }};
@@ -161,9 +166,16 @@
     try {
       data = await NFM.api("/error-pages");
     } catch (err) {
-      el("template-rows").innerHTML =
-        '<tr><td colspan="5" class="faint">Could not load: ' +
-        NFM.escapeHtml(err.message) + "</td></tr>";
+      // Written without NFM on purpose.  If this handler needs the very thing
+      // that failed, a page that cannot load says nothing at all and looks
+      // like it is still working.
+      const cell = document.createElement("td");
+      cell.colSpan = 5;
+      cell.className = "faint";
+      cell.textContent = "Could not load: " + (err && err.message ? err.message : err);
+      const row = document.createElement("tr");
+      row.appendChild(cell);
+      el("template-rows").replaceChildren(row);
       return;
     }
 
@@ -384,7 +396,7 @@
   });
 
   loadList();
-})();
+});
 </script>
 
 {% endblock %}

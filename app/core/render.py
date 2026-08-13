@@ -665,8 +665,18 @@ map $cookie_{cookie} $sticky_{_safe_var(pool.name)} {{
         and for the same reason: one object nobody can serve must never be able
         to stop every other change on every node.
         """
-        wanted = {h.error_page_template_id for h in hosts
-                  if h.enabled and h.error_page_template_id}
+        wanted = set()
+        for host in hosts:
+            if not host.enabled:
+                continue
+            wanted.add(host.error_page_template_id)
+            # A path can ask for a different one from the rest of its site, and
+            # missing those here would write the directives with no files
+            # behind them.
+            for loc in (host.locations or []):
+                if loc.enabled:
+                    wanted.add(getattr(loc, "error_page_template_id", None))
+        wanted.discard(None)
 
         for template in error_templates:
             if template.id not in wanted:
@@ -690,58 +700,104 @@ map $cookie_{cookie} $sticky_{_safe_var(pool.name)} {{
             text = self._render_site(host, cert_by_id, acl_by_id, error_by_id)
             self.files[f"sites/{_safe_name(host.name)}.conf"] = text
 
-    def _error_page_lines(self, host, error_by_id) -> list:
+    def _error_page_choice(self, obj, error_by_id):
         """
-        Point a site at its custom error pages, if it has any.
+        The error page template one site or one path is really going to get.
 
-        The check that the pages are really in the bundle is not belt and
-        braces.  When nginx cannot open the file an error_page names it falls
-        back to its own page and keeps the real status, which is fine, but the
-        pair of directives is pointless without the files and this keeps the
-        two from disagreeing.
+        Gives back None rather than raising, always.  A template with a status
+        code nginx would not take is one bad row, and letting that throw makes
+        the whole render fail, which stops every unrelated change on every node
+        until somebody works out which template is to blame.  Falling back to
+        nginx's own pages is a page looking plain instead.
+
+        Checking the pages are really in the bundle is not belt and braces
+        either.  nginx handles an error_page pointing at a file that is not
+        there by falling back and keeping the real status, so it is harmless,
+        but writing directives for files nobody rendered means the config and
+        the bundle disagree and the next person has to work out which is right.
         """
-        template = error_by_id.get(getattr(host, "error_page_template_id", None))
+        template = error_by_id.get(getattr(obj, "error_page_template_id", None))
         if template is None:
-            return []
+            return None
 
         folder = f"{error_pages.PAGES_DIR}/{error_pages._folder_name(template.name)}"
         try:
             wanted = error_pages.valid_codes(template.code_list())
         except Exception as exc:
-            # Never raise out of here.  A template with a status code nginx
-            # would not take is one bad row, and letting it throw makes the
-            # whole render fail, which stops every unrelated change on every
-            # node until somebody works out which template is to blame.  The
-            # site drops back to nginx's own pages instead, which is a page
-            # looking plain rather than a fleet that cannot be changed.
-            log.warning("no error pages for %s: %s", host.name, exc)
-            return []
+            log.warning("no error pages from the template %s: %s", template.name, exc)
+            return None
 
         codes = [c for c in wanted if f"{folder}/{c}.html" in self.files]
         if not codes:
+            return None
+
+        return {"template": template, "folder": folder, "codes": codes}
+
+    def _error_page_rules(self, choice, indent=4, extra=None) -> list:
+        """
+        The error_page lines for one block, newest choice winning per code.
+
+        `extra` is what this block would have inherited.  It is spelled out
+        rather than left to nginx because of a rule that catches everybody:
+        nginx inherits error_page from the server into a location only when the
+        location has no error_page of its own, and one rule in a location throws
+        away *all* of them.  So a path with a template covering 404 and 500,
+        inside a site whose template also covers 502, would silently serve the
+        stock 502 page on that path only.  Writing the full set means what a
+        path shows never depends on which codes somebody happened to tick.
+        """
+        pad = " " * indent
+        by_code = {}
+        for source in (extra, choice):
+            if not source:
+                continue
+            for code in source["codes"]:
+                by_code[code] = source
+
+        if not by_code:
             return []
 
-        lines = [f"    # Custom error pages from the template {template.name}."]
-        for code in codes:
-            lines.append(f"    error_page {code} {error_pages.URI_PREFIX}/{code}.html;")
+        names = sorted({s["template"].name for s in by_code.values()})
+        lines = [f"{pad}# Custom error pages from: {', '.join(names)}."]
+        for code in sorted(by_code):
+            source = by_code[code]
+            lines.append(
+                f"{pad}error_page {code} "
+                f"{error_pages.URI_PREFIX}/{_safe_name(source['template'].name)}/{code}.html;"
+            )
+        return lines
 
-        # internal means the only way in is one of our own error_page lines.
-        # Without it these pages are ordinary files anybody can fetch, which
-        # would let somebody pull a 500 page off a site that is perfectly well.
-        #
-        # ^~ so it beats any regex location the site has.  A site with a regex
-        # that happens to match this path would otherwise send our error page
-        # off to a backend.
-        #
-        # Nothing else goes in this block on purpose.  It is a leaf that reads
-        # one file off the disk, so there is no proxying and nothing here that
-        # can see the rest of the config.
-        lines.append(f"    location ^~ {error_pages.URI_PREFIX}/ {{")
-        lines.append("        internal;")
-        lines.append(f"        alias {MANAGED_ROOT}/{folder}/;")
-        lines.append("        default_type text/html;")
-        lines.append("    }")
-        lines.append("")
+    def _error_page_locations(self, choices) -> list:
+        """
+        The blocks that actually serve the pages, one per template in use.
+
+        One per template and named after it, because a site can now use more
+        than one: its own for most of it and a different one on a path.  They
+        would collide on a single shared prefix and the second would never be
+        reached.
+
+        internal means the only way in is one of our own error_page lines.
+        Without it these are ordinary files anybody can fetch, which would let
+        somebody pull the 500 page off a site that is perfectly well.
+
+        ^~ so it beats any regex location the site has.  A site with a regex
+        that happens to match this path would otherwise send the error page off
+        to a backend.
+
+        Nothing else goes in these blocks on purpose.  Each is a leaf that reads
+        one file off the disk, so there is no proxying and nothing in here that
+        can see the rest of the config.
+        """
+        lines = []
+        for folder, name in sorted({(c["folder"], c["template"].name)
+                                    for c in choices if c}):
+            lines.append(f"    location ^~ {error_pages.URI_PREFIX}/{_safe_name(name)}/ {{")
+            lines.append("        internal;")
+            lines.append(f"        alias {MANAGED_ROOT}/{folder}/;")
+            lines.append("        default_type text/html;")
+            lines.append("    }")
+        if lines:
+            lines.append("")
         return lines
 
     def _render_site(self, host, cert_by_id, acl_by_id, error_by_id=None) -> str:
@@ -762,11 +818,25 @@ map $cookie_{cookie} $sticky_{_safe_var(pool.name)} {{
         # Worked out before anything is written, because both blocks need it.
         usable = cert is not None and getattr(cert, "usable", True)
 
-        # Both server blocks get the error pages, and they have to, because a
-        # site that answers on http as well as https can produce an error on
-        # either one.  Doing it once here rather than once per block also means
-        # the two cannot end up pointing at different pages.
-        error_lines = self._error_page_lines(host, error_by_id or {})
+        # Error pages, for the site and for any path that wants a different one.
+        #
+        # Both server blocks get them, and they have to, because a site that
+        # answers on http as well as https can produce an error on either one.
+        # Doing it once here rather than once per block also means the two
+        # cannot end up pointing at different pages.
+        error_by_id = error_by_id or {}
+        site_error = self._error_page_choice(host, error_by_id)
+        loc_errors = {}
+        for loc in (host.locations or []):
+            if not loc.enabled:
+                continue
+            choice = self._error_page_choice(loc, error_by_id)
+            if choice:
+                loc_errors[loc.id] = choice
+
+        error_lines = self._error_page_rules(site_error)
+        error_lines += self._error_page_locations(
+            [site_error] + list(loc_errors.values()))
 
         # A custom error page in front of a backend does nothing until nginx is
         # told to look at what the backend sent.  error_page only fires on
@@ -780,7 +850,7 @@ map $cookie_{cookie} $sticky_{_safe_var(pool.name)} {{
         # which is the list they ticked and nothing else.  Anybody who does want
         # the backend's own pages can set it off on the site or on one location,
         # and that still wins, because this only fills in a value nobody set.
-        if error_lines and "proxy_intercept_errors" not in cfg:
+        if site_error and "proxy_intercept_errors" not in cfg:
             cfg["proxy_intercept_errors"] = True
 
         lines = [HEADER.format(detail=f"Site: {host.name}")]
@@ -793,12 +863,16 @@ map $cookie_{cookie} $sticky_{_safe_var(pool.name)} {{
         if host.listen_http:
             lines.append(self._render_http_block(host, names, cfg,
                                                  cert if usable else None,
-                                                 error_lines=error_lines))
+                                                 error_lines=error_lines,
+                                                 site_error=site_error,
+                                                 loc_errors=loc_errors))
 
         # ---- the https server -----------------------------------------------
         if host.listen_https and usable:
             lines.append(self._render_https_block(host, names, cfg, cert, acl,
-                                                  error_lines=error_lines))
+                                                   error_lines=error_lines,
+                                                   site_error=site_error,
+                                                   loc_errors=loc_errors))
         elif host.listen_https and not cert:
             lines.append(
                 f"# No certificate is attached to {host.name} yet, so the https server\n"
@@ -819,7 +893,8 @@ map $cookie_{cookie} $sticky_{_safe_var(pool.name)} {{
 
         return "\n".join(lines)
 
-    def _render_http_block(self, host, names, cfg, cert=None, error_lines=None) -> str:
+    def _render_http_block(self, host, names, cfg, cert=None, error_lines=None,
+                           site_error=None, loc_errors=None) -> str:
         default = " default_server" if host.default_server else ""
         lines = [
             "server {",
@@ -864,7 +939,9 @@ map $cookie_{cookie} $sticky_{_safe_var(pool.name)} {{
                 lines.append("    # one is issued, rather than sending everybody to a dead port.")
                 lines.append("")
             lines.extend(self._render_body(host, cfg, tls=False,
-                                           error_lines=error_lines))
+                                           error_lines=error_lines,
+                                           site_error=site_error,
+                                           loc_errors=loc_errors))
 
         lines.append("}")
         return "\n".join(lines)
@@ -890,7 +967,8 @@ map $cookie_{cookie} $sticky_{_safe_var(pool.name)} {{
             return None
         return feature.default
 
-    def _render_https_block(self, host, names, cfg, cert, acl, error_lines=None) -> str:
+    def _render_https_block(self, host, names, cfg, cert, acl, error_lines=None,
+                            site_error=None, loc_errors=None) -> str:
         default = " default_server" if host.default_server else ""
         http2 = ""
         lines = ["server {"]
@@ -1001,7 +1079,9 @@ map $cookie_{cookie} $sticky_{_safe_var(pool.name)} {{
 
         lines.append("")
         lines.extend(self._render_body(host, cfg, tls=True, acl=acl,
-                                       error_lines=error_lines))
+                                       error_lines=error_lines,
+                                       site_error=site_error,
+                                       loc_errors=loc_errors))
         lines.append("}")
         return "\n".join(lines)
 
@@ -1029,7 +1109,8 @@ map $cookie_{cookie} $sticky_{_safe_var(pool.name)} {{
     # The shared body of a server block
     # =========================================================================
 
-    def _render_body(self, host, cfg, tls=False, acl=None, error_lines=None) -> list:
+    def _render_body(self, host, cfg, tls=False, acl=None, error_lines=None,
+                     site_error=None, loc_errors=None) -> list:
         lines = []
 
         # ---- logging ----
@@ -1136,7 +1217,10 @@ map $cookie_{cookie} $sticky_{_safe_var(pool.name)} {{
         if host.locations:
             for loc in sorted(host.locations, key=lambda x: x.sort_order):
                 if loc.enabled:
-                    lines.extend(self._render_location(loc, cfg, host))
+                    lines.extend(self._render_location(
+                        loc, cfg, host,
+                        error_choice=(loc_errors or {}).get(loc.id),
+                        site_error=site_error))
                     lines.append("")
         else:
             # No explicit locations, so the whole site is one behavior.
@@ -1364,7 +1448,8 @@ map $cookie_{cookie} $sticky_{_safe_var(pool.name)} {{
         lines.append("    }")
         return lines
 
-    def _render_location(self, loc, host_cfg, host) -> list:
+    def _render_location(self, loc, host_cfg, host, error_choice=None,
+                         site_error=None) -> list:
         cfg = {**host_cfg, **loc.setting_map()}
 
         prefix = {
@@ -1377,6 +1462,26 @@ map $cookie_{cookie} $sticky_{_safe_var(pool.name)} {{
 
         lines = [f"    location {prefix}{loc.path} {{"]
 
+        # This path's own error pages, if somebody gave it different ones.
+        #
+        # The site's rules are written in again underneath, for any code this
+        # path's template does not cover.  nginx inherits error_page from the
+        # server only when the location has none of its own, and a single rule
+        # here throws away every inherited one, so without that a path with a
+        # template covering 404 would silently serve the stock 502 page while
+        # the rest of the site served a proper one.
+        loc_only = loc.setting_map()
+        if error_choice:
+            lines.extend(self._error_page_rules(
+                error_choice, indent=8, extra=site_error))
+
+            # Same reasoning as on the site, one level down.  A template on a
+            # path is a more specific statement than a switch on the whole
+            # site, so it turns interception on for this path even if the site
+            # turned it off, and only something set on this path itself wins.
+            if "proxy_intercept_errors" not in loc_only:
+                cfg["proxy_intercept_errors"] = True
+
         # Per location limits
         for key in ("client_max_body_size", "client_body_timeout",
                     "limit_rate", "limit_rate_after", "expires"):
@@ -1388,7 +1493,6 @@ map $cookie_{cookie} $sticky_{_safe_var(pool.name)} {{
 
         # Limits for this path.  A location only needs its own if it differs
         # from the site, since nginx inherits the server block's otherwise.
-        loc_only = loc.setting_map()
         if loc_only.get("limit_req_zone_name") or loc_only.get("limit_conn_zone_name"):
             lines.extend(self._limit_lines(cfg, indent=8))
 

@@ -433,6 +433,16 @@ class Location(Base):
     access_list_id = Column(Integer, ForeignKey("access_lists.id", ondelete="SET NULL"))
     access_list = relationship("AccessList")
 
+    # A different error page for this path than the rest of the site gets.
+    #
+    # "The whole site except the health check" is the normal ask, and the health
+    # check is the thing that breaks first when somebody forgets it.  Empty
+    # means this path shows whatever the site shows.
+    error_page_template_id = Column(
+        Integer, ForeignKey("error_page_templates.id", ondelete="SET NULL")
+    )
+    error_page_template = relationship("ErrorPageTemplate")
+
     custom_config = Column(Text)
     enabled = Column(Boolean, default=True)
 

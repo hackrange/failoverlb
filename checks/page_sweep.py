@@ -13,7 +13,9 @@ is touched, nothing is written to the database, and nothing is applied.
 
     docker exec -i nginx-fleet-manager python < checks/page_sweep.py
 """
+import re
 import sys
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 
@@ -22,7 +24,8 @@ from app.models import AuthSource, User, UserRole
 
 # Pages the sidebar offers, plus the ones you reach from them.
 PAGES = [
-    "/", "/sites", "/pools", "/zones", "/certificates", "/cluster",
+    "/", "/sites", "/pools", "/zones", "/error-pages", "/certificates",
+    "/cluster",
     "/upgrade", "/parity", "/account", "/settings", "/users", "/audit",
     "/changes",
 ]
@@ -41,6 +44,7 @@ ENDPOINTS = [
     "/api/versions",
     "/api/config/pending",
     "/api/audit",
+    "/api/error-pages",
 ]
 
 results = []
@@ -134,6 +138,35 @@ def main():
             check(f"GET {path}", False, f"{type(exc).__name__}: {exc}")
 
     print()
+    # Every page's own script has to wait for the layout's script.
+    #
+    # app.js is the last thing in base.html, after the content block, so an
+    # inline script that runs the moment the browser reaches it runs before
+    # window.NFM exists.  Everything on these pages goes through NFM, so the
+    # whole page silently does nothing.  It cost a page shipping with a table
+    # that never stopped saying it was loading, and no server side check could
+    # have seen it: the page renders, the API answers, and the only thing wrong
+    # is what the browser did with them.
+    #
+    # Cheap to check by reading the templates, so it is checked here rather
+    # than being left to somebody noticing.
+    template_dir = Path(__file__).resolve().parent.parent / "app" / "web" / "templates"
+    unwrapped = []
+    for path in sorted(template_dir.glob("*.html")):
+        text = path.read_text()
+        for block in re.findall(r"<script(?![^>]*\bsrc=)[^>]*>(.*?)</script>",
+                                text, re.S):
+            if "NFM." not in block:
+                continue
+            head = block.lstrip()[:400]
+            if "DOMContentLoaded" not in head:
+                unwrapped.append(path.name)
+                break
+
+    check("every page waits for app.js before using NFM", not unwrapped,
+          f"these run their script too early, so NFM is undefined and the page "
+          f"quietly does nothing: {sorted(set(unwrapped))}")
+
     failed = [name for name, ok, _ in results if not ok]
 
     # Prove the run actually reached the app.  If the allow list or the session

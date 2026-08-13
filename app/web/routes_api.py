@@ -2337,10 +2337,15 @@ def _error_template_detail(session, t):
         }
         for i in sorted(t.images or [], key=lambda x: x.name)
     ]
-    out["used_by"] = sorted(
-        h.name for h in session.query(VirtualHost)
-        .filter(VirtualHost.error_page_template_id == t.id).all()
-    )
+    # Sites and paths both, because deleting one that a path is using is
+    # exactly as much of a change as deleting one a site is using, and only
+    # counting sites made the refusal below miss half of them.
+    used = [h.name for h in session.query(VirtualHost)
+            .filter(VirtualHost.error_page_template_id == t.id).all()]
+    used += [f"{loc.host.name}{loc.path}" for loc in session.query(Location)
+             .filter(Location.error_page_template_id == t.id).all()
+             if loc.host]
+    out["used_by"] = sorted(used)
     out["placeholders"] = [
         {"token": token, "what": what} for token, what in error_pages.PLACEHOLDER_HELP
     ]
@@ -2429,14 +2434,17 @@ async def delete_error_template(template_id: str, g: ObjectGuard = Depends(chang
     # to its own page and keeps the real status.  It still gets refused, because
     # a template being deleted out from under four sites is a change to four
     # sites and the person doing it should know that before it happens.
-    users = g.session.query(VirtualHost).filter(
-        VirtualHost.error_page_template_id == template.id).all()
+    users = [h.name for h in g.session.query(VirtualHost)
+             .filter(VirtualHost.error_page_template_id == template.id).all()]
+    users += [f"{loc.host.name}{loc.path}" for loc in g.session.query(Location)
+              .filter(Location.error_page_template_id == template.id).all()
+              if loc.host]
     if users:
         raise HTTPException(
             status_code=409,
             detail=(
-                f"{template.name} is still used by: {', '.join(h.name for h in users)}.  "
-                f"Those sites would go back to the stock nginx pages.  Take it off "
+                f"{template.name} is still used by: {', '.join(sorted(users))}.  "
+                f"Those would go back to the stock nginx pages.  Take it off "
                 f"them first if that is what you want."
             ),
         )
@@ -3322,6 +3330,7 @@ def _location_json(loc) -> dict:
         "redirect_target": loc.redirect_target,
         "redirect_code": loc.redirect_code,
         "access_list_id": loc.access_list_id,
+        "error_page_template_id": loc.error_page_template_id,
         "access_list": loc.access_list.name if loc.access_list else None,
         "custom_config": loc.custom_config or "",
         "enabled": bool(loc.enabled),
@@ -3352,7 +3361,8 @@ def _apply_location_fields(loc, payload, g):
             raise HTTPException(status_code=400, detail=f"{value} is not a mode")
         loc.mode = value
 
-    for field, model in (("pool_id", Pool), ("access_list_id", AccessList)):
+    for field, model in (("pool_id", Pool), ("access_list_id", AccessList),
+                         ("error_page_template_id", ErrorPageTemplate)):
         if field in payload:
             value = payload[field]
             if value in (None, "", 0):

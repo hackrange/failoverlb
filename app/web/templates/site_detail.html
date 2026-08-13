@@ -759,6 +759,10 @@ document.addEventListener("DOMContentLoaded", function () {
 
   const POOLS = {{ pools|map(attribute='id')|list|tojson }};
   const POOL_NAMES = {{ pools|map(attribute='name')|list|tojson }};
+  const ERROR_TEMPLATES = [
+    {% for t in error_templates %}{"id": {{ t.id }}, "name": {{ t.name|tojson }}}{{ "," if not loop.last }}{% endfor %}
+  ];
+  const SITE_ERROR_TEMPLATE = {{ host.error_page_template_id or 'null' }};
   let paths = [];
 
   const MATCH_LABEL = {
@@ -806,7 +810,7 @@ document.addEventListener("DOMContentLoaded", function () {
         <div class="grow">
           <strong class="mono">${NFM.escapeHtml(l.path)}</strong>
           <span class="small faint">${NFM.escapeHtml(MATCH_LABEL[l.match_type] || l.match_type)}
-          &middot; ${NFM.escapeHtml(describeTarget(l))}${l.enabled ? "" : " &middot; disabled"}</span>
+          &middot; ${NFM.escapeHtml(describeTarget(l))}${l.enabled ? "" : " &middot; disabled"}${errorPageNote(l)}</span>
         </div>
         <div class="flex">
           <button class="btn sm" data-edit-path="${l.id}">Edit</button>
@@ -835,10 +839,33 @@ document.addEventListener("DOMContentLoaded", function () {
     } catch (e) { NFM.toast(e.message || "could not load the paths"); }
   }
 
+  // Worth showing in the list rather than only in the dialog.  A path with its
+  // own error pages behaves differently from every other path on the site, and
+  // that is not something anybody should have to open each one to discover.
+  function errorPageNote(l) {
+    if (!l.error_page_template_id) { return ""; }
+    const t = ERROR_TEMPLATES.filter(x => x.id === l.error_page_template_id)[0];
+    return " &middot; errors: " + NFM.escapeHtml(t ? t.name : "its own");
+  }
+
   function pathForm(l) {
     l = l || { match_type: "prefix", mode: "proxy", enabled: true, redirect_code: 301 };
     const poolOpts = POOLS.map((id, i) =>
       `<option value="${id}" ${l.pool_id === id ? "selected" : ""}>${NFM.escapeHtml(POOL_NAMES[i])}</option>`).join("");
+    const errOpts = ERROR_TEMPLATES.map(t =>
+      `<option value="${t.id}" ${l.error_page_template_id === t.id ? "selected" : ""}>${NFM.escapeHtml(t.name)}</option>`).join("");
+
+    // Worth saying, because nginx's own rule here surprises people and we work
+    // around it: a location with any error_page of its own throws away every
+    // one it would have inherited.  We write the site's rules back in for the
+    // codes this path's template does not cover, so picking a small template
+    // for one path does not quietly drop the rest back to the stock pages.
+    const siteTpl = ERROR_TEMPLATES.filter(t => t.id === SITE_ERROR_TEMPLATE)[0];
+    const errHint = siteTpl
+      ? `Leave it alone and this path shows ${NFM.escapeHtml(siteTpl.name)}, the same as the rest of the site.  ` +
+        "Pick a different one and it wins for the codes it covers, with " +
+        NFM.escapeHtml(siteTpl.name) + " still filling in the rest."
+      : "The site has no error page template, so this path would be the only part with one.";
     return `
       <div class="field"><label for="l-path">Path</label>
         <input type="text" id="l-path" value="${NFM.escapeHtml(l.path || "")}" placeholder="/api">
@@ -872,6 +899,9 @@ document.addEventListener("DOMContentLoaded", function () {
           <option value="301" ${l.redirect_code === 301 ? "selected" : ""}>301 permanent</option>
           <option value="302" ${l.redirect_code === 302 ? "selected" : ""}>302 temporary</option>
         </select></div>
+      <div class="field"><label for="l-errorpage">Error pages for this path</label>
+        <select id="l-errorpage"><option value="">Whatever the site uses</option>${errOpts}</select>
+        <div class="hint">${errHint}</div></div>
       <div class="field"><label for="l-custom">Extra config for this path</label>
         <textarea id="l-custom" rows="3" spellcheck="false">${NFM.escapeHtml(l.custom_config || "")}</textarea></div>
       <div class="checkline">
@@ -897,6 +927,8 @@ document.addEventListener("DOMContentLoaded", function () {
     };
     const pool = v("l-pool");
     body.pool_id = pool ? parseInt(pool, 10) : null;
+    const lerr = v("l-errorpage");
+    body.error_page_template_id = lerr ? parseInt(lerr, 10) : null;
     body.document_root = v("l-root").trim() || null;
     body.alias = v("l-alias").trim() || null;
     body.redirect_target = v("l-target").trim() || null;

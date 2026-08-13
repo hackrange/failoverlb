@@ -22,7 +22,7 @@ from app.core.capabilities import fleet_capabilities
 from app.db import session_scope
 from app.models import (
     CacheZone, Certificate, ConnLimitZone, ErrorPageImage, ErrorPageTemplate,
-    MemberState, Pool, PoolMember, VirtualHost, json_set,
+    Location, MemberState, Pool, PoolMember, VirtualHost, json_set,
 )
 from app.web.routes_api import render_current
 
@@ -640,6 +640,78 @@ check("an SVG with script in it is refused",
 check("a real PNG is accepted",
       not _refuses_image(b"\x89PNG\r\n\x1a\n" + b"rest of a png"),
       "the sniffing has gone from catching fakes to refusing everything")
+
+# A path can have a different error page from the rest of its site, and nginx
+# has a rule here that catches everybody: error_page is inherited from the
+# server into a location only when the location has none of its own, and a
+# single rule in a location throws away every inherited one.  So a path with a
+# small template inside a site with a bigger one would silently serve the stock
+# pages for every code the small one did not cover.  Confirmed against real
+# nginx before the renderer was written to work around it.
+_site_tpl = _template("regress-site", [404, 500, 502], "<p>{{code}} SITE</p>")
+_site_tpl.id = 911
+_path_tpl = _template("regress-path", [404], "<p>{{code}} PATH</p>")
+_path_tpl.id = 912
+
+_loc_host = VirtualHost(name="paths.invalid", enabled=True,
+                        server_names='["paths.invalid"]', listen_http=True,
+                        listen_https=False, force_https=False, mode="proxy",
+                        settings="{}")
+_loc_host.id = 911
+_loc_host.pool_id = 901
+_loc_host.pool = _ep_pool
+_loc_host.error_page_template_id = 911
+
+_api_loc = Location(path="/api/", match_type="prefix", mode="proxy",
+                    sort_order=10, enabled=True, settings="{}")
+_api_loc.id = 911
+_api_loc.pool_id = 901
+_api_loc.pool = _ep_pool
+_api_loc.error_page_template_id = 912
+
+_plain_loc = Location(path="/", match_type="prefix", mode="proxy",
+                      sort_order=20, enabled=True, settings="{}")
+_plain_loc.id = 912
+_plain_loc.pool_id = 901
+_plain_loc.pool = _ep_pool
+
+_loc_host.locations = [_api_loc, _plain_loc]
+
+_lfiles = Renderer().render_all([_loc_host], [_ep_pool], [], [], [], [], [], [], [],
+                                error_templates=[_site_tpl, _path_tpl])
+_lconf = _lfiles.get("sites/paths.invalid.conf", "")
+_api_block = _lconf.split("location /api/ {")[-1].split("\n    }")[0]
+
+check("a path can point at a different template from its site",
+      "error_page 404 /__nfm_error/regress-path/404.html;" in _api_block,
+      "the path's own template has to win for the codes it covers")
+
+check("the site's rules are written back in for codes the path does not cover",
+      "error_page 502 /__nfm_error/regress-site/502.html;" in _api_block,
+      "nginx throws away every inherited error_page as soon as a location has "
+      "one of its own, so leaving these out means that path silently serves "
+      "the stock page for every other code")
+
+check("each template gets its own block to be served from",
+      ("location ^~ /__nfm_error/regress-site/ {" in _lconf
+       and "location ^~ /__nfm_error/regress-path/ {" in _lconf),
+      "one shared prefix would mean the second template was never reachable")
+
+check("a path with its own template gets interception turned on",
+      "proxy_intercept_errors on;" in _api_block,
+      "without it the backend's own error goes straight through and the "
+      "template on that path is never reached")
+
+check("both templates are written out when a path uses the second one",
+      ("errorpages/regress-path/404.html" in _lfiles
+       and "errorpages/regress-site/502.html" in _lfiles),
+      "only collecting the templates sites point at leaves a path pointing at "
+      "directives with no files behind them")
+
+check("a path with no template of its own writes no error_page lines",
+      "error_page" not in _lconf.split("location / {")[-1].split("\n    }")[0],
+      "it has to inherit the server block's, which is nginx's own behaviour "
+      "and the reason the plain case needs nothing written at all")
 
 print()
 print("  live behaviour")
