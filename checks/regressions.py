@@ -338,6 +338,33 @@ else:
     with session_scope() as s:
         restore(s, full)
 
+# Replicated config must not identify a node by its id.
+#
+# Node rows are deliberately per box, so the ids only mean something in the
+# database that issued them.  A config row that travels and carries a node id
+# points at whatever the receiving box happens to have under that number, which
+# is a different machine.  On two nodes the mappings come out as exact mirror
+# images.
+#
+# That cost a DNS failover its whole purpose: the surviving node dropped itself
+# from the answer and kept handing out the address of the box that was down,
+# and it could only ever show up during the failure it exists to handle.
+#
+# The rule is not "never reference a node".  It is that anything referencing
+# one has to carry the name too, because that means the same thing everywhere.
+_by_id = []
+for _key, _model in _SNAP_TABLES:
+    for _col in _model.__table__.columns:
+        if not any(str(fk.column) == "nodes.id" for fk in _col.foreign_keys):
+            continue
+        if "node_name" not in _model.__table__.columns:
+            _by_id.append(f"{_model.__name__}.{_col.name}")
+
+check("replicated config identifies nodes by name, not id", not _by_id,
+      f"{', '.join(_by_id)} points at a node by id on a row that travels "
+      f"between nodes.  That id is a different machine on every other box.  "
+      f"Add a node_name column and match on that.")
+
 check("every config table is in the snapshot", not _missing,
       f"{', '.join(_missing)} would not reach a standby and would not be in a "
       f"backup.  Add it to TABLES in snapshot.py, or to NOT_REPLICATED in this "

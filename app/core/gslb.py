@@ -418,11 +418,11 @@ class GslbServer:
             [n if n.endswith(".") else n + "." for n in zone["nameservers"]])
 
 
-def build_zone_data(session, healthy_node_ids) -> ZoneData:
+def build_zone_data(session, healthy_nodes) -> ZoneData:
     """
     Turn the database into the flat thing a query can be answered from.
 
-    `healthy_node_ids` is decided by the caller and handed in rather than
+    `healthy_nodes` is a set of node names decided by the caller rather than
     worked out here, so the rule about what counts as healthy lives in one
     place and this stays a lookup.
     """
@@ -442,7 +442,7 @@ def build_zone_data(session, healthy_node_ids) -> ZoneData:
             if not record.enabled:
                 continue
 
-            values = _live_values(record, healthy_node_ids)
+            values = _live_values(record, healthy_nodes)
             if not values:
                 continue
 
@@ -469,7 +469,23 @@ def build_zone_data(session, healthy_node_ids) -> ZoneData:
     return data
 
 
-def _live_values(record, healthy_node_ids):
+def _answer_node(answer):
+    """
+    The node an answer belongs to, as a name, or None if it is not tied to one.
+
+    By name because an id on a replicated row means whatever the receiving
+    database happens to have under that number, which is a different machine.
+    node_id is still read as a fallback for rows written before names were
+    stored, and on the node that authored those rows it is correct.
+    """
+    name = (getattr(answer, "node_name", None) or "").strip()
+    if name:
+        return name
+    node = getattr(answer, "node", None)
+    return node.name if node is not None else None
+
+
+def _live_values(record, healthy_nodes):
     """
     Which of a record's answers should be handed out right now.
 
@@ -486,7 +502,7 @@ def _live_values(record, healthy_node_ids):
         return [_as_target(enabled[0].value)]
 
     healthy = [a for a in enabled
-               if a.node_id is None or a.node_id in healthy_node_ids]
+               if _answer_node(a) is None or _answer_node(a) in healthy_nodes]
 
     if not healthy:
         if record.when_all_down == "serve_all":
@@ -533,9 +549,9 @@ def _own_address() -> str:
     return "0.0.0.0"
 
 
-def healthy_node_ids(session) -> set:
+def healthy_node_names(session) -> set:
     """
-    Which nodes are well enough to be handed out in a DNS answer.
+    Which nodes are well enough to be handed out in a DNS answer, by name.
 
     Stricter than the cluster page's idea of online, and deliberately so.  A
     node whose manager is answering but whose nginx is stopped will accept a
@@ -551,8 +567,13 @@ def healthy_node_ids(session) -> set:
             continue
         if not node.nginx_active:
             continue
-        out.add(node.id)
+        out.add(node.name)
     return out
+
+
+# The old name, kept so nothing calling it breaks quietly.  It returns names
+# now, which is the whole point of the change, so the name would be a lie.
+healthy_node_ids = healthy_node_names
 
 
 async def ensure_redirect(server=None):
@@ -662,7 +683,7 @@ def refresh(server=None):
     server = server or get_server()
     try:
         with session_scope() as session:
-            data = build_zone_data(session, healthy_node_ids(session))
+            data = build_zone_data(session, healthy_node_names(session))
         server.data = data
         return data
     except Exception as exc:

@@ -139,7 +139,7 @@ document.addEventListener("DOMContentLoaded", function () {
     }
 
     const healthyNames = NODES.filter(function (n) {
-      return HEALTHY.indexOf(n.id) !== -1;
+      return HEALTHY.indexOf(n.name) !== -1;
     }).map(function (n) { return n.name; });
 
     html += '<div class="small" style="margin-top:.75rem">' +
@@ -155,8 +155,8 @@ document.addEventListener("DOMContentLoaded", function () {
     // A node an answer is tied to that is not healthy is the interesting case,
     // because that is the answer being held back on purpose.
     let state = "unknown", why = "always handed out, not tied to a node";
-    if (a.node_id) {
-      const up = HEALTHY.indexOf(a.node_id) !== -1;
+    if (a.node_name) {
+      const up = HEALTHY.indexOf(a.node_name) !== -1;
       state = up ? "up" : "down";
       why = up ? "node is up, handed out"
                : "node is down, held back";

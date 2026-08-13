@@ -1109,6 +1109,23 @@ class GslbAnswer(Base):
     # Which node's health decides whether this answer is given out.  Null means
     # nothing is watching it, and it is always handed out.
     node_id = Column(Integer, ForeignKey("nodes.id", ondelete="SET NULL"))
+
+    # Which node this answer belongs to, by name.
+    #
+    # node_id above cannot be trusted once this row has travelled.  Node rows
+    # are deliberately not replicated, because each box keeps its own view of
+    # the cluster, so the ids are only meaningful in the database that issued
+    # them.  This row is config and does replicate, and on the other node the
+    # same id is a different machine.
+    #
+    # On a two node cluster the two mappings come out as exact mirror images:
+    # every answer points at the other node.  The result is that when one node
+    # dies, the survivor drops itself from the answer and keeps handing out the
+    # address of the box that is down.  That is worse than having no failover
+    # at all, and it only shows up during the failure it exists to handle.
+    #
+    # Names are unique across the fleet and mean the same thing everywhere.
+    node_name = Column(String(64))
     node = relationship("Node")
 
     # Lower goes first under the failover policy.  Ignored by the others.

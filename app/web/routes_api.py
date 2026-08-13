@@ -2755,7 +2755,11 @@ def _gslb_record_json(r):
         "when_all_down": r.when_all_down,
         "answers": [
             {"id": a.id, "value": a.value, "node_id": a.node_id,
-             "node_name": a.node.name if a.node else None,
+             # The stored name, not a lookup through node_id.  On any node
+             # other than the one that wrote the row, that id is a different
+             # machine, so resolving it here would report the wrong node.
+             "node_name": (a.node_name
+                           or (a.node.name if a.node else None)),
              "priority": a.priority, "enabled": a.enabled}
             for a in r.answers
         ],
@@ -2781,7 +2785,7 @@ async def list_gslb_zones(g: ObjectGuard = Depends(guard)):
             "stats": server.stats,
         },
         # Which nodes would be handed out right now.
-        "healthy_nodes": sorted(gslb.healthy_node_ids(g.session)),
+        "healthy_nodes": sorted(gslb.healthy_node_names(g.session)),
         # The nodes an answer can be tied to, with the address each one would
         # hand out.  The cluster page does not publish node ids and there is no
         # reason it should, but an answer is stored against one, so the picker
@@ -3098,8 +3102,13 @@ def _apply_gslb_answer(g, record, answer, payload):
         node_id = payload["node_id"]
         if node_id in (None, "", 0):
             answer.node_id = None
+            answer.node_name = None
         else:
-            answer.node_id = g.get(Node, node_id).id
+            node = g.get(Node, node_id)
+            answer.node_id = node.id
+            # The name is what survives the trip to another node.  The id is
+            # kept only so this box's own pages can resolve it without a join.
+            answer.node_name = node.name
 
     if "priority" in payload:
         try:
