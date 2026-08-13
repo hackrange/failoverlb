@@ -199,9 +199,21 @@
         </select>
         <div class="hint">
           Lists are made on the <a href="{{ base }}/zones">zones and access page</a>,
-          so more than one site can share one.  A list is also where a username
-          and password in front of the site lives, which is not an obvious place
-          to look for it.
+          so more than one site can share one.
+        </div>
+      </div>
+
+      {# Putting a password on a site is a thing people come here looking for,
+         and until now the only way to it was to guess that it lives inside an
+         access list on a different page.  The engine was finished and
+         unreachable, which is the same shape as the access list picker itself
+         before it existed. #}
+      <div class="field mt" id="basic-auth-box">
+        <label>A username and password in front of this site</label>
+        <div id="basic-auth-state" class="hint"></div>
+        <div class="mt">
+          <button class="btn small" type="button" id="add-password">
+            Put a password on this site</button>
         </div>
       </div>
 
@@ -496,6 +508,7 @@ serving.</p>
 <script nonce="{{ csp_nonce }}">
 document.addEventListener("DOMContentLoaded", function () {
   const HOST_ID = {{ host.id }};
+  const SITE_NAME = {{ host.name|tojson }};
   const BASE = document.querySelector('meta[name=nfm-base]').content;
   const saved = {{ host.setting_map()|tojson }};
 
@@ -743,6 +756,132 @@ document.addEventListener("DOMContentLoaded", function () {
     return acl.default_action === "allow";
   }
 
+  // ---- a password on this site ------------------------------------------
+  //
+  // The engine for this has always been there and lived entirely inside an
+  // access list, on a different page, which is not where anybody looks for
+  // "put a password on this site".  This says whether there is one and offers
+  // to make one without leaving.
+  function currentAcl() {
+    const chosen = document.getElementById("f-acl").value;
+    return ACLS.find(a => String(a.id) === String(chosen)) || null;
+  }
+
+  function describeBasicAuth() {
+    const line = document.getElementById("basic-auth-state");
+    const button = document.getElementById("add-password");
+    const acl = currentAcl();
+
+    if (acl && acl.basic_auth && acl.auth_users > 0) {
+      line.textContent = "Yes.  " + acl.auth_users + " login" +
+        (acl.auth_users === 1 ? "" : "s") + ", from the list " + acl.name +
+        ".  Manage them on the zones and access page.";
+      button.textContent = "Add another login";
+    } else if (acl && acl.basic_auth) {
+      // Turned on with nobody in it.  The renderer leaves the directives out
+      // on purpose, because nginx with an empty password file refuses every
+      // request, so the site would be unreachable rather than protected.
+      line.textContent = "The list " + acl.name + " has the password switch on " +
+        "and nobody in it, so nothing is asked for.  Add a login and it starts " +
+        "working.";
+      button.textContent = "Add a login";
+    } else if (acl) {
+      line.textContent = "No.  " + acl.name + " decides who can reach this site " +
+        "by address, and asks for no password.";
+      button.textContent = "Add a password as well";
+    } else {
+      line.textContent = "No.  Anybody who can reach this site gets it.";
+      button.textContent = "Put a password on this site";
+    }
+  }
+
+  document.getElementById("add-password").addEventListener("click", function () {
+    const acl = currentAcl();
+    const httpsOn = document.getElementById("f-https").checked;
+    const haveCert = !!document.getElementById("f-cert").value;
+    const plain = !httpsOn || !haveCert;
+
+    NFM.openModal("A password in front of " + SITE_NAME,
+      acl ? "Added to the list " + acl.name : "This makes a new access list for it",
+      (plain
+        ? '<div class="notice warn"><svg viewBox="0 0 16 16" fill="currentColor">' +
+          '<path d="M8 1.5 15 14H1L8 1.5zm0 3.2L3.4 12.8h9.2L8 4.7zM7.3 7h1.4v3H7.3V7z' +
+          'm0 3.7h1.4V12H7.3v-1.3z"/></svg><div>' +
+          "<strong>This site is not on https.</strong>  A basic auth password " +
+          "goes over the wire in clear text, near enough, so on plain http " +
+          "anybody watching the network reads it.  Attach a certificate and " +
+          "turn https on before relying on this for anything." +
+          "</div></div>"
+        : "") +
+      '<div class="field mt"><label for="ba-user">Username</label>' +
+      '<input type="text" id="ba-user" autocomplete="off" autofocus></div>' +
+      '<div class="field"><label for="ba-pass">Password</label>' +
+      '<input type="password" id="ba-pass" autocomplete="new-password">' +
+      '<div class="hint">At least eight characters.  It is hashed before it is ' +
+      "stored and never shown again, the same as any other password here.</div></div>" +
+      (acl ? "" :
+        '<div class="field"><label for="ba-realm">What the browser calls it</label>' +
+        '<input type="text" id="ba-realm" value="Restricted">' +
+        '<div class="hint">Shown in the browser\'s login box.</div></div>' +
+        '<div class="hint">This makes an access list with no address rules on it, ' +
+        "so everybody can still reach the site and everybody is asked for the " +
+        "password.  Add address rules later on the zones and access page if you " +
+        "want both.</div>") +
+      '<div class="mt"><button class="btn primary" id="ba-save">Save</button></div>');
+
+    document.getElementById("ba-save").addEventListener("click", async function () {
+      const username = document.getElementById("ba-user").value.trim();
+      const password = document.getElementById("ba-pass").value;
+      if (!username) { NFM.toast("Give it a username", "bad"); return; }
+      if (password.length < 8) {
+        NFM.toast("That password is under eight characters", "bad"); return;
+      }
+
+      try {
+        let target = acl;
+        if (!target) {
+          // Named after the site so it is obvious later what it belongs to,
+          // and with default_action allow so it filters nobody by address:
+          // the password is the whole of the rule.
+          const made = await NFM.api("/access-lists", {
+            method: "POST",
+            body: {
+              name: (SITE_NAME.replace(/[^A-Za-z0-9._-]/g, "_") + "_login").slice(0, 60),
+              description: "A password in front of " + SITE_NAME,
+              default_action: "allow",
+              include_management: false,
+              basic_auth_enabled: true,
+              basic_auth_realm: document.getElementById("ba-realm").value.trim() || "Restricted"
+            }
+          });
+          target = {id: made.id, name: made.name};
+        }
+
+        await NFM.api("/access-lists/" + target.id, {
+          method: "PUT",
+          body: {
+            basic_auth_enabled: true,
+            add_user: {username: username, password: password}
+          }
+        });
+
+        // Attach it and save, so the person is not left with a list made and
+        // nothing using it, which is the state that reads as "it did not work".
+        await NFM.api("/hosts/" + HOST_ID, {
+          method: "PUT",
+          body: {access_list_id: target.id}
+        });
+      } catch (err) {
+        NFM.toast(err.message, "bad");
+        return;
+      }
+
+      NFM.closeModal();
+      NFM.toast("Saved.  Apply config to put it in front of the site.", "ok");
+      setTimeout(function () { window.location.reload(); }, 1200);
+    });
+  });
+
   function describeAcl() {
     const box = document.getElementById("acl-effect");
     const list = document.getElementById("acl-order");
@@ -754,6 +893,10 @@ document.addEventListener("DOMContentLoaded", function () {
     if (!acl) {
       box.hidden = true;
       warn.hidden = true;
+      // Still has to run: "no list at all" is a state the password line has
+      // something to say about, and returning early left it blank on every
+      // site that had no access list, which is most of them.
+      describeBasicAuth();
       return;
     }
 
@@ -783,6 +926,8 @@ document.addEventListener("DOMContentLoaded", function () {
 
     // A deny that sits under an allow covering the same ground never runs.
     // Worth saying, because the page above makes it look like it will.
+    describeBasicAuth();
+
     const shadowed = acl.deny.filter(d => acl.allow.some(a => a === d || inRange(d.split("/")[0], a)));
 
     const reachable = aclReachable(acl);

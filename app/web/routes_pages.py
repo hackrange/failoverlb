@@ -583,6 +583,11 @@ def _acl_summary(acl) -> dict:
         "include_management": bool(acl.include_management),
         "use_real_ip": bool(acl.use_real_ip),
         "basic_auth": bool(acl.basic_auth_enabled),
+        # How many logins it actually holds.  Turned on with nobody in it is a
+        # list the renderer deliberately writes no auth_basic for, because
+        # nginx would then refuse every request for want of a valid user, and
+        # the site page should say that rather than claim it is protected.
+        "auth_users": len(acl.auth_users()),
     }
 
 

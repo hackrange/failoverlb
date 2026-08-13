@@ -878,6 +878,55 @@ check("one we hold the material for knows it can rebuild itself",
       "back from the database instead of waiting for a person")
 
 print()
+print("  files nginx workers have to read")
+# Two of these now, a week apart.  The nginx master reads config while it is
+# still root, so 0640 root is right for all of it and is what keeps the backend
+# tokens off a compromised worker.  A worker has dropped to www-data by the
+# time it opens anything at request time, and 0640 there is not a permission
+# error anybody can see: an error page comes back as 403 instead of the real
+# status, and a htpasswd makes every password attempt a 500 with the reason in
+# a log about a file nobody has heard of.  Basic auth had never worked once.
+
+
+def _modes_under(folder):
+    answer = agent({"verb": "list_dir", "path": f"/etc/nginx/nginxmgr/{folder}"})
+    if not answer.get("ok"):
+        return None
+    return {e["name"]: e.get("mode")
+            for e in (answer.get("data") or {}).get("entries", [])
+            if not e.get("is_dir")}
+
+
+_conf_modes = _modes_under("sites") or {}
+if not _conf_modes:
+    skip("staged config stays root only",
+         "no site files on this node, which is normal for a standby")
+else:
+    # World readable is the thing to catch.  Group readable is fine here
+    # because the group is root, and testing for it flags 0640, which is
+    # exactly what these are supposed to be.
+    _leaky = [n for n, m in _conf_modes.items() if m is None or m & 0o004]
+    check("staged config is not world readable", not _leaky,
+          f"these carry backend tokens and htpasswd paths: {_leaky}")
+
+for _folder, _why in (
+        ("auth", "auth_basic is checked by a worker, so a root only htpasswd "
+                 "makes every password attempt a 500"),
+        ("errorpages", "an unreadable error page makes nginx answer 403 and "
+                       "throw away the status it meant to send")):
+    _modes = _modes_under(_folder)
+    if _modes is None:
+        skip(f"{_folder} is readable by an nginx worker",
+             f"nothing in {_folder} on this node to look at")
+    elif not _modes:
+        skip(f"{_folder} is readable by an nginx worker",
+             f"{_folder} is empty on this node")
+    else:
+        _bad = [n for n, m in _modes.items() if m is None or not m & 0o004]
+        check(f"{_folder} is readable by an nginx worker", not _bad,
+              f"{_why}.  Not readable: {_bad}")
+
+print()
 print("  reading a backend's own numbers")
 # These come off somebody else's server, in a format we do not control, and
 # every one of these was a decision rather than an implementation detail.

@@ -562,9 +562,20 @@ def _staged_mode(rel_path):
 
     Worth knowing that a *missing* page does not do this.  nginx falls back to
     its own page and keeps the real status.  Only an unreadable one lies.
+
+    The password files are the same story found a second time.  auth_basic is
+    checked by a worker as well, so a 0640 htpasswd meant every site with a
+    password on it answered 401, then 500 to anybody who actually typed the
+    password, with "permission denied" in the error log about a file the person
+    had never heard of.  Basic auth had never worked once.
+
+    These two are the only content we stage.  Everything else here is config,
+    read by the master while it is still root, and those stay 0640 because they
+    carry backend tokens.  The password hashes in a htpasswd are bcrypt, which
+    is what that format is for, so world readable is what the format expects.
     """
     first = Path(rel_path).parts[0] if Path(rel_path).parts else ""
-    return 0o644 if first == "errorpages" else 0o640
+    return 0o644 if first in ("errorpages", "auth") else 0o640
 
 
 def v_write_staging(req):
@@ -967,6 +978,12 @@ def v_list_dir(req):
             "is_dir": child.is_dir(),
             "size": st.st_size,
             "modified": st.st_mtime,
+            # The permission bits, because a listing without them cannot answer
+            # the question that has now bitten twice: whether a file an nginx
+            # worker has to open at request time is readable by www-data.
+            # Both times the symptom was a status code that lied and a log line
+            # about a file nobody had heard of.
+            "mode": st.st_mode & 0o7777,
         })
     return {"path": str(p), "entries": entries}
 
