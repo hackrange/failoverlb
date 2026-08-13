@@ -526,9 +526,25 @@ map $cookie_{cookie} $sticky_{_safe_var(pool.name)} {{
                 continue
             self.files[f"upstreams/{_safe_name(pool.name)}.conf"] = self._render_pool(pool)
 
-    def _render_pool(self, pool) -> str:
+    def _render_pool(self, pool, stream=False) -> str:
+        """
+        One upstream block.
+
+        `stream` renders the same pool for the stream context, which takes a
+        smaller set of directives than http does.  Checked against real nginx
+        rather than assumed: ip_hash, keepalive and fair are all refused there,
+        while zone, least_conn, hash, random and random two least_conn are
+        fine.  Writing an http upstream into a stream block gets "directive is
+        not allowed here", which stops the whole config loading over a setting
+        somebody made on a page that never mentioned streams.
+        """
         cfg = pool.setting_map()
-        lines = [HEADER.format(detail=f"Backend pool: {pool.name}")]
+        # The stream copy goes inside a file that already carries the header,
+        # and repeating the whole "do not edit this" preamble once per pool
+        # buries the config it is supposed to be introducing.
+        lines = [] if stream else [HEADER.format(detail=f"Backend pool: {pool.name}")]
+        if stream:
+            lines.append(f"# Backend pool: {pool.name}")
 
         if pool.description:
             lines.append(f"# {pool.description}")
@@ -539,18 +555,49 @@ map $cookie_{cookie} $sticky_{_safe_var(pool.name)} {{
         # worker process keeps its own idea of which backends are up, so with 16
         # workers a backend can be marked down in one and fine in another.
         if pool.zone_size:
-            lines.append(f"    zone {_safe_name(pool.name)}_zone {pool.zone_size};")
+            # A different name for the stream copy, and it has to be different.
+            # nginx keeps one shared memory zone namespace for the whole
+            # config, not one per block, so a pool used by a site and by a
+            # stream declares the same zone twice for different uses and nginx
+            # refuses the lot: "already declared for a different use".  That is
+            # every apply on every node failing because somebody pointed a
+            # stream at a pool a site was already using, which is the ordinary
+            # thing to do.
+            suffix = "_stream_zone" if stream else "_zone"
+            lines.append(
+                f"    zone {_safe_name(pool.name)}{suffix} {pool.zone_size};")
 
         # Load balancing method.  Only the ones the free version actually has.
         method = pool.lb_method
-        if cfg.get("sticky_enabled"):
+        if cfg.get("sticky_enabled") and stream:
+            # Sticky hashes on a variable a map block sets, and maps live in
+            # http.  A stream cannot see it, so this falls back rather than
+            # writing a hash on a variable that is always empty, which would
+            # send every connection to the same backend and look like the load
+            # balancing had broken.
+            lines.append("    # Sticky sessions need a cookie, and there are no")
+            lines.append("    # cookies on a raw socket.  Balancing on the client")
+            lines.append("    # address instead, which is the nearest thing.")
+            lines.append("    hash $remote_addr consistent;")
+        elif cfg.get("sticky_enabled"):
             var = f"$sticky_{_safe_var(pool.name)}"
             consistent = " consistent" if cfg.get("sticky_consistent", True) else ""
             lines.append(f"    hash {var}{consistent};")
         elif method == "least_conn":
             lines.append("    least_conn;")
+        elif method == "ip_hash" and stream:
+            # Same intent, different spelling.  stream has no ip_hash and would
+            # refuse the config outright.
+            lines.append("    hash $remote_addr consistent;")
         elif method == "ip_hash":
             lines.append("    ip_hash;")
+        elif method == "hash" and stream and "$" in (pool.hash_key or "$request_uri") \
+                and not _stream_has_variable(pool.hash_key or "$request_uri"):
+            # The key names something only http knows about, like $request_uri.
+            # There is no request here to take it from.
+            lines.append(f"    # {pool.hash_key} means nothing on a raw socket, so")
+            lines.append("    # this balances on the client address instead.")
+            lines.append("    hash $remote_addr consistent;")
         elif method == "hash":
             key = pool.hash_key or "$request_uri"
             consistent = " consistent" if pool.hash_consistent else ""
@@ -559,6 +606,8 @@ map $cookie_{cookie} $sticky_{_safe_var(pool.name)} {{
             lines.append("    random;")
         elif method == "random_two":
             lines.append("    random two least_conn;")
+        elif method == "fair" and stream:
+            lines.append("    # fair is an http only module, so this is round robin.")
         elif method == "fair" and self.has_module("upstream_fair"):
             lines.append("    fair;")
         # round_robin is the default and takes no directive.
@@ -593,7 +642,10 @@ map $cookie_{cookie} $sticky_{_safe_var(pool.name)} {{
                 if m.enabled:
                     lines.append(self._render_member(pool, m, force_up=True))
 
-        if pool.keepalive:
+        # keepalive is http only.  nginx refuses it in a stream upstream, and
+        # it would mean nothing there anyway: a stream connection is the thing
+        # being proxied, not a request on a pooled one.
+        if pool.keepalive and not stream:
             lines.append("")
             lines.append(f"    keepalive {pool.keepalive};")
             if pool.keepalive_requests:
@@ -1742,57 +1794,142 @@ map $cookie_{cookie} $sticky_{_safe_var(pool.name)} {{
     # =========================================================================
 
     def _render_streams(self, streams, certs, access_lists):
-        if not streams or not self.has_module("stream"):
+        """
+        TCP and UDP proxying, as one file holding the whole stream block.
+
+        Everything else we generate goes inside http, and stream is a sibling
+        of http rather than something in it, so this is the one thing that
+        cannot be another include in that list.  nginx.conf gets a second
+        include at the top level, and that include points here.
+
+        The whole block in one file, rather than a folder of pieces included
+        from a `stream { }` written into nginx.conf.  Two reasons.  A block with
+        nothing in it still has to be accepted by nginx on a fleet that uses no
+        streams, and the agent's tidy up of an out of date include list only
+        knows how to remove include lines, so a brace it had written into
+        nginx.conf would be left behind on its own and nothing would load at
+        all.  Here the braces live in a generated file that is replaced whole.
+
+        The upstreams are written in here too, and they have to be.  http and
+        stream keep separate upstream namespaces, so a pool declared for the
+        sites is not visible to a stream: nginx says `no port in upstream`,
+        which reads like the pool is malformed rather than like it is in the
+        wrong half of the config.  The same name in both places is fine and is
+        what happens when one pool serves a site and a stream.
+        """
+        if not self.has_module("stream"):
+            if streams:
+                log.warning(
+                    "this nginx has no stream module, leaving %s stream(s) out",
+                    len(streams))
+            return
+
+        live = [s for s in (streams or []) if s.enabled]
+        if not live:
             return
 
         cert_by_id = {c.id: c for c in certs}
+        acl_by_id = {a.id: a for a in access_lists}
 
-        for s in streams:
-            if not s.enabled:
-                continue
+        bodies = []
+        pools_used = {}
 
-            lines = [HEADER.format(detail=f"Stream proxy: {s.name}")]
-            lines.append("server {")
-
-            listen = f"    listen {s.listen_address}:{s.listen_port}"
-            if s.udp:
-                listen += " udp"
-            if s.proxy_protocol:
-                listen += " proxy_protocol"
-            lines.append(listen + ";")
-
-            if s.ssl_enabled and s.cert_id in cert_by_id:
-                cert = cert_by_id[s.cert_id]
-                cert_dir = self._cert_path(cert)
-                lines.append(f"    ssl_certificate     {cert_dir}/fullchain.pem;")
-                lines.append(f"    ssl_certificate_key {cert_dir}/privkey.pem;")
-                lines.append("    ssl_protocols TLSv1.2 TLSv1.3;")
-
+        for s in live:
+            # A pool with nothing in it is fatal here in a way it is not for a
+            # site.  A site can answer 503 and say why; a raw socket has no
+            # status code to send, so there is nothing to degrade to.  The
+            # stream comes out entirely rather than naming an upstream that is
+            # not there, which would stop nginx loading and take the whole
+            # fleet's config with it.
             if s.pool and not self._pool_has_servers(s.pool):
-                # A stream has no way to answer politely, there is no status
-                # code to send on a raw socket.  So this one gets left out
-                # entirely rather than written pointing at an upstream that is
-                # not there, which would stop nginx loading.
                 log.warning(
                     "stream %s uses pool %s which has no backends, leaving the "
-                    "stream out", s.name, s.pool.name,
-                )
+                    "stream out", s.name, s.pool.name)
+                continue
+            if not s.pool and not s.custom_config:
+                log.warning("stream %s has no pool and nothing hand written, "
+                            "leaving it out", s.name)
                 continue
 
             if s.pool:
-                lines.append(f"    proxy_pass {_safe_name(s.pool.name)};")
+                pools_used[s.pool.id] = s.pool
 
-            cfg = s.setting_map()
-            for key in ("proxy_timeout", "proxy_connect_timeout"):
-                if cfg.get(key):
-                    lines.append(f"    {key} {esc(cfg[key])};")
+            bodies.append(self._render_stream_server(s, cert_by_id, acl_by_id))
 
-            if s.custom_config:
-                for line in s.custom_config.splitlines():
-                    lines.append(f"    {line}")
+        if not bodies:
+            return
 
-            lines.append("}")
-            self.files[f"streams/{_safe_name(s.name)}.conf"] = "\n".join(lines)
+        lines = [HEADER.format(detail="TCP and UDP proxying.")]
+        lines.append("stream {")
+        lines.append("")
+        lines.append("    # Upstreams again, because stream cannot see the ones")
+        lines.append("    # declared for http.  Same pools, separate namespace.")
+        for pool in sorted(pools_used.values(), key=lambda p: p.name):
+            for line in self._render_pool(pool, stream=True).splitlines():
+                lines.append(f"    {line}" if line else "")
+            lines.append("")
+
+        lines.extend(bodies)
+        lines.append("}")
+
+        self.files["stream/nfm-stream.conf"] = "\n".join(lines)
+
+    def _render_stream_server(self, s, cert_by_id, acl_by_id) -> list:
+        lines = [f"    # {s.name}", "    server {"]
+
+        listen = f"        listen {s.listen_address}:{s.listen_port}"
+        # udp is on the listen line, and the protocol column says the same
+        # thing, so either one being set means udp.  They drifted apart once
+        # already because the page wrote one and the renderer read the other.
+        if s.udp or s.protocol == "udp":
+            listen += " udp"
+        if s.proxy_protocol:
+            listen += " proxy_protocol"
+        lines.append(listen + ";")
+
+        if s.ssl_enabled and s.cert_id in cert_by_id:
+            cert = cert_by_id[s.cert_id]
+            usable = getattr(cert, "usable", True)
+            if usable:
+                cert_dir = self._cert_path(cert)
+                lines.append("        ssl_preread off;")
+                lines.append(f"        ssl_certificate     {cert_dir}/fullchain.pem;")
+                lines.append(f"        ssl_certificate_key {cert_dir}/privkey.pem;")
+                lines.append("        ssl_protocols TLSv1.2 TLSv1.3;")
+            else:
+                # Same rule as a site: never point nginx at certificate files
+                # that are not there.  It refuses to load and then nothing can
+                # be applied anywhere.
+                lines.append("        # The certificate for this stream is not on")
+                lines.append("        # this node, so it is carrying plain tcp until")
+                lines.append("        # the files turn up.")
+
+        # Who is allowed to connect.  The stream module has allow and deny of
+        # its own, with the same first match wins rule as http.
+        acl = acl_by_id.get(getattr(s, "access_list_id", None))
+        if acl is not None:
+            for entry in acl.allows():
+                lines.append(f"        allow {entry};")
+            for entry in acl.denies():
+                lines.append(f"        deny {entry};")
+            if acl.default_action == "deny":
+                lines.append("        deny all;")
+
+        if s.pool:
+            lines.append(f"        proxy_pass {_safe_name(s.pool.name)};")
+
+        cfg = s.setting_map()
+        for key in ("proxy_timeout", "proxy_connect_timeout"):
+            if cfg.get(key):
+                lines.append(f"        {key} {esc(cfg[key])};")
+
+        if s.custom_config:
+            for line in s.custom_config.splitlines():
+                lines.append(f"        {line}")
+
+        lines.append("    }")
+        lines.append("")
+        return "\n".join(lines)
 
 
 # ==============================================================================
@@ -1814,6 +1951,23 @@ def _is_bare_address(value: str) -> bool:
         return True
     except ValueError:
         return False
+
+
+# The handful of nginx variables that exist in both http and stream.  A hash
+# key naming anything else is an http variable, and in a stream it is simply
+# empty, which quietly sends every connection to one backend.
+_STREAM_VARIABLES = (
+    "$remote_addr", "$remote_port", "$binary_remote_addr",
+    "$server_addr", "$server_port", "$proxy_protocol_addr",
+    "$proxy_protocol_port", "$ssl_preread_server_name",
+    "$hostname", "$time_iso8601", "$time_local",
+)
+
+
+def _stream_has_variable(key: str) -> bool:
+    """Is every variable in this hash key one a stream actually has."""
+    used = re.findall(r"\$[A-Za-z0-9_]+", str(key))
+    return bool(used) and all(v in _STREAM_VARIABLES for v in used)
 
 
 def _safe_name(name: str) -> str:

@@ -2583,6 +2583,232 @@ async def delete_error_image(template_id: str, image_id: str,
     return _error_template_detail(g.session, template)
 
 
+# ==============================================================================
+# Streams, which is plain TCP and UDP with no http anywhere
+# ==============================================================================
+
+STREAM_FIELDS = {
+    "name", "enabled", "listen_port", "listen_address", "protocol",
+    "proxy_protocol", "pool_id", "ssl_enabled", "cert_id", "settings",
+    "access_list_id", "custom_config",
+}
+
+# Ports the manager itself answers on.  Handing one to a stream takes the GUI
+# away from whoever is doing it, from inside the GUI, which is a bad afternoon.
+def _reserved_ports():
+    settings = get_settings()
+    return {
+        settings.gui_port: "the GUI",
+        settings.peer_port: "the port the nodes talk to each other on",
+        7081: "the nginx status endpoint",
+    }
+
+
+def _stream_json(s):
+    return {
+        "id": s.id,
+        "name": s.name,
+        "enabled": s.enabled,
+        "listen_address": s.listen_address,
+        "listen_port": s.listen_port,
+        "protocol": "udp" if (s.udp or s.protocol == "udp") else "tcp",
+        "proxy_protocol": s.proxy_protocol,
+        "pool_id": s.pool_id,
+        "pool_name": s.pool.name if s.pool else None,
+        "ssl_enabled": s.ssl_enabled,
+        "cert_id": s.cert_id,
+        "access_list_id": s.access_list_id,
+        "settings": s.setting_map(),
+        "custom_config": s.custom_config,
+    }
+
+
+@router.get("/streams")
+async def list_streams(g: ObjectGuard = Depends(guard)):
+    have_stream = True
+    try:
+        have_stream = fleet_capabilities().has("stream")
+    except Exception:
+        pass
+    return {
+        "streams": [_stream_json(s) for s in g.list(StreamServer)],
+        # Said out loud rather than left to a config that silently does nothing.
+        # nginx has to be built --with-stream and the installer does that, but a
+        # binary from somewhere else may not be.
+        "supported": have_stream,
+    }
+
+
+@router.get("/streams/{stream_id}")
+async def get_stream(stream_id: str, g: ObjectGuard = Depends(guard)):
+    return _stream_json(g.get(StreamServer, stream_id))
+
+
+@router.post("/streams")
+async def create_stream(request: Request, g: ObjectGuard = Depends(changing)):
+    g.require("edit_sites")
+    payload = pick_fields(await request.json(), STREAM_FIELDS)
+
+    name = validate_name(payload.get("name"), "stream name")
+    claim_name(g.session, StreamServer, name, "stream")
+
+    stream = StreamServer(name=name, listen_port=0)
+    _apply_stream_fields(g, stream, payload)
+    g.session.add(stream)
+    g.session.commit()
+
+    audit.record("stream.create", user=g.user, object_type="stream",
+                 object_name=name, changes=payload)
+    return _stream_json(stream)
+
+
+@router.put("/streams/{stream_id}")
+async def update_stream(stream_id: str, request: Request,
+                        g: ObjectGuard = Depends(changing)):
+    stream = g.get(StreamServer, stream_id, "edit_sites")
+    payload = pick_fields(await request.json(), STREAM_FIELDS)
+
+    before = _stream_json(stream)
+    _apply_stream_fields(g, stream, payload)
+    g.session.commit()
+
+    audit.record("stream.update", user=g.user, object_type="stream",
+                 object_name=stream.name,
+                 changes=audit.diff_fields(before, _stream_json(stream)))
+    return _stream_json(stream)
+
+
+@router.delete("/streams/{stream_id}")
+async def delete_stream(stream_id: str, g: ObjectGuard = Depends(changing)):
+    stream = g.get(StreamServer, stream_id, "edit_sites")
+    name = stream.name
+    g.session.delete(stream)
+    g.session.commit()
+
+    audit.record("stream.delete", user=g.user, object_type="stream",
+                 object_name=name)
+    return {"ok": True, "deleted": name}
+
+
+def _apply_stream_fields(g, stream, payload):
+    if "name" in payload:
+        name = validate_name(payload["name"], "stream name")
+        claim_name(g.session, StreamServer, name, "stream", exclude_id=stream.id)
+        stream.name = name
+
+    if "protocol" in payload:
+        proto = str(payload["protocol"]).lower()
+        if proto not in ("tcp", "udp"):
+            raise HTTPException(status_code=400, detail="it is tcp or udp")
+        stream.protocol = proto
+        # The model carries both a protocol column and a udp flag, and the
+        # renderer reads either one.  Setting them together here is the only
+        # thing stopping them disagreeing, which is a stream that says udp on
+        # the page and listens on tcp.
+        stream.udp = proto == "udp"
+
+    if "listen_port" in payload:
+        try:
+            port = int(payload["listen_port"])
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="that is not a port number")
+        if not 1 <= port <= 65535:
+            raise HTTPException(status_code=400, detail="a port is 1 to 65535")
+
+        reserved = _reserved_ports()
+        if port in reserved:
+            raise HTTPException(
+                status_code=400,
+                detail=(f"port {port} is {reserved[port]}.  Taking it would cut "
+                        f"you off from the thing you are using to take it."))
+
+        # A site already listening there is the other way to lose a service, and
+        # nginx would refuse to start rather than quietly picking one, so the
+        # whole fleet stops applying anything until somebody spots it.
+        clash = g.session.query(VirtualHost).filter(
+            VirtualHost.enabled.is_(True)).all()
+        for host in clash:
+            if host.listen_http and host.http_port == port:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(f"the site {host.name} already listens on {port}.  "
+                            f"nginx will not start with two things on one port."))
+            if host.listen_https and host.https_port == port:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(f"the site {host.name} already listens on {port} for "
+                            f"https.  nginx will not start with two things on one port."))
+        stream.listen_port = port
+
+    if "listen_address" in payload:
+        addr = str(payload["listen_address"] or "0.0.0.0").strip()
+        if addr not in ("0.0.0.0", "[::]", "::"):
+            try:
+                ipaddress.ip_address(addr.strip("[]"))
+            except ValueError:
+                raise HTTPException(
+                    status_code=400,
+                    detail="that has to be an address on this box, or 0.0.0.0 for all of them")
+        stream.listen_address = addr
+
+    # Two streams on one address and port is the same refusal as above, and
+    # worth catching here rather than at apply time on somebody else's node.
+    port = stream.listen_port
+    proto = "udp" if stream.udp else "tcp"
+    for other in g.session.query(StreamServer).all():
+        if other.id == stream.id or not other.enabled:
+            continue
+        other_proto = "udp" if (other.udp or other.protocol == "udp") else "tcp"
+        if (other.listen_port == port and other_proto == proto
+                and other.listen_address == stream.listen_address):
+            raise HTTPException(
+                status_code=409,
+                detail=(f"{other.name} already listens on "
+                        f"{stream.listen_address}:{port} for {proto}."))
+
+    for field, model in (("pool_id", Pool), ("cert_id", Certificate),
+                         ("access_list_id", AccessList)):
+        if field in payload:
+            value = payload[field]
+            if value in (None, "", 0):
+                setattr(stream, field, None)
+            else:
+                setattr(stream, field, g.get(model, value).id)
+
+    for field in ("enabled", "proxy_protocol", "ssl_enabled"):
+        if field in payload:
+            setattr(stream, field, bool(payload[field]))
+
+    if "custom_config" in payload:
+        stream.custom_config = payload["custom_config"] or None
+
+    if "settings" in payload:
+        raw = payload["settings"] or {}
+        if not isinstance(raw, dict):
+            raise HTTPException(status_code=400, detail="settings has to be an object")
+        clean = {}
+        # A short list on purpose.  The catalog is written for http and most of
+        # it means nothing on a raw socket, so rather than offer settings that
+        # quietly do nothing, a stream takes these two and hand written config
+        # for anything else.
+        for key in ("proxy_timeout", "proxy_connect_timeout"):
+            value = str(raw.get(key) or "").strip()
+            if not value:
+                continue
+            if not re.fullmatch(r"\d+[smhd]?", value):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{key} looks like 60s, 5m or 1h")
+            clean[key] = value
+        stream.settings = json.dumps(clean)
+
+    if stream.ssl_enabled and not stream.cert_id:
+        raise HTTPException(
+            status_code=400,
+            detail=("a stream doing TLS needs a certificate.  Pick one, or turn "
+                    "TLS off and let the backend handle it."))
+
+
 # ---- access lists ------------------------------------------------------------
 
 @router.post("/access-lists")

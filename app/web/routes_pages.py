@@ -655,6 +655,20 @@ async def zones_page(request: Request, db: DBSession = Depends(get_db)):
     return response
 
 
+@router.get("/streams", response_class=HTMLResponse)
+async def streams_page(request: Request, db: DBSession = Depends(get_db)):
+    user = require_page_user(request, db)
+    token = ensure_csrf_token(request)
+    response = render(
+        request, "streams.html", user, csrf_token=token,
+        pools=db.query(Pool).order_by(Pool.name).all(),
+        certs=db.query(Certificate).order_by(Certificate.name).all(),
+        access_lists=db.query(AccessList).order_by(AccessList.name).all(),
+    )
+    issue_csrf_token(response, token)
+    return response
+
+
 @router.get("/error-pages", response_class=HTMLResponse)
 async def error_pages_page(request: Request, db: DBSession = Depends(get_db)):
     user = require_page_user(request, db)

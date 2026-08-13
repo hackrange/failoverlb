@@ -34,7 +34,8 @@ from app.core.capabilities import fleet_capabilities
 from app.db import session_scope
 from app.models import (
     CacheZone, Certificate, ConnLimitZone, ErrorPageImage, ErrorPageTemplate,
-    Location, MemberState, Pool, PoolMember, VirtualHost, json_set,
+    Location, MemberState, Pool, PoolMember, StreamServer, VirtualHost,
+    json_set,
 )
 from app.web.routes_api import render_current
 
@@ -874,6 +875,108 @@ check("one we hold the material for knows it can rebuild itself",
       _ready.has_material() and _ready.usable,
       "this is what lets a node that turns up without the files write them "
       "back from the database instead of waiting for a person")
+
+print()
+print("  tcp and udp proxying")
+# Three things here were found by running real nginx against real output, and
+# none of them is visible from reading the code.
+#
+# http and stream keep separate upstream namespaces, so a pool declared for the
+# sites is invisible to a stream.  nginx says "no port in upstream", which reads
+# like the pool is malformed rather than like it is in the wrong half.
+#
+# stream refuses ip_hash, keepalive and fair outright.  A pool with any of those
+# on it, pointed at a stream, stops the whole config loading.
+#
+# And shared memory zone names are one namespace across the entire config, not
+# one per block, so a pool used by a site and a stream declared its zone twice
+# and nginx refused the lot.
+
+_st_pool = Pool(name="stream_pool", lb_method="ip_hash", keepalive=32,
+                zone_size="64k", settings="{}")
+_st_pool.id = 921
+_st_pool.members = [PoolMember(address="192.0.2.30", port=5432,
+                               enabled=True, admin_state="up")]
+
+_st_site = VirtualHost(name="shared.invalid", enabled=True,
+                       server_names='["shared.invalid"]', listen_http=True,
+                       listen_https=False, force_https=False, http_port=80,
+                       mode="proxy", settings="{}")
+_st_site.id = 921
+_st_site.pool_id = 921
+_st_site.pool = _st_pool
+
+_st = StreamServer(name="db", enabled=True, listen_port=15432,
+                   listen_address="0.0.0.0", protocol="tcp", udp=False,
+                   proxy_protocol=False, settings="{}")
+_st.id = 921
+_st.pool_id = 921
+_st.pool = _st_pool
+
+_st_files = Renderer().render_all([_st_site], [_st_pool], [], [], [], [], [], [],
+                                  [_st])
+_st_conf = _st_files.get("stream/nfm-stream.conf", "")
+
+check("a stream renders into its own top level file",
+      bool(_st_conf) and _st_conf.count("stream {") == 1,
+      "stream is a sibling of http, not something inside it, so it cannot be "
+      "another file in the include list that goes in the http block")
+
+check("the pool is declared again inside the stream block",
+      "upstream stream_pool {" in _st_conf,
+      "http and stream keep separate upstream namespaces, so a stream cannot "
+      "see the upstream the sites use and nginx says 'no port in upstream'")
+
+check("the stream copy gets its own shared memory zone name",
+      "stream_pool_stream_zone" in _st_conf
+      and "zone stream_pool_zone" not in _st_conf,
+      "shared memory zones are one namespace for the whole config, so the same "
+      "name in both halves is refused and every apply fails everywhere")
+
+check("ip_hash is translated rather than written into a stream",
+      "ip_hash" not in _st_conf and "hash $remote_addr" in _st_conf,
+      "stream refuses ip_hash outright, so a pool with it on stops the whole "
+      "config loading the moment a stream points at it")
+
+check("keepalive is left out of the stream copy",
+      "keepalive" not in _st_conf,
+      "stream refuses keepalive, and it would mean nothing there anyway")
+
+check("the http upstream still has what it should",
+      "ip_hash;" in _st_files.get("upstreams/stream_pool.conf", "")
+      and "keepalive 32;" in _st_files.get("upstreams/stream_pool.conf", ""),
+      "translating for the stream must not quietly change what the sites get")
+
+_st_empty_pool = Pool(name="empty_stream_pool", lb_method="round_robin", settings="{}")
+_st_empty_pool.id = 922
+_st_empty_pool.members = []
+_st_broken = StreamServer(name="nowhere", enabled=True, listen_port=15999,
+                          listen_address="0.0.0.0", protocol="tcp", settings="{}")
+_st_broken.id = 922
+_st_broken.pool_id = 922
+_st_broken.pool = _st_empty_pool
+
+_st_files2 = Renderer().render_all([], [_st_pool, _st_empty_pool], [], [], [], [],
+                                   [], [], [_st, _st_broken])
+check("a stream whose pool is empty is left out rather than written",
+      "15999" not in _st_files2.get("stream/nfm-stream.conf", ""),
+      "a raw socket has no status code to answer with, so there is nothing to "
+      "degrade to, and naming an upstream that is not there stops nginx loading")
+
+check("the other streams still render alongside it",
+      "15432" in _st_files2.get("stream/nfm-stream.conf", ""),
+      "one bad stream must not take the rest with it")
+
+_st_off = StreamServer(name="off", enabled=False, listen_port=15998,
+                       listen_address="0.0.0.0", protocol="tcp", settings="{}")
+_st_off.id = 923
+_st_off.pool_id = 921
+_st_off.pool = _st_pool
+_st_files3 = Renderer().render_all([], [_st_pool], [], [], [], [], [], [], [_st_off])
+check("no stream file at all when nothing is enabled",
+      "stream/nfm-stream.conf" not in _st_files3,
+      "an empty stream block is a block nginx still has to accept, and the "
+      "include is a glob so writing nothing is the tidier answer")
 
 print()
 print("  live behaviour")

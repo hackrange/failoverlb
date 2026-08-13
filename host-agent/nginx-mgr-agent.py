@@ -109,7 +109,7 @@ CANDIDATE_CONF = NGINX_PREFIX / ".nginxmgr-candidate.conf"
 # Marker on the include block we add to nginx.conf.  It carries a version so a
 # future release can tell an out of date block from a current one and replace
 # it, rather than leaving a node quietly running an old set of includes.
-INCLUDE_MARKER = "# nginx fleet manager includes, v3.  Do not reorder."
+INCLUDE_MARKER = "# nginx fleet manager includes, v4.  Do not reorder."
 
 # Numbered backups of the managed folder, one per apply.
 BACKUP_DIR = Path("/var/backups/nginx-fleet-manager")
@@ -690,6 +690,30 @@ def _inject_include(conf_text, include_dir):
                 f"    include {include_dir}/sites/*.conf;",
             ]
             lines[i:i] = block
+
+            # TCP and UDP proxying lives in its own top level block, a sibling
+            # of http rather than something inside it, so it needs a second
+            # include out here.  Without it the manager renders stream config
+            # that nginx never reads: the files are on disk, the GUI says the
+            # apply worked, and the port is not listening.
+            #
+            # The whole block is generated into one file rather than assembled
+            # from includes here, because a bare `stream { }` with nothing in it
+            # is still a block nginx has to accept, and because the strip above
+            # only knows how to remove include lines.  Leaving an orphaned brace
+            # in nginx.conf would be a config that will not load at all.
+            #
+            # A glob, like every other include we write, so no streams means the
+            # line matches nothing and costs nothing.
+            # After the closing brace, not before it.  lines[i] is the brace
+            # that ends http, so the block above went inside it, and this has
+            # to land on the other side.
+            close_at = i + len(block)
+            lines[close_at + 1:close_at + 1] = [
+                "",
+                f"{INCLUDE_MARKER.replace('includes', 'stream include')}",
+                f"include {include_dir}/stream/*.conf;",
+            ]
             return "\n".join(lines) + "\n"
 
     raise AgentError("could not find the http block in nginx.conf", "parse_error")
