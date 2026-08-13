@@ -409,6 +409,39 @@ if [[ -f "$ENV_FILE" ]]; then
     # falling apart.
     SECRET_KEY="$(grep '^NFM_SECRET_KEY=' "$ENV_FILE" | cut -d= -f2- || true)"
     [[ -n "$SECRET_KEY" ]] || fail "That .env has no NFM_SECRET_KEY in it."
+
+    # The .env decides who this node is, and everything above worked out who it
+    # thought this node was.  When those disagree, the .env silently wins, and
+    # up to here this script has been printing the other one.
+    #
+    # That is worth stopping for, because of how it fails.  The node comes up
+    # under the stale name, joins, and every heartbeat is refused by the other
+    # end with "it may need to rejoin", which points at credentials.  The
+    # credentials are fine.  The name is wrong, and nothing on either box says
+    # so.  Hours go into that one.
+    #
+    # It happens most often the way you would expect: somebody copies a folder
+    # from a working node to a new one to save a download, and the .env comes
+    # with it.  The file says not to in its own header, which is not much use
+    # once it has already been copied.
+    ENV_NAME="$(grep '^NFM_NODE_NAME=' "$ENV_FILE" | cut -d= -f2- || true)"
+    ENV_ADDR="$(grep '^NFM_NODE_ADDRESS=' "$ENV_FILE" | cut -d= -f2- || true)"
+    if [[ -n "$ENV_NAME" && "$ENV_NAME" != "$NODE_NAME" ]]; then
+        warn "This box looks like ${NODE_NAME}, but .env says it is ${ENV_NAME}."
+        info "  .env wins, so this node would come up as ${ENV_NAME} at ${ENV_ADDR}."
+        info "  If that .env was copied from another node, it also carries that"
+        info "  node's secret key, and the two boxes must not share one."
+        info ""
+        info "  To take this box's own identity, delete the .env and run again:"
+        info "      sudo rm ${ENV_FILE} && sudo $0 $*"
+        info "  To keep the name in the .env, pass --name ${ENV_NAME} to silence this."
+        if [[ -n "$JOIN_TARGET" ]]; then
+            # Refused rather than warned for a join, because joining is the
+            # point at which the wrong name stops being this box's problem and
+            # starts being the whole cluster's.
+            fail "Not joining a cluster under a name this box does not own."
+        fi
+    fi
 else
     SECRET_KEY="$(openssl rand -base64 48)"
     cat > "$ENV_FILE" <<EOF
