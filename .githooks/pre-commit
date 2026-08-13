@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+#
+# Refuse to commit things that must never leave this machine.
+#
+# This exists because a content check is not enough.  Grepping the diff for
+# secrets catches a secret typed into a file.  It does not catch a whole folder
+# that should never have been tracked in the first place, because once it is
+# tracked it looks like part of the repository and every "git add -A" carries
+# it along.  That is how a folder of working notes ended up in fifty one
+# commits.
+#
+# So this checks paths as well as content, and it checks what is staged rather
+# than what is on disk.
+set -euo pipefail
+
+fail=0
+staged="$(git diff --cached --name-only --diff-filter=ACMR)"
+[[ -z "$staged" ]] && exit 0
+
+# ---------------------------------------------------------------- paths
+# Folders and files that are never part of the product.
+FORBIDDEN_PATHS='^(\.claude/|tools/manual/|\.env$|.*/\.env$|.*\.docx\.tmp$)'
+
+while IFS= read -r path; do
+    [[ -z "$path" ]] && continue
+    if [[ "$path" =~ $FORBIDDEN_PATHS ]]; then
+        echo "  refused: $path"
+        fail=1
+    fi
+done <<< "$staged"
+
+if [[ $fail -eq 1 ]]; then
+    cat >&2 <<'MSG'
+
+These paths are never committed.  They are working files, local settings, or
+build machinery, and they belong on this machine only.
+
+If one is genuinely part of the software now, take it out of FORBIDDEN_PATHS in
+.githooks/pre-commit in its own commit, so the change is visible rather than
+buried in something else.
+
+MSG
+    exit 1
+fi
+
+# -------------------------------------------------------------- content
+# Anything that identifies a customer, and anything naming the assistant that
+# helps on this project.  Neither belongs in a repository somebody else clones.
+if git diff --cached -U0 | grep -inE '^\+.*(\bclaude\b|\bherc\b|REDACTED|REDACTED)' >/dev/null; then
+    echo "  refused: a name that must not ship appears in the staged changes" >&2
+    git diff --cached -U0 | grep -inE '^\+.*(\bclaude\b|\bherc\b|REDACTED|REDACTED)' \
+        | head -5 | sed 's/^/    /' >&2
+    exit 1
+fi
+
+# Private keys, which are easy to paste in by accident while testing.
+if git diff --cached -U0 | grep -qE '^\+.*BEGIN (RSA |EC |OPENSSH |)PRIVATE KEY'; then
+    echo "  refused: that looks like a private key" >&2
+    exit 1
+fi
+
+exit 0

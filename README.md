@@ -131,7 +131,7 @@ Being straight about this matters more than the list above.
   came back clean.  Failover between two nodes under load has not been tested.
 
 If you are deciding whether to put this in front of traffic, that list is the
-honest answer, and the plan in `.claude/PLAN.md` is what closes it.
+honest answer, and the plan in the project notes is what closes it.
 
 ### A warning from an earlier test suite
 

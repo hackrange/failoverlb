@@ -72,7 +72,7 @@ prove it reached the thing it claims to be testing.
 
 ## What is not here yet
 
-The rest of the pass in `.claude/PLAN.md`.  Most of it needs a person driving a
+The rest of the pass is in the project notes.  Most of it needs a person driving a
 browser: every page and button, the sign in and lockout flow, the certificate
 lifecycle, an upgrade over an older install.  Those are not automated and the
 plan says so rather than pretending the gap does not exist.

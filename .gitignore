@@ -111,8 +111,6 @@ test/.secrets
 
 # Editor and tooling scratch files.  The settings writer leaves these behind
 # and one of them got committed once.
-.claude/settings.local.json
-.claude/*.tmp.*
 *.tmp.*
 
 # Testing scratch.  The old docker rig lived here and was never meant to ship,

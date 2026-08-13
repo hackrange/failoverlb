@@ -1,7 +1,7 @@
 """
 Every bug that has already cost a day, checked again cheaply.
 
-The list comes from .claude/PLAN.md.  Each one of these was real, on these
+The list comes from the project notes.  Each one of these was real, on these
 boxes, and each is a minute to check and a day to meet a second time.
 
 Nothing here applies config, restarts a service or writes to the database.
