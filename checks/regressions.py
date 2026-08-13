@@ -310,6 +310,34 @@ _missing = sorted(
     and getattr(obj, "__tablename__", None)
     and name not in _covered and name not in NOT_REPLICATED
 )
+# A snapshot from an older node must not delete what it has never heard of.
+# This is the rolling upgrade case: for the whole length of an upgrade, one box
+# is sending snapshots that are missing whatever the newer box just learned
+# about, and the newer box used to empty those tables and report success.
+if not have_sites:
+    skip("an older snapshot leaves unknown tables alone", "no sites on this node")
+else:
+    with session_scope() as s:
+        full = _json.loads(_json.dumps(capture(s)))
+
+    older = _json.loads(_json.dumps(full))
+    dropped = older["tables"].pop("pools", None)
+    kept_before = len(full["tables"].get("pools") or [])
+
+    with session_scope() as s:
+        restore(s, older)
+    with session_scope() as s:
+        kept_after = s.query(Pool).count()
+
+    check("a snapshot that omits a table does not empty it",
+          kept_before == 0 or kept_after == kept_before,
+          f"had {kept_before} pools, an older snapshot that never mentioned "
+          f"them left {kept_after}.  A rolling upgrade would delete config.")
+
+    # Put the real one back so the rest of the run sees the node it started on.
+    with session_scope() as s:
+        restore(s, full)
+
 check("every config table is in the snapshot", not _missing,
       f"{', '.join(_missing)} would not reach a standby and would not be in a "
       f"backup.  Add it to TABLES in snapshot.py, or to NOT_REPLICATED in this "

@@ -338,12 +338,33 @@ def restore(session, data: dict) -> dict:
 
     written = {}
 
+    # Only tables the snapshot actually carries are replaced.  A table the
+    # sender said nothing about is left exactly as it is.
+    #
+    # Clearing everything in TABLES was silent data loss during any rolling
+    # upgrade.  A node on new code takes a snapshot from a node on old code,
+    # that snapshot has no key for a table the old code did not know about, the
+    # loop below writes nothing for it, and the clear above has already emptied
+    # it.  The config is gone, the apply reports success, and the only sign is
+    # a table that is quietly empty on one node.
+    #
+    # This is not a merge and does not become one.  A table that is present is
+    # still replaced outright, including a present but empty one, which is how
+    # deleting the last row still travels.  The difference is only between
+    # "here is nothing" and "I did not mention it".
+    present = [(key, model) for key, model in TABLES if key in tables]
+    absent = [key for key, _model in TABLES if key not in tables]
+    if absent:
+        log.warning("this snapshot says nothing about %s, so those are left "
+                    "alone.  It came from a node running older code.",
+                    ", ".join(absent))
+
     # Clear in reverse order so children go before their parents.
-    for key, model in reversed(TABLES):
+    for key, model in reversed(present):
         session.query(model).delete()
     session.flush()
 
-    for key, model in TABLES:
+    for key, model in present:
         rows = tables.get(key) or []
         known = set(_columns(model))
         for row in rows:
