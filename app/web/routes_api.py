@@ -33,7 +33,7 @@ from app.core.capabilities import fleet_capabilities, get_local_capabilities
 from app.core.cluster import ClusterError, get_cluster
 from app.core.crypto import encrypt, new_token
 from app.core.nginx_parser import ParseError, extract_settings, parse, quick_check
-from app.core.render import Renderer
+from app.core.render import Renderer, safe_name, safe_var
 from app.core.snapshot import capture as snapshot_capture
 from app.db import get_db, session_scope
 from app.models import (
@@ -96,6 +96,71 @@ async def changing(request: Request, db: DBSession = Depends(get_db)) -> ObjectG
     await check_csrf(request)
     user = get_user(request, db)
     return ObjectGuard(db, user)
+
+
+# ==============================================================================
+# Names have to stay unique
+# ==============================================================================
+
+def _name_peers(model):
+    """
+    Everything a name has to be unique against, which is not always one table.
+
+    nginx keeps a single list of shared memory zones for the whole http block,
+    so a rate limit zone and a connection limit zone called the same thing are
+    not two names, they are one name declared twice for different uses.  nginx
+    refuses that outright, and it refuses it on every node, so the fleet stops
+    being able to apply anything at all until somebody works out which of the
+    two zones is the new one.  Checking only within a kind, which is what
+    creating used to do, lets that straight through.
+    """
+    zones = (RateLimitZone, ConnLimitZone, CacheZone)
+    return zones if model in zones else (model,)
+
+
+def claim_name(session, model, name, what, exclude_id=None):
+    """
+    Refuse a name something else is already using.
+
+    Creating has always checked this.  Renaming never did, and the two go
+    through different code, so a rename onto a name in use went straight
+    through.  For a pool that is worse than a duplicate create would have been,
+    because nothing fails: the render keys its files by the name, so the second
+    pool written wins, the first one's upstream is simply not in the config, and
+    the apply succeeds.  A site pointed at the pool that lost then sends its
+    traffic to the other pool's backends and nobody is told.
+
+    The comparison is on the rendered form of the name rather than the name as
+    typed, because that is what decides whether two objects collide.  For a pool
+    it is stricter again: sticky sessions turn the name into an nginx variable,
+    and a variable cannot hold a dot or a dash, so two pools called `shop-eu`
+    and `shop_eu` are different rows sharing one `$sticky_shop_eu`.
+    """
+    wanted = safe_name(name)
+    wanted_var = safe_var(name) if model is Pool else None
+
+    for peer in _name_peers(model):
+        for other in session.query(peer).all():
+            # Only the row being renamed is allowed to keep its own name, and
+            # ids only mean anything within their own table.
+            if exclude_id is not None and peer is model and other.id == exclude_id:
+                continue
+            if safe_name(other.name) == wanted:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"there is already a {what} called {other.name}",
+                )
+            if wanted_var is not None and safe_var(other.name) == wanted_var:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"{name} is too close to the pool called {other.name}.  "
+                        f"Sticky sessions turn both of those into the same nginx "
+                        f"variable, so one would quietly route on the other's cookie.  "
+                        f"Pick a name that differs by more than a dot, dash or underscore."
+                    ),
+                )
+    return name
 
 
 # ==============================================================================
@@ -481,10 +546,9 @@ async def create_host(request: Request, g: ObjectGuard = Depends(changing)):
     g.require("edit_sites")
     payload = pick_fields(await request.json(), HOST_FIELDS)
 
+    # The name check lives in _apply_host_fields, which runs below, so that
+    # creating and renaming cannot drift apart the way they already did once.
     name = validate_name(payload.get("name"), "site name")
-    if g.session.query(VirtualHost).filter(VirtualHost.name == name).first():
-        raise HTTPException(status_code=409, detail=f"there is already a site called {name}")
-
     host = VirtualHost(name=name)
     _apply_host_fields(g, host, payload)
     g.session.add(host)
@@ -531,7 +595,9 @@ def _apply_host_fields(g, host, payload):
     refused here rather than at apply time.
     """
     if "name" in payload:
-        host.name = validate_name(payload["name"], "site name")
+        name = validate_name(payload["name"], "site name")
+        claim_name(g.session, VirtualHost, name, "site", exclude_id=host.id)
+        host.name = name
 
     if "server_names" in payload:
         names = payload["server_names"]
@@ -818,12 +884,11 @@ async def create_pool(request: Request, g: ObjectGuard = Depends(changing)):
     g.require("edit_pools")
     payload = pick_fields(await request.json(), POOL_FIELDS)
 
+    # The name check lives in _apply_pool_fields, which runs below, so that
+    # creating and renaming cannot drift apart the way they already did once.
     name = validate_name(payload.get("name"), "pool name")
-    if g.session.query(Pool).filter(Pool.name == name).first():
-        raise HTTPException(status_code=409, detail=f"there is already a pool called {name}")
-
     pool = Pool(name=name)
-    _apply_pool_fields(pool, payload)
+    _apply_pool_fields(g.session, pool, payload)
     g.session.add(pool)
     g.session.commit()
 
@@ -838,7 +903,7 @@ async def update_pool(pool_id: str, request: Request, g: ObjectGuard = Depends(c
     payload = pick_fields(await request.json(), POOL_FIELDS)
 
     before = _pool_detail(pool)
-    _apply_pool_fields(pool, payload)
+    _apply_pool_fields(g.session, pool, payload)
     g.session.commit()
 
     audit.record("pool.update", user=g.user, object_type="pool", object_name=pool.name,
@@ -1038,9 +1103,11 @@ async def delete_pool_token(pool_id: str, g: ObjectGuard = Depends(changing)):
     }
 
 
-def _apply_pool_fields(pool, payload):
+def _apply_pool_fields(session, pool, payload):
     if "name" in payload:
-        pool.name = validate_name(payload["name"], "pool name")
+        name = validate_name(payload["name"], "pool name")
+        claim_name(session, Pool, name, "pool", exclude_id=pool.id)
+        pool.name = name
 
     if "lb_method" in payload:
         if payload["lb_method"] not in LB_METHODS:
@@ -2089,9 +2156,7 @@ async def create_zone(kind: str, request: Request, g: ObjectGuard = Depends(chan
 
     payload = await request.json()
     name = validate_name(payload.get("name"), "zone name")
-
-    if g.session.query(model).filter(model.name == name).first():
-        raise HTTPException(status_code=409, detail=f"there is already a zone called {name}")
+    claim_name(g.session, model, name, "zone")
 
     zone = model(name=name, description=(payload.get("description") or "")[:500] or None)
     _apply_zone_fields(kind, zone, payload)
@@ -2128,6 +2193,7 @@ async def update_zone(kind: str, zone_id: str, request: Request,
                         f"Point those at something else before renaming it."
                     ),
                 )
+            claim_name(g.session, model, new_name, "zone", exclude_id=zone.id)
             zone.name = new_name
 
     if "description" in payload:
@@ -2241,8 +2307,7 @@ async def create_access_list(request: Request, g: ObjectGuard = Depends(changing
     payload = await request.json()
 
     name = validate_name(payload.get("name"), "access list name")
-    if g.session.query(AccessList).filter(AccessList.name == name).first():
-        raise HTTPException(status_code=409, detail=f"there is already a list called {name}")
+    claim_name(g.session, AccessList, name, "access list")
 
     acl = AccessList(name=name)
     _apply_acl_fields(acl, payload)
@@ -2261,7 +2326,9 @@ async def update_access_list(acl_id: str, request: Request,
     payload = await request.json()
 
     if "name" in payload:
-        acl.name = validate_name(payload["name"], "access list name")
+        name = validate_name(payload["name"], "access list name")
+        claim_name(g.session, AccessList, name, "access list", exclude_id=acl.id)
+        acl.name = name
     _apply_acl_fields(acl, payload)
     g.session.commit()
 

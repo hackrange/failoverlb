@@ -1612,6 +1612,14 @@ def _safe_var(name: str) -> str:
     return cleaned[:48] or "unnamed"
 
 
+# The API asks the same question when somebody names or renames something:
+# would this collide with what is already there.  It has to be these two
+# functions and not a copy of them, because a copy that drifts turns a refusal
+# into a config where one object quietly overwrites another.
+safe_name = _safe_name
+safe_var = _safe_var
+
+
 def _safe_header(name: str) -> str:
     """
     Make an HTTP header name safe to write into a directive.

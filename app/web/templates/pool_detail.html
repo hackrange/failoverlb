@@ -151,7 +151,11 @@
         <div class="field">
           <label for="p-name">Name</label>
           <input type="text" id="p-name" value="{{ pool.name }}">
-          <div class="hint">This is the upstream name in the config.</div>
+          <div class="hint">This is the upstream name in the config.  You can change
+            it whenever you like: the sites using this pool point at it by id, not by
+            name, so they follow the rename on their own.  It takes effect on the next
+            apply, and shows up in the pending changes as the old upstream file going
+            and a new one arriving.</div>
         </div>
         <div class="field">
           <label for="p-desc">Description</label>

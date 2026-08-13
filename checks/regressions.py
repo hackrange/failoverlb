@@ -19,7 +19,10 @@ import urllib.request
 from app.core.render import Renderer
 from app.core.capabilities import fleet_capabilities
 from app.db import session_scope
-from app.models import Certificate, Pool, PoolMember, VirtualHost, MemberState, json_set
+from app.models import (
+    CacheZone, Certificate, ConnLimitZone, MemberState, Pool, PoolMember,
+    VirtualHost, json_set,
+)
 from app.web.routes_api import render_current
 
 SOCKET = "/run/nginxmgr/agent.sock"
@@ -387,6 +390,115 @@ if plan.get("ok"):
     check("an upstream declared elsewhere is not invented as a host",
           all("192.0.2.50" in str(p["members"]) or p["members"] for p in plan["pools"]),
           "a bare upstream name became a backend that will never resolve")
+
+print()
+print("  two objects cannot end up sharing a name")
+# Renaming used to skip the uniqueness check that creating has always had, and
+# the result was silent rather than loud: the render keys its files by name, so
+# the second pool written wins and the first one's upstream is simply not in the
+# config.  nginx loads fine, the apply succeeds, and a site pointed at the pool
+# that lost sends its traffic to the other pool's backends.
+
+
+def _pool(name, address):
+    p = Pool(name=name, lb_method="round_robin")
+    p.members = [PoolMember(address=address, port=8080, enabled=True, admin_state="up")]
+    return p
+
+
+files = Renderer().render_all(
+    [], [_pool("dup_check", "192.0.2.10"), _pool("dup_check", "192.0.2.11")],
+    [], [], [], [], [], [], [])
+upstreams = [k for k in files if k.startswith("upstreams/")]
+check("two pools with one name render as one file, which is why it is refused",
+      len(upstreams) == 1,
+      "if this ever renders two files the reasoning behind claim_name has "
+      "changed and the check below needs rewriting, not deleting")
+
+# The rule itself, rather than the damage it prevents.  claim_name compares the
+# rendered form of the name, so it also catches two pools that differ only by a
+# separator: sticky sessions turn both into the same $sticky_ variable.
+from app.web.routes_api import claim_name  # noqa: E402
+
+
+class _FakeQuery:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def all(self):
+        return self.rows
+
+
+class _FakeSession:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def query(self, _model):
+        return _FakeQuery(self.rows)
+
+
+class _Row:
+    def __init__(self, row_id, name):
+        self.id = row_id
+        self.name = name
+
+
+existing = _FakeSession([_Row(1, "shop-eu"), _Row(2, "other")])
+
+
+def _refused(name, exclude_id=None):
+    try:
+        claim_name(existing, Pool, name, "pool", exclude_id=exclude_id)
+        return False
+    except Exception:
+        return True
+
+
+check("renaming a pool onto another pool's name is refused",
+      _refused("shop-eu", exclude_id=2),
+      "a rename onto a name in use redirects traffic silently, so it has to be "
+      "a 409 and not a surprise")
+
+check("a name that differs only by a separator is refused",
+      _refused("shop_eu", exclude_id=2),
+      "shop-eu and shop_eu are two rows and one $sticky_shop_eu, so one pool "
+      "would route on the other one's cookie")
+
+check("a pool keeping its own name is not refused",
+      not _refused("shop-eu", exclude_id=1),
+      "saving a pool without touching the name must not trip the check on itself")
+
+check("an unused name is allowed",
+      not _refused("shop-us", exclude_id=2),
+      "the check has gone from catching collisions to refusing everything")
+
+# nginx has one list of shared memory zones for the whole http block, so a rate
+# limit zone and a connection limit zone with the same name is one name declared
+# twice for different uses.  nginx refuses it, on every node, which means the
+# whole fleet can apply nothing until somebody finds the pair.
+zone_rows = _FakeSession([_Row(1, "api_limit")])
+
+
+def _zone_refused(model, name):
+    try:
+        claim_name(zone_rows, model, name, "zone")
+        return False
+    except Exception:
+        return True
+
+
+check("a connection zone cannot take a rate zone's name",
+      _zone_refused(ConnLimitZone, "api_limit"),
+      "the two share nginx's shared memory namespace, so this pair blocks every "
+      "apply on every node until one of them is renamed")
+
+check("a cache zone cannot take a rate zone's name",
+      _zone_refused(CacheZone, "api_limit"),
+      "same namespace again, and the same fleet wide block")
+
+check("a zone name nothing is using is allowed",
+      not _zone_refused(ConnLimitZone, "api_burst"),
+      "checking across the kinds must not turn into refusing every zone name")
 
 print()
 print("  live behaviour")
