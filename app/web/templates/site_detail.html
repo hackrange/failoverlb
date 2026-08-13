@@ -1095,11 +1095,13 @@ document.addEventListener("DOMContentLoaded", function () {
           <input type="checkbox" id="l-strip" ${l.strip_prefix ? "checked" : ""}>
           <label for="l-strip">Take this path off before sending it on</label>
         </div>
-        <div class="hint">For a backend mounted under a prefix it knows nothing
-          about.  With this on, <code>/lb/thing</code> reaches the backend as
-          <code>/thing</code>.  With it off the backend gets the whole path and
-          usually answers 404, which looks like the backend being broken rather
-          than the path being passed through whole.</div></div>
+        <div class="hint">For a backend that knows nothing about the prefix it
+          is being served under.  With this on, <code>/api/users</code> reaches
+          the backend as <code>/users</code>.
+          <br>Leave it off when the backend has been told what prefix it lives
+          under, because then it is expecting the whole path and taking it off
+          gives it one it has no route for.  The giveaway is a page that loads
+          with no styling, because the stylesheet came back as a 404.</div></div>
       <div class="field" data-lmode="static"><label for="l-root">Directory</label>
         <input type="text" id="l-root" value="${NFM.escapeHtml(l.document_root || "")}" placeholder="/var/www/static">
         <div class="hint">Left as a root.  Use alias below instead if the path should be stripped.</div></div>
