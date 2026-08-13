@@ -147,10 +147,15 @@ class MetricsCollector:
                     if not node:
                         continue
                     client = PeerClient(node, cluster.ca)
-                answer = await client.call("/peer/agent",
-                                           {"verb": "nginx_metrics", "args": {}},
-                                           timeout=15)
-                data = (answer or {}).get("data") or {}
+                # The key is `payload` and the answer is the agent's own reply
+                # with nothing wrapped round it, because /peer/agent returns
+                # what AgentClient.call gives back and that has already had the
+                # envelope taken off.  Guessing either of those wrong gets you
+                # "no numbers came back" from a node that answered perfectly.
+                data = await client.call(
+                    "/peer/agent",
+                    {"verb": "nginx_metrics", "payload": {}},
+                    timeout=15) or {}
                 if data.get("ok") and data.get("metrics"):
                     self._for(peer_name).add(data["metrics"])
                     self.last_error.pop(peer_name, None)
