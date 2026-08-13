@@ -637,7 +637,17 @@ class ClusterManager:
                     }
 
             # Nothing to do.  Saying so beats a pointless reload of every box.
-            if latest and latest.checksum == checksum:
+            #
+            # Unless somebody asked for it anyway, which force did not used to
+            # cover: it only skipped the safety checks above, so an apply with
+            # force set still stopped dead here and reported "unchanged".  That
+            # is the wrong answer for the two cases force exists for.  One is a
+            # node that is behind and needs the current config pushed at it
+            # regardless.  The other is a change that moves with an apply but
+            # does not alter a single rendered file, which is exactly what a DNS
+            # zone edit is: the renderer is right that nothing changed, and the
+            # zones still have to reach the other nodes.
+            if latest and latest.checksum == checksum and not force:
                 return {
                     "ok": True,
                     "unchanged": True,
