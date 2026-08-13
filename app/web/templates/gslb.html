@@ -528,10 +528,15 @@ document.addEventListener("DOMContentLoaded", function () {
         const data = await NFM.api("/gslb/zones");
         for (const z of data.zones || []) {
           const found = (z.records || []).find(function (r) {
-            return r.id === recEdit.dataset.rec;
+            // Both sides through String, because one of them always is.  An
+            // id read off an attribute is text and an id out of json is a
+            // number, so a strict compare between them is never true.  It
+            // found nothing, threw nothing, and the button just did nothing.
+            return String(r.id) === String(recEdit.dataset.rec);
           });
           if (found) { openRecord(z.id, z.name, found); return; }
         }
+        NFM.toast("Could not find that record to edit, try reloading", "bad");
       } catch (err) { NFM.toast(err.message, "bad"); }
       return;
     }
