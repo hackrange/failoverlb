@@ -34,6 +34,7 @@ from app.core.cluster import ClusterError, get_cluster
 from app.core.crypto import encrypt, new_token
 from app.core.nginx_parser import ParseError, extract_settings, parse, quick_check
 from app.core.render import Renderer
+from app.core.snapshot import capture as snapshot_capture
 from app.db import get_db, session_scope
 from app.models import (
     AccessList,
@@ -154,7 +155,11 @@ def render_current(session, ignore_health: bool = False) -> tuple:
         hosts, pools, certs, acls, rate_zones, conn_zones, cache_zones, maps, streams
     )
 
-    snapshot = {
+    # The objects themselves, not a count of them.  This is what lets a node
+    # that was a standby put the config back when it gets promoted, and it used
+    # to be four numbers, which restored nothing.
+    snapshot = snapshot_capture(session)
+    snapshot["counts"] = {
         "hosts": len(hosts),
         "pools": len(pools),
         "certs": len(certs),

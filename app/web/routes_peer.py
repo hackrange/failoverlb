@@ -10,6 +10,7 @@ certificate proves the caller is a cluster member.  The signature proves which
 member, and that this exact body is what they sent.
 """
 
+import json
 import logging
 
 from fastapi import APIRouter, HTTPException, Request
@@ -17,11 +18,16 @@ from fastapi import APIRouter, HTTPException, Request
 from app.config import get_settings
 from app.core.agent_client import AgentError, get_agent
 from app.core.cluster import ClusterError, looks_like_a_wipe, verify_peer_request
+from app.core import snapshot as snapshot_store
 from app.core.render import MANAGED_ROOT
 from app.db import session_scope
-from app.models import Node, NodeRole, utcnow
+from app.models import ConfigVersion, Node, NodeRole, utcnow
 
 log = logging.getLogger("nfm.peer")
+
+# Snapshots that arrived with a prepare and are waiting to see whether the
+# commit follows.  Small, and cleared as versions move on.
+_staged_snapshots = {}
 
 router = APIRouter()
 
@@ -169,6 +175,15 @@ async def config_prepare(request: Request):
                 ),
             }
 
+    # Held until the commit lands, so a version that gets rolled back does not
+    # leave its objects behind as the newest thing this node knows about.
+    snapshot = payload.get("snapshot")
+    if isinstance(snapshot, dict) and snapshot.get("tables"):
+        _staged_snapshots[version] = snapshot
+        # A node that never commits would otherwise grow this forever.
+        for old in [v for v in _staged_snapshots if v < (version or 0) - 5]:
+            _staged_snapshots.pop(old, None)
+
     log.info("staging version %s from %s", version, node.name)
 
     agent = get_agent()
@@ -213,7 +228,62 @@ async def config_commit(request: Request):
                 me.last_sync_at = utcnow()
                 me.nginx_config_ok = True
                 me.last_error = None
+
+            # Keep the objects this version was rendered from.
+            #
+            # A standby used to hold the files and nothing else, so being
+            # promoted left it able to serve what it had and unable to change
+            # any of it.  Keeping the snapshot is what makes a promotion useful
+            # rather than merely survivable.
+            #
+            # Written here rather than at prepare time because prepare is a
+            # promise and commit is the thing that happened.  A version that
+            # was staged and then rolled back should not leave its objects
+            # behind as the newest thing this node knows.
+            snapshot = _staged_snapshots.pop(version, None)
+            if snapshot:
+                existing = session.query(ConfigVersion).filter(
+                    ConfigVersion.version == version
+                ).first()
+                if not existing:
+                    session.add(ConfigVersion(
+                        version=version,
+                        checksum=payload.get("checksum") or "",
+                        snapshot=json.dumps(snapshot),
+                        rendered="{}",     # the files are on disk already
+                        author=f"replicated from {node.name}",
+                        summary="carried over with the config",
+                        origin_node=node.name,
+                    ))
             session.commit()
+
+    # Take on the objects behind the files we just agreed to serve.
+    #
+    # The invariant worth having is simple: what a node has in its database is
+    # what it is serving.  Without this the two drift the moment anything is
+    # changed anywhere else, and the drift is silent and one directional.
+    #
+    # A node that was down while the other one was promoted comes back, is given
+    # the files, serves them, and still has its own older objects.  It becomes
+    # active again, renders from those, and quietly undoes every change made
+    # while it was away.  Nothing warns anybody, because from its point of view
+    # nothing changed.
+    #
+    # Outside the session above because a restore rewrites most of the config
+    # tables and wants a transaction of its own.
+    if result.get("ok") and snapshot:
+        try:
+            with session_scope() as session:
+                written = snapshot_store.restore(session, snapshot)
+            log.info("took on the config behind version %s: %s", version,
+                     ", ".join(f"{k}={v}" for k, v in written.items() if v))
+        except Exception as exc:
+            # The files are applied and this node is serving correctly.  Failing
+            # here means the objects are stale, which is worth shouting about
+            # and is not worth undoing a good apply over.
+            log.error("applied version %s but could not take on its objects, so "
+                      "this node's database is now behind what it is serving: %s",
+                      version, exc)
     else:
         log.error("apply of version %s failed: %s", version, result.get("output", "")[:300])
 

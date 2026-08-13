@@ -392,13 +392,78 @@ class ClusterManager:
 
             winner = sorted(healthy, key=lambda n: (-n.priority, n.name))[0]
 
+            promoted = False
             for node in nodes:
                 should_be = NodeRole.ACTIVE if node.name == winner.name else NodeRole.STANDBY
                 if node.role != should_be:
                     log.info("%s is now %s", node.name, should_be.value)
+                    if node.is_self and should_be == NodeRole.ACTIVE:
+                        promoted = True
                     node.role = should_be
 
             session.commit()
+
+        # Put the config back, if this node has just been promoted and has none.
+        #
+        # A standby holds the rendered files and not the objects behind them, so
+        # without this it can serve what it was given and change none of it,
+        # which is the half of a failover nobody thinks about until they need to
+        # fix something during one.
+        #
+        # Outside the session above on purpose.  Restoring rewrites most of the
+        # config tables and wants a transaction of its own, not one that is
+        # already holding the node rows.
+        if promoted:
+            await self._restore_config_if_empty()
+
+    async def _restore_config_if_empty(self):
+        """
+        Rebuild this node's config objects from the newest snapshot it has.
+
+        Only when it has none of its own.  A node that already has sites and
+        pools is either the one that has been holding them all along or has
+        already done this, and overwriting a real config with an older snapshot
+        would be its own outage.
+
+        Failing here is logged and not raised.  A promotion that cannot restore
+        still leaves a node serving what it has, which is the important half,
+        and an exception thrown out of an election loop stops the elections.
+        """
+        from app.core import snapshot as snapshot_store
+
+        try:
+            with session_scope() as session:
+                if not snapshot_store.is_empty(session):
+                    return
+
+                newest = session.query(ConfigVersion).order_by(
+                    ConfigVersion.version.desc()
+                ).first()
+                if not newest or not newest.snapshot:
+                    log.warning(
+                        "promoted to active with no config and no snapshot to put "
+                        "back, so this node can serve what it has but not change it"
+                    )
+                    return
+
+                data = json.loads(newest.snapshot)
+                if not data.get("tables"):
+                    # A snapshot from before these carried objects.  It holds
+                    # counts and nothing else, so there is nothing to restore.
+                    log.warning(
+                        "the newest snapshot here predates config replication, so "
+                        "there is nothing to restore from"
+                    )
+                    return
+
+                written = snapshot_store.restore(session, data)
+                log.warning(
+                    "promoted to active and put the config back from version %s: %s",
+                    newest.version,
+                    ", ".join(f"{k}={v}" for k, v in written.items() if v),
+                )
+        except Exception as exc:
+            log.error("could not restore the config after being promoted: %s", exc)
 
     async def failover_to(self, target_name: str, actor: str = "system"):
         """Hand active over to a specific node, by hand."""
@@ -551,7 +616,8 @@ class ClusterManager:
 
         for info in peer_info:
             try:
-                result = await self._prepare_peer(info, rendered, next_version, checksum, force)
+                result = await self._prepare_peer(info, rendered, next_version, checksum,
+                                                  force, snapshot)
                 if result.get("ok"):
                     prepared.append(info["name"])
                 else:
@@ -793,7 +859,8 @@ class ClusterManager:
             if str(entry.get("name", "")).endswith(".conf")
         }
 
-    async def _prepare_peer(self, info, rendered, version, checksum, force=False) -> dict:
+    async def _prepare_peer(self, info, rendered, version, checksum, force=False,
+                            snapshot=None) -> dict:
         with session_scope() as session:
             node = session.query(Node).filter(Node.name == info["name"]).first()
             if not node:
@@ -803,7 +870,7 @@ class ClusterManager:
         return await client.call(
             "/peer/config/prepare",
             {"version": version, "checksum": checksum, "files": rendered,
-             "force": bool(force)},
+             "force": bool(force), "snapshot": snapshot},
             timeout=PEER_PREPARE_TIMEOUT,
         )
 
@@ -889,6 +956,15 @@ class ClusterManager:
             rendered = json.loads(latest.rendered or "{}")
             checksum = latest.checksum
 
+            # The objects behind those files travel with them here too.
+            #
+            # Missing this is how a node that was down came back, took the files
+            # and served them correctly, and kept its own older objects.  It
+            # then became active, rendered from what it still had, and undid
+            # every change made while it was away, silently, because from its
+            # point of view nothing had changed.
+            snapshot = json.loads(latest.snapshot or "{}")
+
             node_rows = {
                 n.name: n for n in
                 session.query(Node).filter(Node.name.in_(pending_nodes)).all()
@@ -901,7 +977,8 @@ class ClusterManager:
 
             try:
                 info = {"name": node.name, "address": node.address, "port": node.peer_port}
-                result = await self._prepare_peer(info, rendered, target_version, checksum)
+                result = await self._prepare_peer(info, rendered, target_version, checksum,
+                                                  snapshot=snapshot)
                 if not result.get("ok"):
                     raise ClusterError(result.get("output", "the config test failed there"))
 
