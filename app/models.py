@@ -1091,7 +1091,11 @@ class MapBlock(Base):
 
     source_variable = Column(String(255), nullable=False, default="$http_user_agent")
     result_variable = Column(String(64), nullable=False)
-    default_value = Column(String(255), default='""')
+    # Empty means empty.  This used to hold the two characters `""`, on the
+    # reasoning that it was already written the way nginx wants, and the
+    # renderer then quoted it again and the default became a literal pair of
+    # quote marks.  Store the value, let the renderer do the quoting.
+    default_value = Column(String(255), default="")
 
     entries = Column(Text, default="[]")   # json list of match and value
     hostnames = Column(Boolean, default=False)

@@ -96,6 +96,48 @@ def esc(value) -> str:
     return text
 
 
+def map_value(value) -> str:
+    r"""
+    A match or a result inside a map block.
+
+    Not `esc`, and the difference is a backslash.  `esc` refuses them, which is
+    right for a value going into an ordinary directive and wrong here: the whole
+    point of a map is matching, most matching is regular expressions, and almost
+    every regular expression worth writing has a backslash in it.  `~*google\.`
+    made the render raise, and a render that raises stops every apply on every
+    node until somebody works out which row of which map is to blame.
+
+    Everything is quoted.  nginx keeps a backslash as written inside quotes, so
+    a regular expression survives it, and quoting is what makes a value with a
+    space in it work at all: unquoted, nginx counts the words and says "invalid
+    number of the map parameters".
+
+    Checked against real nginx rather than assumed, including the one case that
+    breaks out: a value ending in a single backslash escapes our own closing
+    quote and nginx reads to the end of the file looking for it.  A regular
+    expression cannot legally end that way either, so refusing it costs nothing.
+    """
+    text = "" if value is None else str(value)
+
+    # Older rows stored the two characters `""` to mean empty, from back when
+    # the value was written pre-quoted.  Quoting that again gives a default of
+    # two literal quote marks, which is a value no comparison will ever match.
+    if text in ('""', "''"):
+        text = ""
+
+    if re.search(r"[;{}\n\r]", text):
+        raise ValueError(
+            f"a map entry cannot contain a semicolon, a brace or a newline: {text!r}")
+
+    # An odd number of trailing backslashes would escape the closing quote.
+    trailing = len(text) - len(text.rstrip("\\"))
+    if trailing % 2:
+        raise ValueError(
+            f"a map entry cannot end in a single backslash: {text!r}")
+
+    return '"' + text.replace('"', '\\"') + '"'
+
+
 def esc_header_value(value) -> str:
     """
     A response header value, which is allowed to contain semicolons.
@@ -401,14 +443,21 @@ server {
             if m.hostnames:
                 lines.append("    hostnames;")
             if m.default_value:
-                lines.append(f"    default {esc(m.default_value)};")
+                lines.append(f"    default {map_value(m.default_value)};")
 
             for entry in m.entry_list():
                 match = entry.get("match", "")
                 value = entry.get("value", "")
                 if not match:
                     continue
-                lines.append(f"    {esc(match)} {esc(value)};")
+                try:
+                    lines.append(f"    {map_value(match)} {map_value(value)};")
+                except ValueError as exc:
+                    # One bad row loses that row, not the whole render.  Raising
+                    # here would take out every unrelated change on every node,
+                    # which is what the content security policy setting used to
+                    # do and is the worst way for a typo to be reported.
+                    log.warning("dropping an entry from the map %s: %s", m.name, exc)
 
             lines.append("}")
             self.files[f"maps/{_safe_name(m.name)}.conf"] = "\n".join(lines)

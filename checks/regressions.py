@@ -34,8 +34,8 @@ from app.core.capabilities import fleet_capabilities
 from app.db import session_scope
 from app.models import (
     CacheZone, Certificate, ConnLimitZone, ErrorPageImage, ErrorPageTemplate,
-    Location, MemberState, Pool, PoolMember, StreamServer, VirtualHost,
-    json_set,
+    Location, MapBlock, MemberState, Pool, PoolMember, StreamServer,
+    VirtualHost, json_set,
 )
 from app.web.routes_api import render_current
 
@@ -875,6 +875,79 @@ check("one we hold the material for knows it can rebuild itself",
       _ready.has_material() and _ready.usable,
       "this is what lets a node that turns up without the files write them "
       "back from the database instead of waiting for a person")
+
+print()
+print("  map blocks")
+# A map is mostly regular expressions, and esc() refuses backslashes, so the
+# very first realistic entry made the whole render raise.  A render that raises
+# stops every unrelated change on every node until somebody works out which row
+# of which map is to blame, which is the same shape as the content security
+# policy bug and is the worst way for a typo to be reported.
+
+
+def _map(mid, name, entries, default="none", src="$http_referer", res="out"):
+    m = MapBlock(name=name, source_variable=src, result_variable=res,
+                 default_value=default, entries=json_set(entries))
+    m.id = mid
+    return m
+
+
+_map_files = Renderer().render_all(
+    [], [], [], [], [], [], [],
+    [_map(931, "regexes", [
+        {"match": r"~*google\.", "value": "search engine"},
+        {"match": "~*^$", "value": "direct"},
+        {"match": "plain", "value": "1"},
+    ])], [])
+_map_conf = _map_files.get("maps/regexes.conf", "")
+
+check("a map with a backslash in a regex still renders",
+      bool(_map_conf) and r"google\." in _map_conf,
+      "esc refuses backslashes, which is right for an ordinary directive and "
+      "wrong for a map, where nearly every useful match has one")
+
+check("a map value with a space in it comes out quoted",
+      '"search engine"' in _map_conf,
+      "unquoted, nginx counts the words and says 'invalid number of the map "
+      "parameters'")
+
+check("an empty match is written as something nginx can read",
+      '"~*^$"' in _map_conf,
+      "quoting is what makes an empty or odd match work at all")
+
+_bad_map = _map(932, "hasbadrow", [
+    {"match": "good", "value": "1"},
+    {"match": "bad; } server { listen 1.2.3.4:9; } #", "value": "2"},
+    {"match": "alsogood", "value": "3"},
+])
+try:
+    _bad_files = Renderer().render_all([], [], [], [], [], [], [], [_bad_map], [])
+    _bad_conf = _bad_files.get("maps/hasbadrow.conf", "")
+    _survived = True
+except Exception:
+    _bad_conf = ""
+    _survived = False
+
+check("one bad row does not take the whole render with it",
+      _survived,
+      "raising here blocks every apply on every node, and the row is one line "
+      "somebody typed on a form")
+
+check("the bad row is dropped and the good ones kept",
+      "server {" not in _bad_conf and '"good"' in _bad_conf
+      and '"alsogood"' in _bad_conf,
+      "a match that would close the block has to come out, and everything "
+      "around it has to survive")
+
+_empty_default = _map(933, "emptydefault", [{"match": "a", "value": "1"}],
+                      default='""')
+_ed_conf = Renderer().render_all(
+    [], [], [], [], [], [], [], [_empty_default], []).get("maps/emptydefault.conf", "")
+check("the old way of storing an empty default still means empty",
+      'default "";' in _ed_conf,
+      "rows made before this stored the two characters as the value, and "
+      "quoting that again gives a default of two literal quote marks, which "
+      "nothing will ever match")
 
 print()
 print("  tcp and udp proxying")

@@ -2584,6 +2584,268 @@ async def delete_error_image(template_id: str, image_id: str,
 
 
 # ==============================================================================
+# Map blocks, which is nginx's lookup table
+# ==============================================================================
+
+# Variables a map is allowed to read.
+#
+# Not a nicety.  nginx refuses a map whose source variable it does not know,
+# with "unknown variable", and it refuses it at load time on every node, so one
+# typo here stops the whole fleet applying anything at all until somebody works
+# out which map is to blame.  Checking on the way in turns that into a message
+# next to the box it was typed in.
+MAP_SOURCE_VARIABLES = {
+    "$host", "$hostname", "$http_host", "$https", "$scheme", "$request_method",
+    "$request_uri", "$uri", "$document_uri", "$args", "$query_string",
+    "$remote_addr", "$remote_port", "$remote_user", "$server_addr",
+    "$server_name", "$server_port", "$server_protocol", "$request_length",
+    "$content_type", "$content_length", "$status", "$body_bytes_sent",
+    "$bytes_sent", "$connection", "$connection_requests", "$msec",
+    "$request_time", "$time_iso8601", "$time_local", "$is_args", "$pid",
+    "$realpath_root", "$request_filename", "$document_root",
+    "$ssl_protocol", "$ssl_cipher", "$ssl_server_name", "$ssl_session_reused",
+    "$ssl_client_verify", "$ssl_client_s_dn", "$ssl_client_i_dn",
+    "$proxy_protocol_addr", "$proxy_protocol_port",
+    "$binary_remote_addr", "$geoip_country_code", "$http_user_agent",
+    "$http_referer", "$http_cookie", "$http_x_forwarded_for",
+    "$upstream_addr", "$upstream_status", "$upstream_response_time",
+}
+
+# Whole families of them, where the bit after the prefix is whatever the client
+# sent.  nginx makes these up on demand so any name after the prefix is fine.
+MAP_SOURCE_PREFIXES = (
+    "$http_", "$arg_", "$cookie_", "$sent_http_", "$upstream_http_",
+    "$upstream_cookie_", "$ssl_", "$geoip_", "$proxy_protocol_tlv_",
+)
+
+# Names a map must not produce, because nginx already has them and says
+# "the duplicate variable" rather than anything about a map.
+MAP_RESERVED_RESULTS = {
+    v.lstrip("$") for v in MAP_SOURCE_VARIABLES
+} | {"args", "uri", "host", "status", "scheme", "request", "document_uri"}
+
+MAP_FIELDS = {"name", "description", "source_variable", "result_variable",
+              "default_value", "entries", "hostnames"}
+
+
+def _map_json(m):
+    return {
+        "id": m.id,
+        "name": m.name,
+        "description": m.description,
+        "source_variable": m.source_variable,
+        "result_variable": m.result_variable,
+        "default_value": m.default_value or "",
+        "hostnames": m.hostnames,
+        "entries": m.entry_list(),
+    }
+
+
+def _known_source(value: str) -> bool:
+    if value in MAP_SOURCE_VARIABLES:
+        return True
+    if any(value.startswith(p) and len(value) > len(p) for p in MAP_SOURCE_PREFIXES):
+        return True
+    return False
+
+
+@router.get("/maps")
+async def list_maps(g: ObjectGuard = Depends(guard)):
+    return {
+        "maps": [_map_json(m) for m in g.list(MapBlock)],
+        # What a map is allowed to read, so the page can offer them rather than
+        # leaving somebody to guess and take the fleet down with a typo.
+        "sources": sorted(MAP_SOURCE_VARIABLES),
+        "prefixes": list(MAP_SOURCE_PREFIXES),
+    }
+
+
+@router.get("/maps/{map_id}")
+async def get_map(map_id: str, g: ObjectGuard = Depends(guard)):
+    return _map_json(g.get(MapBlock, map_id))
+
+
+@router.post("/maps")
+async def create_map(request: Request, g: ObjectGuard = Depends(changing)):
+    g.require("edit_sites")
+    payload = pick_fields(await request.json(), MAP_FIELDS)
+
+    name = validate_name(payload.get("name"), "map name")
+    claim_name(g.session, MapBlock, name, "map")
+
+    block = MapBlock(name=name, source_variable="$host", result_variable="x")
+    _apply_map_fields(g, block, payload)
+    g.session.add(block)
+    g.session.commit()
+
+    audit.record("map.create", user=g.user, object_type="map", object_name=name,
+                 changes=payload)
+    return _map_json(block)
+
+
+@router.put("/maps/{map_id}")
+async def update_map(map_id: str, request: Request,
+                     g: ObjectGuard = Depends(changing)):
+    block = g.get(MapBlock, map_id, "edit_sites")
+    payload = pick_fields(await request.json(), MAP_FIELDS)
+
+    before = _map_json(block)
+    _apply_map_fields(g, block, payload)
+    g.session.commit()
+
+    audit.record("map.update", user=g.user, object_type="map",
+                 object_name=block.name,
+                 changes=audit.diff_fields(before, _map_json(block)))
+    return _map_json(block)
+
+
+@router.delete("/maps/{map_id}")
+async def delete_map(map_id: str, g: ObjectGuard = Depends(changing)):
+    block = g.get(MapBlock, map_id, "edit_sites")
+
+    # A map nothing reads is dead weight; a map something reads is load bearing,
+    # and nginx will not start with a variable that has no map behind it.  We
+    # cannot see into raw config or a setting's text reliably, so this looks and
+    # says what it found rather than refusing outright.
+    variable = "$" + (block.result_variable or "").lstrip("$")
+    users = []
+    for host in g.session.query(VirtualHost).all():
+        haystack = (host.custom_config or "") + json.dumps(host.setting_map())
+        if variable in haystack:
+            users.append(host.name)
+    for loc in g.session.query(Location).all():
+        haystack = (loc.custom_config or "") + json.dumps(loc.setting_map())
+        if variable in haystack and loc.host:
+            users.append(f"{loc.host.name}{loc.path}")
+
+    if users:
+        raise HTTPException(
+            status_code=409,
+            detail=(f"{variable} is still used by: {', '.join(sorted(set(users)))}.  "
+                    f"nginx will not start with a variable nothing sets, so take "
+                    f"it out of those first."))
+
+    name = block.name
+    g.session.delete(block)
+    g.session.commit()
+
+    audit.record("map.delete", user=g.user, object_type="map", object_name=name)
+    return {"ok": True, "deleted": name}
+
+
+def _apply_map_fields(g, block, payload):
+    if "name" in payload:
+        name = validate_name(payload["name"], "map name")
+        claim_name(g.session, MapBlock, name, "map", exclude_id=block.id)
+        block.name = name
+
+    if "description" in payload:
+        block.description = (payload.get("description") or "")[:500] or None
+
+    if "source_variable" in payload:
+        source = str(payload["source_variable"] or "").strip()
+        if not source.startswith("$"):
+            source = "$" + source
+        if not re.fullmatch(r"\$[A-Za-z0-9_]{1,64}", source):
+            raise HTTPException(
+                status_code=400,
+                detail="a variable is a dollar sign and then letters, numbers and underscores")
+        if not _known_source(source):
+            raise HTTPException(
+                status_code=400,
+                detail=(f"nginx does not know a variable called {source}.  It "
+                        f"refuses to start on an unknown one, which would stop "
+                        f"every node applying anything, so it is refused here "
+                        f"instead.  The page lists the ones that work."))
+        block.source_variable = source
+
+    if "result_variable" in payload:
+        result = str(payload["result_variable"] or "").strip().lstrip("$")
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", result):
+            raise HTTPException(
+                status_code=400,
+                detail="the name it sets has to be letters, numbers and underscores")
+        if result in MAP_RESERVED_RESULTS:
+            raise HTTPException(
+                status_code=400,
+                detail=(f"nginx already has a variable called ${result}, and a "
+                        f"map cannot take a name that is taken.  It says "
+                        f'"the duplicate variable" and will not start.'))
+        # Two maps writing one variable is accepted by nginx and only one of
+        # them wins, silently, which is a worse day than a refusal.
+        for other in g.session.query(MapBlock).all():
+            if other.id == block.id:
+                continue
+            if (other.result_variable or "").lstrip("$") == result:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(f"the map {other.name} already sets ${result}.  nginx "
+                            f"takes one of them without saying which, so this is "
+                            f"refused rather than left to surprise somebody."))
+        block.result_variable = result
+
+    if "default_value" in payload:
+        block.default_value = _check_map_text(payload["default_value"], "the default")
+
+    if "hostnames" in payload:
+        block.hostnames = bool(payload["hostnames"])
+
+    if "entries" in payload:
+        raw = payload["entries"]
+        if not isinstance(raw, list):
+            raise HTTPException(status_code=400, detail="entries has to be a list")
+        if len(raw) > 2000:
+            raise HTTPException(
+                status_code=400,
+                detail="that is more than 2000 entries, which wants a file rather than a form")
+
+        clean, seen = [], set()
+        for row in raw:
+            if not isinstance(row, dict):
+                raise HTTPException(status_code=400, detail="each entry is an object")
+            match = _check_map_text(row.get("match"), "a match")
+            value = _check_map_text(row.get("value"), "a value")
+            if not match:
+                continue
+            if match in seen:
+                # nginx takes the first and ignores the rest, so the second one
+                # is a rule somebody wrote that will never fire.
+                raise HTTPException(
+                    status_code=409,
+                    detail=(f"{match} is in this map twice.  nginx uses the first "
+                            f"one and the other never fires."))
+            seen.add(match)
+            clean.append({"match": match, "value": value})
+        block.entries = json.dumps(clean)
+
+
+def _check_map_text(value, what):
+    """
+    A match or a value, checked the way the renderer will write it.
+
+    Backslashes are allowed on purpose, because a map is mostly regular
+    expressions and almost every useful one has a backslash in it.  What is
+    refused is what would end the directive early or run past the closing
+    quote.  See map_value in render.py, which does the writing.
+    """
+    text = "" if value is None else str(value).strip()
+    if re.search(r"[;{}\n\r]", text):
+        raise HTTPException(
+            status_code=400,
+            detail=f"{what} cannot contain a semicolon, a brace or a newline")
+    trailing = len(text) - len(text.rstrip("\\"))
+    if trailing % 2:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"{what} ends in a single backslash, which would run past the "
+                    f"end of the line.  A regular expression cannot end that way "
+                    f"either."))
+    if len(text) > 500:
+        raise HTTPException(status_code=400, detail=f"{what} is too long")
+    return text
+
+
+# ==============================================================================
 # Streams, which is plain TCP and UDP with no http anywhere
 # ==============================================================================
 
