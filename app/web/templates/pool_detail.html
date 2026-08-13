@@ -465,6 +465,41 @@
       </div>
     </div>
   </div>
+
+  <div class="card">
+    <div class="card-head">
+      <h2>What the backends are doing</h2>
+    </div>
+    <div class="card-body">
+      <div class="field">
+        <label for="mm-url">Where these backends publish their own numbers</label>
+        <input type="text" id="mm-url" class="mono"
+               value="{{ settings.get('member_metrics_url','') }}"
+               placeholder="http://{host}:9100/metrics">
+        <div class="hint">
+          One template for the whole pool, since the members are nearly always
+          the same kind of box.  <code>{{ '{host}' }}</code> becomes the
+          backend's address and <code>{{ '{port}' }}</code> the port it serves
+          on.  Leave it blank and the Utilization page says these are not
+          measured, which is the honest answer for a backend that publishes
+          nothing.
+        </div>
+        <div class="hint mt">
+          It wants the Prometheus text format.  A
+          <code>node_exporter</code> on 9100 is the usual answer and reports the
+          whole machine.  An application endpoint works too, and reports that
+          one process, which is a different number and is labelled as such: a
+          JVM at 100% of one core is not a busy server.
+        </div>
+        <div class="hint mt">
+          There is deliberately no option to log in to the backends and read
+          <code>/proc</code>.  That would mean this manager holding credentials
+          for every server in the estate, which is a much bigger thing to
+          protect than a chart is worth.
+        </div>
+      </div>
+    </div>
+  </div>
 </div>
 
 <div class="card" style="position:sticky; bottom:0; z-index:50">
@@ -1006,6 +1041,7 @@ document.addEventListener("DOMContentLoaded", function () {
           sticky_consistent: true,
           slow_start_enabled: chk("ss-enabled"),
           slow_start_seconds: num("ss-seconds"),
+          member_metrics_url: str("mm-url"),
           adaptive_weight_enabled: chk("aw-enabled"),
           adaptive_base_weight: num("aw-base"),
           adaptive_min_weight: num("aw-min"),

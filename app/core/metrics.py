@@ -245,6 +245,54 @@ class MetricsHistory:
         return out
 
 
+class MemberHistory:
+    """
+    Samples for one backend, and what its exporter last said about itself.
+
+    Kept apart from the node histories because a backend is a different kind of
+    thing: we do not own it, it may publish nothing, and what it publishes may
+    describe the whole machine or only one process.  Which of those it is has to
+    travel with the numbers, or a JVM at 100% of one core reads as a box on
+    fire.
+    """
+
+    def __init__(self):
+        self.samples = deque(maxlen=MAX_SAMPLES)
+        self.level = None
+        self.error = None
+
+    def add(self, reading: dict, when: float = None):
+        from app.core import exporters
+
+        when = when or time.time()
+        reading = dict(reading or {})
+        reading["at"] = when
+
+        row = {"at": when}
+        for key in ("memory_percent", "memory_used", "memory_total", "load_1m"):
+            if reading.get(key) is not None:
+                row[key] = reading[key]
+
+        previous = self._last_reading
+        busy = exporters.cpu_percent(previous, reading)
+        if busy is not None:
+            row["cpu_percent"] = busy
+
+        self._last_reading = reading
+        self.level = reading.get("level") or self.level
+        self.samples.append(row)
+
+    _last_reading = None
+
+    def latest(self):
+        return dict(self.samples[-1]) if self.samples else None
+
+    def series(self, key, limit=120):
+        rows = list(self.samples)[-limit:]
+        return [{"at": round(r["at"], 1), "value": r[key]}
+                for r in rows if r.get(key) is not None]
+
+
 class MetricsCollector:
     """
     Asks the agent for stub_status on a timer and keeps what it says.
@@ -258,6 +306,92 @@ class MetricsCollector:
         self.node_name = node_name
         self.history = {}
         self.last_error = {}
+        # Keyed by pool name, then by member label.
+        self.members = {}
+
+    def _member(self, pool_name: str, label: str) -> "MemberHistory":
+        pool = self.members.setdefault(pool_name, {})
+        if label not in pool:
+            pool[label] = MemberHistory()
+        return pool[label]
+
+    async def collect_members(self):
+        """
+        Ask each pool's backends what they are doing, where they publish it.
+
+        Every node does this for itself rather than one node doing it and
+        sharing, which is the same choice the health checker makes and for the
+        same reason: a backend one node can reach and another cannot is a
+        routing problem, and seeing it split by node usually gives the answer
+        straight away.
+
+        Never raises.  A backend that publishes nothing, or has gone away, is a
+        thing to report on a page and not a reason for the collector to stop.
+        """
+        import httpx
+
+        from app.core import exporters
+        from app.db import session_scope
+        from app.models import Pool
+
+        with session_scope() as session:
+            wanted = []
+            for pool in session.query(Pool).all():
+                template = (pool.setting_map() or {}).get("member_metrics_url")
+                if not template:
+                    continue
+                for member in pool.members:
+                    if not member.enabled:
+                        continue
+                    wanted.append((pool.name, member.label,
+                                   exporters.build_url(template, member.address,
+                                                       member.port)))
+
+        if not wanted:
+            return
+
+        async with httpx.AsyncClient(verify=False, timeout=httpx.Timeout(8.0),
+                                     follow_redirects=False) as client:
+            for pool_name, label, url in wanted:
+                history = self._member(pool_name, label)
+                try:
+                    response = await client.get(url)
+                    if response.status_code != 200:
+                        history.error = f"{url} answered {response.status_code}"
+                        continue
+                    body = response.text
+                    if len(body) > exporters.MAX_BODY_BYTES:
+                        history.error = "that endpoint answered with far too much text"
+                        continue
+                    reading = exporters.parse(body)
+                    if not reading:
+                        history.error = ("nothing recognisable at that endpoint.  "
+                                         "It wants the Prometheus text format.")
+                        continue
+                    history.add(reading)
+                    history.error = None
+                except Exception as exc:
+                    history.error = str(exc)
+
+    def member_snapshot(self, with_series=False, limit=120) -> dict:
+        out = {}
+        for pool_name, members in self.members.items():
+            rows = {}
+            for label, hist in members.items():
+                row = {
+                    "latest": hist.latest(),
+                    "level": hist.level,
+                    "error": hist.error,
+                    "samples": len(hist.samples),
+                }
+                if with_series:
+                    row["series"] = {
+                        key: hist.series(key, limit=limit)
+                        for key in ("cpu_percent", "memory_percent")
+                    }
+                rows[label] = row
+            out[pool_name] = rows
+        return out
 
     def _for(self, node: str) -> MetricsHistory:
         if node not in self.history:

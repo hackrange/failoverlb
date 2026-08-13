@@ -878,6 +878,67 @@ check("one we hold the material for knows it can rebuild itself",
       "back from the database instead of waiting for a person")
 
 print()
+print("  reading a backend's own numbers")
+# These come off somebody else's server, in a format we do not control, and
+# every one of these was a decision rather than an implementation detail.
+from app.core import exporters as _exp  # noqa: E402
+
+_NODE = """
+node_cpu_seconds_total{cpu="0",mode="idle"} 1000.0
+node_cpu_seconds_total{cpu="0",mode="user"} 100.0
+node_cpu_seconds_total{cpu="1",mode="idle"} 1000.0
+node_cpu_seconds_total{cpu="1",mode="user"} 100.0
+node_memory_MemTotal_bytes 8.0e+09
+node_memory_MemAvailable_bytes 2.0e+09
+"""
+_NODE_LATER = _NODE.replace('mode="idle"} 1000.0', 'mode="idle"} 1005.0') \
+                   .replace('mode="user"} 100.0', 'mode="user"} 105.0')
+
+_a = _exp.parse(_NODE)
+_b = _exp.parse(_NODE_LATER)
+
+check("a machine exporter is read as the machine",
+      _a.get("level") == "machine" and _a.get("memory_percent") == 75.0,
+      "node_exporter is the case everybody has, and 6 of 8 GB in use is 75%")
+
+check("cpu comes from the difference between two reads",
+      _exp.cpu_percent(_a, _b) == 50.0,
+      "these are counters of seconds, so a single read gives a percentage "
+      "since boot, which never moves")
+
+check("counters going backwards is a gap rather than a negative",
+      _exp.cpu_percent(_b, _a) is None,
+      "that is a restart, and drawing it as a number invents one")
+
+_APP = ("process_cpu_seconds_total 120.0\n"
+        "process_resident_memory_bytes 2.68435456e+08\n")
+_p1 = _exp.parse(_APP); _p1["at"] = 1000
+_p2 = _exp.parse(_APP.replace("120.0", "123.0")); _p2["at"] = 1010
+check("an application exporter is labelled as one process",
+      _p1.get("level") == "process" and _exp.cpu_percent(_p1, _p2) == 30.0,
+      "a JVM at 100% of one core is not a busy machine, and a chart that does "
+      "not say which it is showing gets acted on")
+
+check("a machine exporter beside an application one is not overwritten",
+      _exp.parse(_NODE + _APP).get("memory_percent") == 75.0,
+      "otherwise the box's memory becomes one process's, which reads as a "
+      "server using 256MB and is quietly wrong")
+
+for _junk, _label in ((None, "nothing"), ("", "empty"),
+                      ("<html>no</html>", "an html page"),
+                      ("total nonsense here", "words")):
+    check(f"{_label} gives nothing rather than raising",
+          _exp.parse(_junk) == {},
+          "a backend answering with the wrong thing is a message on a page, "
+          "not an exception in the collector")
+
+check("the url template fills in the member",
+      _exp.build_url("http://{host}:{port}/m", "192.0.2.10", 8080)
+      == "http://192.0.2.10:8080/m",
+      "one template per pool, because a field per member is how it ends up "
+      "half filled in")
+
+print()
 print("  the paid feature stand ins")
 # Sticky sessions were shipped, documented, and had never worked.  The cookie
 # was written on every response and its value was the backend that had just

@@ -1274,6 +1274,11 @@ def _validate_pool_settings(raw) -> dict:
         "adaptive_min_weight": int,
         "adaptive_max_weight": int,
         "adaptive_floor_ms": int,
+        # Where this pool's backends publish what they are doing.  A template,
+        # since the members of a pool are nearly always the same kind of box
+        # with the same exporter on the same port, and one field per member is
+        # how it ends up half filled in.
+        "member_metrics_url": "url",
     }
 
     cleaned = {}
@@ -1288,10 +1293,27 @@ def _validate_pool_settings(raw) -> dict:
                 cleaned[key] = int(value)
             except (TypeError, ValueError):
                 raise HTTPException(status_code=400, detail=f"{key} has to be a number")
+        elif expected == "url":
+            text = str(value or "").strip()
+            if not text:
+                cleaned[key] = ""
+                continue
+            # http or https, and nothing else.  This is a URL the manager will
+            # fetch on a timer, so a file: or a gopher: here would be somebody
+            # pointing it at something it should not read.
+            if not re.fullmatch(
+                    r"https?://[A-Za-z0-9._:\[\]{}-]+(/[A-Za-z0-9._~:/?#@!$&'()*+,;=%{}-]*)?",
+                    text):
+                raise HTTPException(
+                    status_code=400,
+                    detail=("that has to be an http or https URL.  Use {host} where "
+                            "the backend's address goes, like "
+                            "http://{host}:9100/metrics"))
+            if len(text) > 300:
+                raise HTTPException(status_code=400, detail="that URL is too long")
+            cleaned[key] = text
         else:
             text = str(value)
-            import re
-
             if not re.fullmatch(r"[A-Za-z0-9_-]{1,40}", text):
                 raise HTTPException(status_code=400, detail=f"{key} has characters we cannot use")
             cleaned[key] = text
@@ -2611,6 +2633,36 @@ async def delete_error_image(template_id: str, image_id: str,
                  object_name=f"{template.name}/{name}")
     g.session.refresh(template)
     return _error_template_detail(g.session, template)
+
+
+@router.get("/metrics/members")
+async def member_metrics(minutes: int = 60, g: ObjectGuard = Depends(guard)):
+    """
+    What each pool's backends say they are doing.
+
+    Empty for a pool that has no metrics URL set, which is not an error: most
+    backends publish nothing and the page says not measured rather than drawing
+    an empty chart, because an empty chart reads as zero.
+    """
+    g.require("view")
+    from app.core.metrics import get_collector
+
+    minutes = max(1, min(int(minutes or 60), 240))
+    return {
+        "minutes": minutes,
+        "pools": get_collector().member_snapshot(with_series=True,
+                                                 limit=minutes * 2),
+        # Which pools are set up to be asked at all, so the page can tell a
+        # pool that publishes nothing from one that has never been looked at.
+        "configured": _pools_with_metrics(g.session),
+    }
+
+
+def _pools_with_metrics(session):
+    out = {}
+    for pool in session.query(Pool).all():
+        out[pool.name] = bool((pool.setting_map() or {}).get("member_metrics_url"))
+    return out
 
 
 @router.get("/metrics/series")

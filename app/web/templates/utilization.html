@@ -30,6 +30,9 @@
 
 <div id="charts"></div>
 
+<h2 class="section-heading">Backends</h2>
+<div id="member-charts"></div>
+
 <style>
   .tile-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
               gap: .75rem; margin-bottom: 1.25rem; }
@@ -62,6 +65,11 @@
   svg.chart .hit { fill: transparent; }
   .readout { font-size: .8rem; padding: 0 .9rem .75rem; min-height: 1.2em;
              font-variant-numeric: tabular-nums; opacity: .8; }
+  .section-heading { font-size: 1.05rem; margin: 1.75rem 0 .75rem; }
+  .pool-note { font-size: .82rem; opacity: .65; padding: 0 .9rem .75rem; }
+  .level-tag { font-size: .68rem; letter-spacing: .04em; text-transform: uppercase;
+               border: 1px solid currentColor; border-radius: 3px; padding: 0 .3rem;
+               opacity: .6; margin-left: .4rem; }
 </style>
 
 <script nonce="{{ csp_nonce }}">
@@ -257,6 +265,7 @@ document.addEventListener("DOMContentLoaded", function () {
   }
 
   let LAST = {};
+  let LAST_MEMBERS = {};
 
   function draw(data) {
     lastPayload = data;
@@ -305,8 +314,20 @@ document.addEventListener("DOMContentLoaded", function () {
     const from = parseFloat(hit.dataset.from), to = parseFloat(hit.dataset.to);
     const at = from + frac * (to - from);
 
-    const parts = Object.keys(LAST).sort().map(function (n) {
-      const s = ((LAST[n] || {}).series || {})[spec.key] || [];
+    // A member chart's lines are backends, not nodes, so look in whichever
+    // set this card was drawn from.
+    let source = LAST;
+    if (card.closest("#member-charts")) {
+      source = {};
+      Object.keys(LAST_MEMBERS).forEach(function (pool) {
+        Object.keys(LAST_MEMBERS[pool]).forEach(function (label) {
+          source[label] = {series: LAST_MEMBERS[pool][label].series || {}};
+        });
+      });
+    }
+
+    const parts = Object.keys(source).sort().map(function (n) {
+      const s = ((source[n] || {}).series || {})[spec.key] || [];
       if (!s.length) { return null; }
       let best = s[0];
       for (let i = 1; i < s.length; i++) {
@@ -330,6 +351,73 @@ document.addEventListener("DOMContentLoaded", function () {
     });
   }, true);
 
+  // ------------------------------------------------------- the backends
+  //
+  // A chart per pool with a line per backend, rather than a chart per backend.
+  // The question about a pool is nearly always whether one member is working
+  // harder than the others, and that is a comparison, so they belong on one
+  // pair of axes.
+  function drawMembers(data) {
+    lastMembers = data;
+    LAST_MEMBERS = data.pools || {};
+    const configured = data.configured || {};
+    const poolNames = Object.keys(configured).sort();
+    const out = [];
+
+    poolNames.forEach(function (pool) {
+      const members = LAST_MEMBERS[pool] || {};
+      const labels = Object.keys(members).sort();
+
+      if (!configured[pool]) {
+        // Not measured is a different thing from measured as zero, and an
+        // empty chart says the second one.
+        out.push('<div class="card chart-card"><div class="chart-head"><h3>' +
+          NFM.escapeHtml(pool) + '</h3></div><div class="pool-note">' +
+          "Not measured.  These backends publish nothing this manager knows how " +
+          "to read.  Set where they publish it on the pool's page, under what " +
+          "the backends are doing.</div></div>");
+        return;
+      }
+
+      const errors = labels.filter(function (l) { return members[l].error; });
+      const level = (members[labels[0]] || {}).level;
+
+      ["cpu_percent", "memory_percent"].forEach(function (key) {
+        const spec = {
+          key: key,
+          title: pool + (key === "cpu_percent" ? " cpu" : " memory in use"),
+          units: level === "process" ? "percent, one process" : "percent",
+          max: 100,
+          fmt: function (v) { return v.toFixed(0) + "%"; }
+        };
+        // Reuse the node chart drawer by handing it the same shape.
+        const shaped = {};
+        labels.forEach(function (l) {
+          shaped[l] = {series: (members[l].series || {})};
+        });
+        let html = drawChart(spec, shaped);
+        if (level === "process") {
+          html = html.replace("</h3>",
+            '</h3><span class="level-tag">one process, not the machine</span>');
+        }
+        out.push(html);
+      });
+
+      if (errors.length) {
+        out.push('<div class="card chart-card"><div class="pool-note">' +
+          errors.map(function (l) {
+            return NFM.escapeHtml(l) + ": " + NFM.escapeHtml(members[l].error);
+          }).join("<br>") + "</div></div>");
+      }
+    });
+
+    if (!poolNames.length) {
+      out.push('<div class="card chart-card"><div class="pool-note">' +
+               "No pools yet.</div></div>");
+    }
+    el("member-charts").innerHTML = out.join("");
+  }
+
   async function load() {
     const minutes = el("window").value;
     try {
@@ -338,6 +426,12 @@ document.addEventListener("DOMContentLoaded", function () {
       el("charts").textContent =
         "Could not load: " + (err && err.message ? err.message : err);
     }
+    try {
+      drawMembers(await NFM.api("/metrics/members?minutes=" + minutes));
+    } catch (err) {
+      el("member-charts").textContent =
+        "Could not load the backends: " + (err && err.message ? err.message : err);
+    }
   }
 
   // Redraw when the window changes size, because the geometry is measured
@@ -345,10 +439,12 @@ document.addEventListener("DOMContentLoaded", function () {
   // continuously and redrawing five charts on every pixel is wasteful.
   let resizeTimer = null;
   let lastPayload = null;
+  let lastMembers = null;
   window.addEventListener("resize", function () {
     if (resizeTimer) { clearTimeout(resizeTimer); }
     resizeTimer = setTimeout(function () {
       if (lastPayload) { draw(lastPayload); }
+      if (lastMembers) { drawMembers(lastMembers); }
     }, 150);
   });
 

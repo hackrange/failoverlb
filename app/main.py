@@ -396,6 +396,21 @@ def start_scheduler():
         coalesce=True,
     )
 
+    # What the backends say about themselves, for anything publishing it.
+    #
+    # Slower than our own numbers on purpose.  This reaches out to somebody
+    # else's servers, cpu and memory do not need fifteen second resolution to
+    # be useful, and being a polite visitor to a box we do not own matters more
+    # than the extra detail.
+    scheduler.add_job(
+        get_collector().collect_members,
+        "interval",
+        seconds=30,
+        id="member_metrics",
+        max_instances=1,
+        coalesce=True,
+    )
+
     # Notice a certificate whose files have gone before it stops every apply.
     scheduler.add_job(
         get_cert_manager().verify_files,
