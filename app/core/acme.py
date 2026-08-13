@@ -663,13 +663,26 @@ class CertificateManager:
                 log.error("could not copy %s to %s: %s", name, info["name"], exc)
                 results["failed"].append({"node": info["name"], "error": str(exc)})
 
+        # Record which nodes got it, the same way issuing does.
+        #
+        # This is what the "copied to" count on the page reads.  Writing the
+        # files without writing this leaves a certificate that really is on
+        # every node reading as 0 of 2 forever, with a "copy to all" button that
+        # never stops being offered.  A column that is wrong is worse than no
+        # column, because somebody acts on it.
+        import hashlib
+        checksum = hashlib.sha256(fullchain.encode()).hexdigest()[:16]
+
         with session_scope() as session:
             cert = session.query(Certificate).filter(Certificate.id == cert_id).first()
             if cert:
+                cert.synced_nodes = json.dumps({n: checksum for n in results["ok"]})
                 cert.files_present = self.settings.node_name in results["ok"]
                 cert.files_checked_at = utcnow()
                 session.commit()
 
+        log.info("wrote %s to %s of %s nodes", name, len(results["ok"]),
+                 len(results["ok"]) + len(results["failed"]))
         return results
 
     async def verify_files(self):

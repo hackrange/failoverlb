@@ -3279,8 +3279,17 @@ async def replicate_cert(cert_id: str, g: ObjectGuard = Depends(changing)):
     """
     cert = g.get(Certificate, cert_id, "edit_certs")
 
+    # Which way round depends on where the files actually are.
+    #
+    # An issued certificate is exported from whichever node certbot wrote it
+    # on.  One we hold the material for is written from the database, and
+    # asking certbot's folder for it gets "no cert called that", which is a
+    # confusing way to be told the button was pointed at the wrong code.
     try:
-        result = await get_cert_manager().replicate(cert.id)
+        if cert.has_material():
+            result = await get_cert_manager().place_material(cert.id)
+        else:
+            result = await get_cert_manager().replicate(cert.id)
     except AcmeError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
