@@ -33,7 +33,105 @@ MAX_SAMPLES = 480
 # own.  Confusing the two gives you a graph of "requests since nginx started",
 # which climbs forever and says nothing.
 COUNTERS = ("accepts", "handled", "requests")
-GAUGES = ("active_connections", "reading", "writing", "waiting")
+GAUGES = ("active_connections", "reading", "writing", "waiting",
+          "cpu_percent", "memory_percent", "memory_used", "memory_total",
+          "load_1m", "swap_percent", "disk_percent")
+
+
+def read_host() -> dict:
+    """
+    What this box is doing, out of /proc.
+
+    Read here rather than through the agent, and that is a deliberate choice
+    about where the security boundary sits.  The agent runs with
+    `ProcSubset=pid`, so /proc/stat and /proc/meminfo are invisible to it, and
+    the fix is not to widen the one root component in the system for the sake
+    of a chart.  The container can read these itself, it needs no privilege to
+    do so, and the numbers are the host's because a container shares the
+    kernel's view of them.
+
+    cpu comes back as raw jiffies, which are counters.  Turning them into a
+    percentage needs two readings and is done by the caller.
+
+    Memory is available rather than free.  Free counts the page cache as used,
+    so a healthy Linux box that has been up a week reads as out of memory when
+    it has plenty, and somebody acts on that.
+    """
+    out = {}
+
+    try:
+        with open("/proc/stat") as fh:
+            for line in fh:
+                if line.startswith("cpu "):
+                    parts = [int(v) for v in line.split()[1:]]
+                    names = ("user", "nice", "system", "idle", "iowait",
+                             "irq", "softirq", "steal")
+                    out["cpu"] = dict(zip(names, parts))
+                    break
+    except (OSError, ValueError):
+        pass
+
+    try:
+        mem = {}
+        with open("/proc/meminfo") as fh:
+            for line in fh:
+                key, _, rest = line.partition(":")
+                bits = rest.strip().split()
+                if bits and bits[0].isdigit():
+                    mem[key] = int(bits[0]) * 1024
+        total = mem.get("MemTotal", 0)
+        available = mem.get("MemAvailable", 0)
+        if total:
+            out["memory_total"] = total
+            out["memory_used"] = max(0, total - available)
+            out["memory_percent"] = round((total - available) / total * 100, 1)
+        swap_total = mem.get("SwapTotal", 0)
+        if swap_total:
+            out["swap_percent"] = round(
+                (swap_total - mem.get("SwapFree", 0)) / swap_total * 100, 1)
+    except (OSError, ValueError):
+        pass
+
+    try:
+        with open("/proc/loadavg") as fh:
+            out["load_1m"] = float(fh.read().split()[0])
+    except (OSError, ValueError, IndexError):
+        pass
+
+    try:
+        import shutil
+        usage = shutil.disk_usage("/etc/nginx")
+        if usage.total:
+            out["disk_percent"] = round(usage.used / usage.total * 100, 1)
+    except OSError:
+        pass
+
+    return out
+
+
+def cpu_percent(older: dict, newer: dict):
+    """
+    Busy time between two /proc/stat readings, as a percentage.
+
+    None when either reading is missing or the counters went backwards, which
+    happens on a reboot.  A gap in what we know is not zero percent, and a
+    chart that draws it as zero says the box was idle when it was off.
+    """
+    if not older or not newer:
+        return None
+    busy_keys = ("user", "nice", "system", "irq", "softirq", "steal")
+    try:
+        total_old = sum(older.values())
+        total_new = sum(newer.values())
+        busy_old = sum(older.get(k, 0) for k in busy_keys)
+        busy_new = sum(newer.get(k, 0) for k in busy_keys)
+    except (TypeError, AttributeError):
+        return None
+
+    span = total_new - total_old
+    if span <= 0:
+        return None
+    return round(max(0.0, min(100.0, (busy_new - busy_old) / span * 100)), 1)
 
 
 class MetricsHistory:
@@ -42,16 +140,36 @@ class MetricsHistory:
     def __init__(self):
         self.samples = deque(maxlen=MAX_SAMPLES)
 
-    def add(self, metrics: dict, when: float = None):
+    def add(self, metrics: dict, host: dict = None, when: float = None):
         when = when or time.time()
         row = {"at": when}
-        for key in COUNTERS + GAUGES:
+        for key in COUNTERS:
             if key in metrics:
                 row[key] = int(metrics[key])
+
+        host = host or {}
+        for key in GAUGES:
+            if key in metrics:
+                row[key] = int(metrics[key])
+            elif key in host:
+                row[key] = host[key]
+
+        # The cpu jiffies themselves, kept so the next sample can work out a
+        # percentage.  Not reported: a counter since boot is not a chart.
+        if host.get("cpu"):
+            row["_cpu"] = host["cpu"]
+            previous = self.samples[-1].get("_cpu") if self.samples else None
+            busy = cpu_percent(previous, host["cpu"])
+            if busy is not None:
+                row["cpu_percent"] = busy
+
         self.samples.append(row)
 
     def latest(self):
-        return dict(self.samples[-1]) if self.samples else None
+        if not self.samples:
+            return None
+        # The raw jiffies are working state, not something to hand out.
+        return {k: v for k, v in self.samples[-1].items() if not k.startswith("_")}
 
     def rates(self):
         """
@@ -92,9 +210,39 @@ class MetricsHistory:
         return out
 
     def series(self, key, limit=120):
-        """Recent values of one number, for drawing a line."""
+        """
+        Recent values of one number, for drawing a line.
+
+        A sample with no value for this key is left out rather than sent as
+        zero, so the chart can break the line there.  Joining across a gap
+        invents data, and the gaps are exactly the interesting moments: a
+        restart, or a node nobody could reach.
+        """
         rows = list(self.samples)[-limit:]
-        return [{"at": r["at"], "value": r[key]} for r in rows if key in r]
+        return [{"at": round(r["at"], 1), "value": r[key]}
+                for r in rows if r.get(key) is not None]
+
+    def rate_series(self, limit=120):
+        """
+        Request rate over time, worked out between each pair of samples.
+
+        Counters have to be differenced, and doing it here rather than in the
+        page keeps the one place that knows a counter from a gauge in one
+        place.  A pair that spans a restart, where the counter went backwards,
+        is skipped so the line breaks instead of spiking.
+        """
+        rows = list(self.samples)[-(limit + 1):]
+        out = []
+        for older, newer in zip(rows, rows[1:]):
+            if "requests" not in older or "requests" not in newer:
+                continue
+            seconds = newer["at"] - older["at"]
+            delta = newer["requests"] - older["requests"]
+            if seconds <= 0 or delta < 0:
+                continue
+            out.append({"at": round(newer["at"], 1),
+                        "value": round(delta / seconds, 2)})
+        return out
 
 
 class MetricsCollector:
@@ -123,14 +271,19 @@ class MetricsCollector:
         from app.db import session_scope
         from app.models import Node
 
+        host = read_host()
         try:
             result = await get_agent().nginx_metrics()
             if result.get("ok") and result.get("metrics"):
-                self._for(self.node_name).add(result["metrics"])
+                self._for(self.node_name).add(result["metrics"], host=host)
                 self.last_error.pop(self.node_name, None)
             else:
+                # Still keep the host numbers.  nginx being unreachable is
+                # exactly when somebody wants to know what the box is doing.
+                self._for(self.node_name).add({}, host=host)
                 self.last_error[self.node_name] = result.get("error") or "no numbers came back"
         except Exception as exc:
+            self._for(self.node_name).add({}, host=host)
             self.last_error[self.node_name] = str(exc)
 
         cluster = get_cluster()
@@ -156,25 +309,45 @@ class MetricsCollector:
                     "/peer/agent",
                     {"verb": "nginx_metrics", "payload": {}},
                     timeout=15) or {}
+
+                # The peer's own reading of its own /proc.  Asked of its
+                # manager rather than its agent, because the agent cannot see
+                # /proc/stat and widening it for a chart would be trading the
+                # one root component's boundary for a nicety.
+                try:
+                    peer_host = await client.call("/peer/host-metrics", {},
+                                                  timeout=15) or {}
+                except Exception:
+                    peer_host = {}
+
                 if data.get("ok") and data.get("metrics"):
-                    self._for(peer_name).add(data["metrics"])
+                    self._for(peer_name).add(data["metrics"], host=peer_host)
                     self.last_error.pop(peer_name, None)
                 else:
+                    self._for(peer_name).add({}, host=peer_host)
                     self.last_error[peer_name] = data.get("error") or "no numbers came back"
             except Exception as exc:
                 # A peer being unreachable is the cluster page's story to tell,
                 # not this one's.  Record it and carry on.
                 self.last_error[peer_name] = str(exc)
 
-    def snapshot(self) -> dict:
+    def snapshot(self, with_series=False, limit=120) -> dict:
         out = {}
         for node, hist in self.history.items():
-            out[node] = {
+            row = {
                 "latest": hist.latest(),
                 "rates": hist.rates(),
                 "samples": len(hist.samples),
                 "error": self.last_error.get(node),
             }
+            if with_series:
+                row["series"] = {
+                    key: hist.series(key, limit=limit)
+                    for key in ("cpu_percent", "memory_percent",
+                                "active_connections", "load_1m")
+                }
+                row["series"]["requests_per_sec"] = hist.rate_series(limit=limit)
+            out[node] = row
         for node, err in self.last_error.items():
             out.setdefault(node, {"latest": None, "rates": None,
                                   "samples": 0, "error": err})

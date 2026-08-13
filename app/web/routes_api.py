@@ -2613,6 +2613,28 @@ async def delete_error_image(template_id: str, image_id: str,
     return _error_template_detail(g.session, template)
 
 
+@router.get("/metrics/series")
+async def metrics_series(minutes: int = 60, g: ObjectGuard = Depends(guard)):
+    """
+    The same numbers as /metrics, with the history behind them.
+
+    `minutes` is capped by what is kept, which is a couple of hours in memory.
+    Asking for more than that is not an error, it just gets what there is: the
+    page says how far back the data really goes rather than drawing a flat line
+    across a window nobody has numbers for.
+    """
+    g.require("view")
+    from app.core.metrics import get_collector
+
+    minutes = max(1, min(int(minutes or 60), 240))
+    # One sample every fifteen seconds, so four a minute.
+    limit = minutes * 4
+    return {
+        "minutes": minutes,
+        "nodes": get_collector().snapshot(with_series=True, limit=limit),
+    }
+
+
 @router.get("/metrics")
 async def nginx_metrics(g: ObjectGuard = Depends(guard)):
     """

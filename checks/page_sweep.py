@@ -25,7 +25,7 @@ from app.models import AuthSource, User, UserRole
 # Pages the sidebar offers, plus the ones you reach from them.
 PAGES = [
     "/", "/sites", "/pools", "/zones", "/error-pages", "/certificates",
-    "/cluster",
+    "/cluster", "/utilization", "/maps", "/streams",
     "/upgrade", "/parity", "/account", "/settings", "/users", "/audit",
     "/changes",
 ]
@@ -45,6 +45,10 @@ ENDPOINTS = [
     "/api/config/pending",
     "/api/audit",
     "/api/error-pages",
+    "/api/metrics",
+    "/api/metrics/series?minutes=15",
+    "/api/maps",
+    "/api/streams",
 ]
 
 results = []

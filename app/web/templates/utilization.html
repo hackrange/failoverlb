@@ -1,0 +1,349 @@
+{% extends "base.html" %}
+{% block title %}Utilization &middot; NGINX Management{% endblock %}
+
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <h1>Utilization</h1>
+    <div class="sub">
+      What the boxes are actually doing, over time.  A number on its own tells
+      you this second; a line tells you whether it is normal.
+    </div>
+  </div>
+  <div class="page-actions">
+    <select id="window">
+      <option value="15">Last 15 minutes</option>
+      <option value="60" selected>Last hour</option>
+      <option value="120">Last 2 hours</option>
+    </select>
+    <button class="btn" id="refresh">Refresh</button>
+  </div>
+</div>
+
+<div class="notice info" id="short-history" hidden>
+  <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 3a.9.9 0 1 1 0 1.8A.9.9 0 0 1 8 4zm1.2 8H6.8v-.9h.7V7.9h-.7V7h2.1v4.1h.3V12z"/></svg>
+  <div id="short-history-text"></div>
+</div>
+
+<div id="tiles" class="tile-row"></div>
+
+<div id="charts"></div>
+
+<div class="card">
+  <div class="card-head"><h2>What is not on this page</h2></div>
+  <div class="card-body">
+    <p class="small muted" style="margin:0">
+      <strong>Per site and per backend numbers.</strong>  Request rates, status
+      code mix and latency percentiles broken down by site need the access log
+      read and parsed, which is not built.  The log format already carries
+      everything it would need.  See <code>docs/plus-parity.md</code>.
+      <br><br>
+      <strong>CPU and memory for the backends in a pool.</strong>  These are
+      somebody else's servers and there is no agent on them.  The plan is to
+      read a metrics endpoint they already expose rather than hold credentials
+      for every backend, which would turn this into something with the keys to
+      the estate.
+      <br><br>
+      <strong>Anything older than a couple of hours.</strong>  The numbers are
+      kept in memory, so a restart of the manager loses the history and nothing
+      is written to disk.  That is on purpose: a table that grows forever on a
+      load balancer is a way to fill a disk, and a full disk on a load balancer
+      is a worse outage than a missing chart.
+    </p>
+  </div>
+</div>
+
+<style>
+  .tile-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+              gap: .75rem; margin-bottom: 1.25rem; }
+  .util-tile { border: 1px solid var(--line, #ddd); border-radius: 6px;
+               padding: .75rem .9rem; }
+  .util-tile .who { font-size: .75rem; letter-spacing: .04em;
+                    text-transform: uppercase; opacity: .6; }
+  .util-tile .big { font-size: 1.75rem; font-weight: 650; line-height: 1.15;
+                    margin: .15rem 0 0; font-variant-numeric: tabular-nums; }
+  .util-tile .unit { font-size: .9rem; font-weight: 400; opacity: .55;
+                     margin-left: .15rem; }
+  .util-tile .sub { font-size: .78rem; opacity: .6; margin-top: .1rem; }
+  .chart-card { margin-bottom: 1rem; }
+  .chart-head { display: flex; justify-content: space-between; align-items: baseline;
+                padding: .75rem .9rem .25rem; }
+  .chart-head h3 { margin: 0; font-size: .95rem; }
+  .chart-head .units { font-size: .78rem; opacity: .6; }
+  .legend { display: flex; gap: 1rem; flex-wrap: wrap; padding: 0 .9rem .6rem;
+            font-size: .8rem; }
+  .legend span { display: inline-flex; align-items: center; gap: .35rem; }
+  .swatch { width: 1.6rem; height: 0; border-top-width: 2px; display: inline-block; }
+  svg.chart { display: block; width: 100%; height: 190px; }
+  svg.chart .grid { stroke: currentColor; opacity: .12; stroke-width: 1; }
+  svg.chart .axis { fill: currentColor; opacity: .55; font-size: 10px; }
+  svg.chart .line { fill: none; stroke-width: 2; stroke-linejoin: round;
+                    stroke-linecap: round; }
+  svg.chart .hit { fill: transparent; }
+  .readout { font-size: .8rem; padding: 0 .9rem .75rem; min-height: 1.2em;
+             font-variant-numeric: tabular-nums; opacity: .8; }
+</style>
+
+<script nonce="{{ csp_nonce }}">
+// Waits for app.js, which the layout loads after this block.
+document.addEventListener("DOMContentLoaded", function () {
+
+  // Two lines is all this page ever draws at once, one per node, so the
+  // palette is small on purpose.  Chosen to stay apart for the common kinds of
+  // colour blindness, and never the only difference between two lines: each
+  // one is named in the legend and the readout says which is which.
+  const COLOURS = ["#1f6feb", "#d97706", "#0f766e", "#9333ea"];
+
+  const CHARTS = [
+    {key: "cpu_percent", title: "CPU", units: "percent of all cores",
+     max: 100, fmt: function (v) { return v.toFixed(0) + "%"; }},
+    {key: "memory_percent", title: "Memory in use", units: "percent",
+     max: 100, fmt: function (v) { return v.toFixed(0) + "%"; }},
+    {key: "requests_per_sec", title: "Requests", units: "per second",
+     fmt: function (v) { return v.toFixed(1) + "/s"; }},
+    {key: "active_connections", title: "Active connections", units: "connections",
+     fmt: function (v) { return v.toFixed(0); }},
+    {key: "load_1m", title: "Load average", units: "one minute",
+     fmt: function (v) { return v.toFixed(2); }},
+  ];
+
+  function el(id) { return document.getElementById(id); }
+
+  // ------------------------------------------------------------------ tiles
+  function tiles(nodes) {
+    const names = Object.keys(nodes).sort();
+    const out = [];
+    names.forEach(function (name) {
+      const d = nodes[name] || {};
+      const l = d.latest || {};
+      const r = d.rates || {};
+      function tile(who, big, unit, sub) {
+        return '<div class="util-tile"><div class="who">' +
+          NFM.escapeHtml(who) + '</div><div class="big">' +
+          (big === null || big === undefined
+            ? '<span class="unit">no data</span>'
+            : NFM.escapeHtml(String(big)) +
+              (unit ? '<span class="unit">' + NFM.escapeHtml(unit) + "</span>" : "")) +
+          '</div><div class="sub">' + NFM.escapeHtml(sub || "") + "</div></div>";
+      }
+      out.push(tile(name + " cpu", l.cpu_percent, "%",
+                    l.load_1m !== undefined ? "load " + l.load_1m : ""));
+      out.push(tile(name + " memory", l.memory_percent, "%",
+                    l.memory_total
+                      ? Math.round(l.memory_used / 1048576) + " of " +
+                        Math.round(l.memory_total / 1048576) + " MB"
+                      : ""));
+      out.push(tile(name + " requests",
+                    r.requests_per_sec === null || r.requests_per_sec === undefined
+                      ? null : r.requests_per_sec, "/s",
+                    l.active_connections !== undefined
+                      ? l.active_connections + " connections open" : ""));
+    });
+    el("tiles").innerHTML = out.join("");
+  }
+
+  // ----------------------------------------------------------------- charts
+  //
+  // Inline SVG rather than a charting library, because the GUI has no build
+  // step and no CDN by design: this is a tool somebody opens when the network
+  // is the problem.  A few hundred points and a couple of lines is well within
+  // what SVG draws properly, with real axes rather than a sparkline.
+  function niceMax(value) {
+    // Round the top of the scale up to something a person would choose, so the
+    // gridlines land on readable numbers instead of 37.4.
+    if (value <= 1) { return 1; }
+    const mag = Math.pow(10, Math.floor(Math.log10(value)));
+    const scaled = value / mag;
+    const step = scaled <= 1 ? 1 : scaled <= 2 ? 2 : scaled <= 5 ? 5 : 10;
+    return step * mag;
+  }
+
+  function drawChart(spec, nodes) {
+    const names = Object.keys(nodes).sort();
+    const seriesByNode = {};
+    let peak = 0;
+    let from = Infinity, to = -Infinity;
+
+    names.forEach(function (n) {
+      const s = ((nodes[n] || {}).series || {})[spec.key] || [];
+      seriesByNode[n] = s;
+      s.forEach(function (p) {
+        if (p.value > peak) { peak = p.value; }
+        if (p.at < from) { from = p.at; }
+        if (p.at > to) { to = p.at; }
+      });
+    });
+
+    const any = names.some(function (n) { return seriesByNode[n].length > 1; });
+    if (!any) {
+      return '<div class="card chart-card"><div class="chart-head"><h3>' +
+        NFM.escapeHtml(spec.title) + '</h3><span class="units">' +
+        NFM.escapeHtml(spec.units) + '</span></div>' +
+        '<div class="readout">Not enough samples yet.  A rate needs two ' +
+        'readings, and they are taken every fifteen seconds.</div></div>';
+    }
+
+    // Zero based unless the numbers are a percentage with its own ceiling.
+    // Starting an axis at the minimum makes ordinary noise look like a crisis,
+    // which is the most common way a chart lies.
+    const top = spec.max ? spec.max : niceMax(peak * 1.15 || 1);
+    const W = 1000, H = 190, padL = 46, padR = 12, padT = 12, padB = 26;
+    const plotW = W - padL - padR, plotH = H - padT - padB;
+    const span = Math.max(1, to - from);
+
+    const x = function (at) { return padL + (at - from) / span * plotW; };
+    const y = function (v) { return padT + plotH - (v / top) * plotH; };
+
+    let svg = '<svg class="chart" viewBox="0 0 ' + W + " " + H +
+              '" preserveAspectRatio="none" role="img" aria-label="' +
+              NFM.escapeHtml(spec.title) + '">';
+
+    for (let i = 0; i <= 4; i++) {
+      const v = top * i / 4;
+      const yy = y(v);
+      svg += '<line class="grid" x1="' + padL + '" y1="' + yy +
+             '" x2="' + (W - padR) + '" y2="' + yy + '"/>';
+      svg += '<text class="axis" x="' + (padL - 6) + '" y="' + (yy + 3) +
+             '" text-anchor="end">' + NFM.escapeHtml(spec.fmt(v)) + "</text>";
+    }
+
+    // Time labels at both ends, which is all a chart this wide needs.
+    const started = new Date(from * 1000), ended = new Date(to * 1000);
+    const hhmm = function (d) {
+      return String(d.getHours()).padStart(2, "0") + ":" +
+             String(d.getMinutes()).padStart(2, "0");
+    };
+    svg += '<text class="axis" x="' + padL + '" y="' + (H - 8) + '">' +
+           hhmm(started) + "</text>";
+    svg += '<text class="axis" x="' + (W - padR) + '" y="' + (H - 8) +
+           '" text-anchor="end">' + hhmm(ended) + "</text>";
+
+    names.forEach(function (n, i) {
+      const pts = seriesByNode[n];
+      if (pts.length < 2) { return; }
+      // A gap longer than three sample intervals is a gap, not a straight
+      // line across it.  Joining them would invent numbers for exactly the
+      // moments worth looking at: a restart, or a node nobody could reach.
+      let d = "", pen = false;
+      for (let k = 0; k < pts.length; k++) {
+        const p = pts[k];
+        const jumped = k > 0 && (p.at - pts[k - 1].at) > 45;
+        if (!pen || jumped) {
+          d += "M" + x(p.at).toFixed(1) + " " + y(p.value).toFixed(1);
+          pen = true;
+        } else {
+          d += "L" + x(p.at).toFixed(1) + " " + y(p.value).toFixed(1);
+        }
+      }
+      svg += '<path class="line" d="' + d + '" stroke="' + COLOURS[i % COLOURS.length] +
+             '" data-node="' + NFM.escapeHtml(n) + '"/>';
+    });
+
+    svg += '<rect class="hit" x="' + padL + '" y="' + padT + '" width="' + plotW +
+           '" height="' + plotH + '" data-from="' + from + '" data-to="' + to + '"/>';
+    svg += "</svg>";
+
+    const legend = names.map(function (n, i) {
+      return '<span><i class="swatch" style="border-top:2px solid ' +
+             COLOURS[i % COLOURS.length] + '"></i>' + NFM.escapeHtml(n) + "</span>";
+    }).join("");
+
+    return '<div class="card chart-card" data-chart="' + spec.key + '">' +
+      '<div class="chart-head"><h3>' + NFM.escapeHtml(spec.title) +
+      '</h3><span class="units">' + NFM.escapeHtml(spec.units) + "</span></div>" +
+      '<div class="legend">' + legend + "</div>" + svg +
+      '<div class="readout" data-readout>&nbsp;</div></div>';
+  }
+
+  let LAST = {};
+
+  function draw(data) {
+    const nodes = data.nodes || {};
+    LAST = nodes;
+    tiles(nodes);
+    el("charts").innerHTML = CHARTS.map(function (s) {
+      return drawChart(s, nodes);
+    }).join("");
+
+    // How far back the numbers really go, said out loud.  A window of an hour
+    // drawn from four minutes of samples is not an hour of history, and a
+    // chart that does not say so is one somebody draws conclusions from.
+    let oldest = Infinity, count = 0;
+    Object.keys(nodes).forEach(function (n) {
+      const s = ((nodes[n] || {}).series || {}).cpu_percent || [];
+      if (s.length) { oldest = Math.min(oldest, s[0].at); count += s.length; }
+    });
+    const box = el("short-history");
+    if (count && oldest !== Infinity) {
+      const mins = Math.round((Date.now() / 1000 - oldest) / 60);
+      if (mins < data.minutes - 2) {
+        el("short-history-text").textContent =
+          "These charts cover about " + mins + " minute" + (mins === 1 ? "" : "s") +
+          ", not the " + data.minutes + " asked for.  The numbers are kept in " +
+          "memory, so the history starts again whenever the manager restarts.";
+        box.hidden = false;
+      } else {
+        box.hidden = true;
+      }
+    }
+  }
+
+  // Hovering reads out the value under the pointer for every line at once,
+  // which is what somebody actually wants: the question is nearly always
+  // whether one node differs from the other at that moment.
+  el("charts").addEventListener("mousemove", function (ev) {
+    const hit = ev.target.closest(".hit");
+    if (!hit) { return; }
+    const card = hit.closest("[data-chart]");
+    const spec = CHARTS.filter(function (c) { return c.key === card.dataset.chart; })[0];
+    if (!spec) { return; }
+
+    const box = hit.getBoundingClientRect();
+    const frac = Math.max(0, Math.min(1, (ev.clientX - box.left) / box.width));
+    const from = parseFloat(hit.dataset.from), to = parseFloat(hit.dataset.to);
+    const at = from + frac * (to - from);
+
+    const parts = Object.keys(LAST).sort().map(function (n) {
+      const s = ((LAST[n] || {}).series || {})[spec.key] || [];
+      if (!s.length) { return null; }
+      let best = s[0];
+      for (let i = 1; i < s.length; i++) {
+        if (Math.abs(s[i].at - at) < Math.abs(best.at - at)) { best = s[i]; }
+      }
+      // Too far from any real sample to claim a value for this moment.
+      if (Math.abs(best.at - at) > 60) { return n + " no data"; }
+      return n + " " + spec.fmt(best.value);
+    }).filter(Boolean);
+
+    const when = new Date(at * 1000);
+    card.querySelector("[data-readout]").textContent =
+      String(when.getHours()).padStart(2, "0") + ":" +
+      String(when.getMinutes()).padStart(2, "0") + ":" +
+      String(when.getSeconds()).padStart(2, "0") + "   " + parts.join("   ");
+  });
+
+  el("charts").addEventListener("mouseleave", function () {
+    document.querySelectorAll("[data-readout]").forEach(function (r) {
+      r.innerHTML = "&nbsp;";
+    });
+  }, true);
+
+  async function load() {
+    const minutes = el("window").value;
+    try {
+      draw(await NFM.api("/metrics/series?minutes=" + minutes));
+    } catch (err) {
+      el("charts").textContent =
+        "Could not load: " + (err && err.message ? err.message : err);
+    }
+  }
+
+  el("window").addEventListener("change", load);
+  el("refresh").addEventListener("click", load);
+  load();
+  setInterval(load, 15000);
+});
+</script>
+
+{% endblock %}

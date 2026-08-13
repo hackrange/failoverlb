@@ -407,6 +407,24 @@ async def cert_export(request: Request):
         raise HTTPException(status_code=404, detail=str(exc))
 
 
+@router.post("/peer/host-metrics")
+async def peer_host_metrics(request: Request):
+    """
+    What this box is doing, for a peer's utilization page.
+
+    Read out of /proc by this manager rather than by its agent, because the
+    agent runs with ProcSubset=pid and cannot see /proc/stat.  Widening the one
+    root component in the system so a chart can be drawn would be a poor trade,
+    and the container needs no privilege to read these itself.
+
+    Nothing here is a secret: cpu jiffies, memory totals and a load average.
+    """
+    node, _payload = await authenticate(request)
+    from app.core.metrics import read_host
+
+    return read_host()
+
+
 @router.post("/peer/cert/forget")
 async def cert_forget(request: Request):
     """

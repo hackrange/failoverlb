@@ -666,6 +666,15 @@ async def zones_page(request: Request, db: DBSession = Depends(get_db)):
     return response
 
 
+@router.get("/utilization", response_class=HTMLResponse)
+async def utilization_page(request: Request, db: DBSession = Depends(get_db)):
+    user = require_page_user(request, db)
+    token = ensure_csrf_token(request)
+    response = render(request, "utilization.html", user, csrf_token=token)
+    issue_csrf_token(response, token)
+    return response
+
+
 @router.get("/maps", response_class=HTMLResponse)
 async def maps_page(request: Request, db: DBSession = Depends(get_db)):
     user = require_page_user(request, db)
