@@ -2812,8 +2812,6 @@ def _pick_family(node, family: int):
     reach its peers is often private, and a private address in public DNS is a
     mistake nobody notices until somebody outside cannot get in.
     """
-    import ipaddress
-
     for candidate in (node.public_ip, node.address):
         if not candidate:
             continue
@@ -3139,6 +3137,46 @@ def _gslb_reload():
             server.start()
     except Exception as exc:
         log.error("could not reload the gslb zones: %s", exc)
+
+    _publish_gslb()
+
+
+def _publish_gslb():
+    """
+    Send the zones to the other nodes.
+
+    Everything else here is served by nginx from files, and those files reach
+    the other nodes on an apply.  DNS is the exception: the listener answers
+    out of the database, so on any node whose database has not got the zones,
+    it answers nothing at all.
+
+    The config snapshot is what carries database rows between nodes, and it
+    only travels when the rendered nginx config changes.  Editing a DNS record
+    changes no nginx file, so without this the zones stayed on the box they
+    were typed into and every other node stayed silent.  On a feature whose
+    whole job is to survive a node dying, the node that stays silent is the one
+    that was supposed to take over.
+
+    Forced, because "nothing changed" is exactly the answer the renderer gives
+    for a DNS edit, and that answer is what used to stop the zones moving.
+    """
+    async def _go():
+        try:
+            await apply_current_config(
+                author="system",
+                summary="dns zones changed, sending them to the other nodes",
+                force=True,
+            )
+        except Exception as exc:
+            log.error("could not send the dns zones to the other nodes: %s", exc)
+
+    try:
+        asyncio.get_running_loop().create_task(_go())
+    except RuntimeError:
+        # No loop, which means a script or a test rather than a request.  The
+        # local listener is already up to date, and the timer on each node will
+        # bring the rest along at the next apply.
+        log.debug("no event loop, so the dns zones were not pushed from here")
 
 
 # ==============================================================================
