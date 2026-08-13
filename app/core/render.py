@@ -1667,7 +1667,30 @@ map $cookie_{cookie} $sticky_set_{var} {{
             "regex_i": "~* ",
         }.get(loc.match_type, "")
 
-        lines = [f"    location {prefix}{loc.path} {{"]
+        # Taking the prefix off only works if the location ends in a slash.
+        #
+        # nginx swaps the matched part of the path for the one on proxy_pass.
+        # With `location /lb` and `proxy_pass http://x/`, the request /lb/login
+        # matches /lb, the rest is /login, and it goes on as //login with two
+        # slashes, which backends answer 404 to.  With `location /lb/` the rest
+        # is login and it goes on as /login, which is the point.
+        #
+        # So the slash is added here rather than asked of whoever typed the
+        # path.  That leaves the bare /lb matching nothing, so it gets the one
+        # line redirect anybody would write by hand.  Both halves are needed
+        # and forgetting the second is why the bare path 404s while every link
+        # under it works.
+        strip = bool(getattr(loc, "strip_prefix", False))
+        path = loc.path
+        lines = []
+        if strip and loc.match_type == "prefix" and not path.endswith("/"):
+            lines.append(f"    location = {path} {{")
+            lines.append(f"        return 301 {path}/;")
+            lines.append("    }")
+            lines.append("")
+            path = path + "/"
+
+        lines.append(f"    location {prefix}{path} {{")
 
         # This path's own error pages, if somebody gave it different ones.
         #
