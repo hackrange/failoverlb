@@ -124,3 +124,9 @@ test/.secrets
 # into test/ is silently left out of every commit, and nothing tells you,
 # because being ignored is exactly what this line asks for.
 test/
+
+# The machinery that builds the user guide.  Kept on disk so the manual can be
+# rebuilt as features change, and out of git because it is scaffolding rather
+# than part of the product: capture scripts, chapter sources, screenshots and
+# the intermediate images.  The finished guide is committed in docs/.
+tools/manual/
