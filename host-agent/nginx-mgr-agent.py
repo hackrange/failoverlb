@@ -28,6 +28,7 @@ line.  See VERBS at the bottom for the list.
 """
 
 import grp
+import hashlib
 import json
 import logging
 import logging.handlers
@@ -53,6 +54,30 @@ from pathlib import Path
 # ==============================================================================
 
 AGENT_VERSION = "1.0.0"
+
+
+def _own_fingerprint():
+    """
+    A short hash of this file, as it was when the running process read it.
+
+    AGENT_VERSION is a number somebody has to remember to change, so it says
+    nothing about whether the agent running right now is the one in the repo.
+    That question matters here more than in most places: the agent lives
+    outside the container, so the normal upgrade of pulling and rebuilding the
+    image leaves it exactly as it was, running last month's code against this
+    month's manager, with nothing anywhere saying so.
+
+    Computed once at start up on purpose.  Reading it fresh would report what
+    is on disk rather than what is loaded, which is the opposite of the
+    question being asked.
+    """
+    try:
+        return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:12]
+    except Exception:
+        return "unknown"
+
+
+AGENT_FINGERPRINT = _own_fingerprint()
 
 SOCKET_DIR = Path(os.environ.get("NFM_AGENT_SOCKET_DIR", "/run/nginxmgr"))
 SOCKET_PATH = SOCKET_DIR / "agent.sock"
@@ -411,6 +436,9 @@ def v_ping(req):
     return {
         "pong": True,
         "agent_version": AGENT_VERSION,
+        # What is actually running, as opposed to what somebody remembered to
+        # bump.  See _own_fingerprint.
+        "agent_fingerprint": AGENT_FINGERPRINT,
         "hostname": socket.gethostname(),
         "time": datetime.now(timezone.utc).isoformat(),
     }
@@ -2050,7 +2078,8 @@ def main():
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
 
-    log.info("nginx fleet manager agent %s is up", AGENT_VERSION)
+    log.info("nginx fleet manager agent %s (%s) is up",
+             AGENT_VERSION, AGENT_FINGERPRINT)
     try:
         server.serve_forever()
     finally:

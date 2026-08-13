@@ -9,6 +9,7 @@
 #
 #   sudo ./install.sh                          # first node, starts a cluster
 #   sudo ./install.sh --join lb-01:7444 --token <token>   # every node after
+#   sudo ./install.sh --upgrade                # after a git pull, on every node
 #
 # What it does, in order:
 #
@@ -19,6 +20,12 @@
 #   5. Builds and starts the container
 #   6. Joins an existing cluster, if you gave it a token
 #   7. Turns off certbot.timer, and explains why
+#
+# --upgrade does the host side and the container and nothing else.  It exists
+# because the agent lives outside the container: pulling and rebuilding the
+# image, which is what an upgrade looks like from the outside, leaves the agent
+# exactly as it was.  A month later it is running old code against a new
+# manager, and nothing anywhere says so.
 #
 # It is safe to run again.  Anything already done is left alone, and your .env
 # is never overwritten without asking.
@@ -46,6 +53,7 @@ ADMIN_ALLOWLIST=""
 ACME_EMAIL=""
 ASSUME_YES=false
 KEEP_CERTBOT_TIMER=false
+UPGRADE=false
 
 # ---------------------------------------------------------------- output bits
 c_reset=$'\033[0m'; c_red=$'\033[31m'; c_grn=$'\033[32m'
@@ -91,11 +99,19 @@ Usage: sudo ./install.sh [options]
       --allowlist <cidrs>   Networks allowed to load the GUI, comma separated.
       --acme-email <addr>   Where the CA sends expiry warnings.  Optional.
       --keep-certbot-timer  Leave certbot.timer alone.  Read the warning first.
+      --upgrade             Refresh an install that is already here.  Updates
+                            the agent, its units and the installer script, then
+                            rebuilds the container.  Never touches .env, never
+                            asks anything, never joins anything.
   -y, --yes                 Do not ask about anything.
   -h, --help                This.
 
 The first node needs no --join.  It starts a cluster and becomes its CA.
 Every node after that needs --join and --token together.
+
+After a git pull, run --upgrade on every node.  The container carries the
+manager and the host carries the agent, so rebuilding the image on its own
+updates half of it.
 USAGE
 }
 
@@ -109,6 +125,7 @@ while [[ $# -gt 0 ]]; do
         --allowlist)    ADMIN_ALLOWLIST="$2"; shift 2 ;;
         --acme-email)   ACME_EMAIL="$2"; shift 2 ;;
         --keep-certbot-timer) KEEP_CERTBOT_TIMER=true; shift ;;
+        --upgrade)      UPGRADE=true; ASSUME_YES=true; shift ;;
         -y|--yes)       ASSUME_YES=true; shift ;;
         -h|--help)      usage; exit 0 ;;
         *)              fail "Do not know the option $1.  Try --help." ;;
@@ -192,6 +209,16 @@ if [[ -n "$JOIN_TARGET" && -z "$JOIN_TOKEN" ]]; then
     fail "--join needs --token as well.  Make one on the Cluster page of a node that is already up."
 fi
 
+if $UPGRADE; then
+    # An upgrade of nothing is a first install wearing the wrong hat, and it
+    # would skip every step that makes a first install work.  Better to say so.
+    [[ -f "$SCRIPT_DIR/.env" ]] || \
+        fail "There is no .env here, so this node has never been installed.  Run install.sh without --upgrade."
+    [[ -n "$JOIN_TARGET" ]] && \
+        fail "--upgrade and --join do different jobs.  An upgrade never changes what cluster this node is in."
+    log "upgrading what is already here.  .env is left exactly as it is."
+fi
+
 # ============================================================== the group
 header "The nginxmgr group"
 
@@ -216,8 +243,25 @@ info "the only reason a non root process in there can talk to the agent."
 header "Host agent"
 
 mkdir -p "$AGENT_DIR"
+
+# What was there before, so the end of the run can say whether it actually
+# moved.  "installed the agent" is what you print either way, and it is not an
+# answer to the only question anybody has after an upgrade.
+AGENT_WAS=""
+if [[ -f "$AGENT_DIR/nginx-mgr-agent.py" ]]; then
+    AGENT_WAS="$(sha256sum "$AGENT_DIR/nginx-mgr-agent.py" | cut -c1-12)"
+fi
+
 install -m 0750 "$SCRIPT_DIR/host-agent/nginx-mgr-agent.py" "$AGENT_DIR/nginx-mgr-agent.py"
-log "installed the agent to ${AGENT_DIR}"
+AGENT_NOW="$(sha256sum "$AGENT_DIR/nginx-mgr-agent.py" | cut -c1-12)"
+
+if [[ -z "$AGENT_WAS" ]]; then
+    log "installed the agent to ${AGENT_DIR}"
+elif [[ "$AGENT_WAS" == "$AGENT_NOW" ]]; then
+    log "agent is already current (${AGENT_NOW})"
+else
+    log "agent updated, ${AGENT_WAS} -> ${AGENT_NOW}"
+fi
 
 # Everything the unit file lists under ReadWritePaths has to exist before the
 # agent will start.  ProtectSystem=strict makes systemd bail out with a bare
@@ -343,8 +387,12 @@ header "Settings"
 ENV_FILE="$SCRIPT_DIR/.env"
 
 if [[ -f "$ENV_FILE" ]]; then
-    warn ".env already exists, leaving it alone."
-    info "Delete it and run again if you want a fresh one."
+    if $UPGRADE; then
+        log ".env left exactly as it is, which is the point of --upgrade"
+    else
+        warn ".env already exists, leaving it alone."
+        info "Delete it and run again if you want a fresh one."
+    fi
     # Keep the existing secret.  Generating a new one would make every stored
     # TOTP seed and peer key unreadable, which looks exactly like the cluster
     # falling apart.
@@ -404,7 +452,10 @@ EOF
     log "wrote .env with a fresh secret"
 fi
 
-if [[ -z "$ADMIN_ALLOWLIST" ]]; then
+# Only worth saying on a first install.  On an upgrade the allow list is
+# whatever is in the .env we just refused to touch, and this variable is empty
+# because nobody passed the flag, not because the setting is missing.
+if [[ -z "$ADMIN_ALLOWLIST" ]] && ! $UPGRADE; then
     warn "No GUI allow list set."
     info "Anybody who can reach port 7443 gets the login page.  Set"
     info "NFM_ADMIN_ALLOWLIST in .env to your management networks and restart."
@@ -413,8 +464,10 @@ fi
 # Staging is on by default on purpose.  The real service will lock you out for
 # a week if you get it wrong five times, and people always get it wrong at
 # least once.
-info "Certificates are pointed at the Lets Encrypt staging service to start."
-info "Turn that off in Settings once you have one working."
+if ! $UPGRADE; then
+    info "Certificates are pointed at the Lets Encrypt staging service to start."
+    info "Turn that off in Settings once you have one working."
+fi
 
 # ============================================================== build and start
 header "Building and starting"
@@ -435,6 +488,47 @@ if ! docker compose ps --status running 2>/dev/null | grep -q .; then
     fail "The container did not stay up.  See the log above."
 fi
 success "      container is running"
+
+# Prove the container is running the code in this checkout.
+#
+# "docker restart does not pick up a rebuilt image" is a trap that has cost
+# time here before, and compose deciding a container is up to date is its
+# judgement rather than an answer.  Comparing image ids is no good either:
+# buildx writes a fresh attestation manifest on every build, so two ids differ
+# for identical code and the check would cry wolf every time.
+#
+# So compare the code itself.  It is the actual question, it is cheap, and
+# there is nothing to interpret.
+code_hash_local() {
+    find "$SCRIPT_DIR/app" \( -name '*.py' -o -name '*.html' \) -type f \
+        -exec sha256sum {} + 2>/dev/null | awk '{print $1}' | sort | sha256sum | cut -c1-12
+}
+code_hash_container() {
+    docker compose exec -T nginx-fleet-manager sh -c \
+        "find /app/app \( -name '*.py' -o -name '*.html' \) -type f -exec sha256sum {} + 2>/dev/null | awk '{print \$1}' | sort | sha256sum" \
+        2>/dev/null | cut -c1-12
+}
+
+WANT_CODE="$(code_hash_local)"
+HAVE_CODE="$(code_hash_container)"
+
+if [[ -n "$WANT_CODE" && "$HAVE_CODE" != "$WANT_CODE" ]]; then
+    warn "the container is not running the code in this folder, recreating it"
+    docker compose up -d --force-recreate
+    sleep 8
+    HAVE_CODE="$(code_hash_container)"
+fi
+
+if [[ -z "$HAVE_CODE" ]]; then
+    warn "could not read the code out of the container to check it"
+elif [[ "$HAVE_CODE" == "$WANT_CODE" ]]; then
+    log "container is running this checkout (${HAVE_CODE})"
+else
+    problem "The container is still not running the code in this folder." \
+"Wanted ${WANT_CODE} and it has ${HAVE_CODE}.  A rebuilt image needs the
+container recreated, not restarted.  Try:
+    docker compose up -d --force-recreate"
+fi
 
 # ============================================================== joining
 if [[ -n "$JOIN_TARGET" ]]; then
@@ -512,6 +606,51 @@ fi
 header "Done"
 
 echo
+
+if $UPGRADE; then
+    # Ask the agent what it is running, rather than assuming the restart above
+    # picked up the new file.  systemd restarting cleanly and the new code
+    # being loaded are two different claims, and only one of them is worth
+    # anything after an upgrade.
+    RUNNING_FP=""
+    if [[ -S /run/nginxmgr/agent.sock ]]; then
+        RUNNING_FP="$(python3 - <<'PYEOF' 2>/dev/null || true
+import json, socket
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.settimeout(10)
+s.connect("/run/nginxmgr/agent.sock")
+s.sendall(b'{"verb": "ping"}\n')
+buf = b""
+while not buf.endswith(b"\n"):
+    chunk = s.recv(65536)
+    if not chunk:
+        break
+    buf += chunk
+print((json.loads(buf.decode()).get("data") or {}).get("agent_fingerprint", ""))
+PYEOF
+)"
+    fi
+
+    success "Upgraded ${NODE_NAME}."
+    echo
+    info "agent on disk:  ${AGENT_NOW}"
+    if [[ -z "$RUNNING_FP" ]]; then
+        warn "Could not ask the agent what it is running."
+        info "Check it with: journalctl -u nginx-mgr-agent -n 20"
+    elif [[ "$RUNNING_FP" == "$AGENT_NOW" ]]; then
+        info "agent running:  ${RUNNING_FP}  (the same one, so it took)"
+    else
+        warn "The agent is running ${RUNNING_FP} but ${AGENT_NOW} is on disk."
+        info "It did not pick up the new file.  Try:"
+        info "    systemctl restart nginx-mgr-agent"
+    fi
+    echo
+    info "GUI:   https://${NODE_ADDRESS}:7443"
+    echo
+    info "Run this on every node, not just this one.  A fleet with one node"
+    info "upgraded is a fleet where the two disagree about what they can do."
+else
+
 success "NGINX Management is running on ${NODE_NAME}."
 echo
 info "GUI:   https://${NODE_ADDRESS}:7443"
@@ -545,6 +684,8 @@ if [[ -z "$JOIN_TARGET" ]]; then
 else
     info "Sign in with an account from the cluster you joined."
 fi
+
+fi   # end of the first install summary
 
 echo
 info "Logs:    docker compose logs -f"
