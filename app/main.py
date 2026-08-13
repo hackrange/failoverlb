@@ -16,6 +16,7 @@ in the TLS layer, where a bug in our code cannot undo it.
 """
 
 import asyncio
+import datetime as _dt
 import logging
 import os
 import ssl
@@ -393,7 +394,17 @@ def start_scheduler():
         gslb.refresh()
         if gslb.get_server().data.zones:
             gslb.get_server().start()
-            await gslb.ensure_redirect()
+            # Scheduled rather than awaited, because this function is not async
+            # and the redirect wants the agent, which is.  Once, a few seconds
+            # in, so the listener is certainly up before anything is pointed at
+            # it: a rule with nothing behind it answers no queries at all,
+            # which looks exactly like the box being down.
+            scheduler.add_job(
+                gslb.ensure_redirect,
+                "date",
+                run_date=_dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(seconds=5),
+                id="gslb_redirect",
+            )
     except Exception as exc:
         log.error("the dns listener did not start, so gslb is off: %s", exc)
 
