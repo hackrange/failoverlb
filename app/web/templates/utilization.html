@@ -30,8 +30,13 @@
 
 <div id="charts"></div>
 
-<h2 class="section-heading">Backends</h2>
-<div id="member-charts"></div>
+{# Hidden unless a pool is actually set up to be asked.  Most fleets will never
+   set one, and a heading over a row of cards saying nothing is measured is the
+   same clutter as a panel listing what the page does not do. #}
+<div id="member-section" hidden>
+  <h2 class="section-heading">Backends</h2>
+  <div id="member-charts"></div>
+</div>
 
 <style>
   .tile-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
@@ -361,23 +366,29 @@ document.addEventListener("DOMContentLoaded", function () {
     lastMembers = data;
     LAST_MEMBERS = data.pools || {};
     const configured = data.configured || {};
-    const poolNames = Object.keys(configured).sort();
+
+    // Only the pools somebody has actually pointed at an endpoint.  A pool
+    // that publishes nothing is the normal case and has nothing to say here,
+    // so the whole section stays out of the way rather than filling the page
+    // with cards explaining their own absence.  The pool's own page is where
+    // it says how to turn this on.
+    const poolNames = Object.keys(configured).filter(function (p) {
+      return configured[p];
+    }).sort();
+
+    const section = el("member-section");
+    if (!poolNames.length) {
+      section.hidden = true;
+      el("member-charts").innerHTML = "";
+      return;
+    }
+    section.hidden = false;
+
     const out = [];
 
     poolNames.forEach(function (pool) {
       const members = LAST_MEMBERS[pool] || {};
       const labels = Object.keys(members).sort();
-
-      if (!configured[pool]) {
-        // Not measured is a different thing from measured as zero, and an
-        // empty chart says the second one.
-        out.push('<div class="card chart-card"><div class="chart-head"><h3>' +
-          NFM.escapeHtml(pool) + '</h3></div><div class="pool-note">' +
-          "Not measured.  These backends publish nothing this manager knows how " +
-          "to read.  Set where they publish it on the pool's page, under what " +
-          "the backends are doing.</div></div>");
-        return;
-      }
 
       const errors = labels.filter(function (l) { return members[l].error; });
       const level = (members[labels[0]] || {}).level;
@@ -411,10 +422,6 @@ document.addEventListener("DOMContentLoaded", function () {
       }
     });
 
-    if (!poolNames.length) {
-      out.push('<div class="card chart-card"><div class="pool-note">' +
-               "No pools yet.</div></div>");
-    }
     el("member-charts").innerHTML = out.join("");
   }
 
