@@ -28,7 +28,7 @@ from app.auth.service import can, current_user
 from app.catalog import CATEGORIES, all_features, plus_only_features, validate_value
 from app.catalog.registry import get_feature
 from app.config import get_settings
-from app.core import audit, certs, error_pages, settings_store
+from app.core import audit, certs, error_pages, hostnames, settings_store
 from app.core.acme import AcmeError, get_cert_manager, pick_issuing_node, resolve_domain
 from app.core.agent_client import AgentError, get_agent
 from app.core.capabilities import fleet_capabilities, get_local_capabilities
@@ -532,7 +532,7 @@ HOST_FIELDS = {
     "http_port", "https_port", "default_server", "http2", "force_https",
     "cert_id", "mode", "pool_id", "document_root", "redirect_target",
     "redirect_code", "settings", "access_list_id", "admin_only",
-    "error_page_template_id",
+    "error_page_template_id", "redirect_to_primary",
     "custom_config", "notes", "config_mode",
 }
 
@@ -618,7 +618,7 @@ def _apply_host_fields(g, host, payload):
         host.server_names = json.dumps(names)
 
     for field in ("enabled", "listen_http", "listen_https", "default_server",
-                  "http2", "force_https", "admin_only"):
+                  "http2", "force_https", "admin_only", "redirect_to_primary"):
         if field in payload:
             setattr(host, field, bool(payload[field]))
 
@@ -820,15 +820,45 @@ def _host_summary(h):
     }
 
 
+def _cert_coverage(h, cert):
+    """
+    Which of a site's names its certificate would not be accepted for.
+
+    The check nobody has that everybody needs.  A site serving example.com and
+    www.example.com on a certificate carrying only one of them is green on the
+    site page, valid on the certificate page, and a browser warning on the name
+    nobody tested.  Both lists are already in the database, so saying it costs
+    nothing.
+
+    Wildcards are worked out rather than compared as text, because
+    *.example.com covers www.example.com and does not cover example.com, and
+    that is the trap people meet the day they buy one.
+    """
+    if cert is None:
+        return {"cert_covers": [], "uncovered": [], "checked": False}
+    return {
+        "cert_covers": cert.domain_list(),
+        "uncovered": hostnames.uncovered(cert.domain_list(), h.name_list()),
+        "checked": True,
+    }
+
+
 def _host_detail(h):
     return {
         **_host_summary(h),
+        **_cert_coverage(h, h.cert),
+        # What adding the www would mean for this site, worked out here so the
+        # page does not have to know the rules about which names have a pair.
+        "www_partner": next(
+            (p for p in (hostnames.www_partner(n) for n in h.name_list())
+             if p and p not in h.name_list()), None),
         "listen_http": h.listen_http,
         "http_port": h.http_port,
         "https_port": h.https_port,
         "default_server": h.default_server,
         "http2": h.http2,
         "force_https": h.force_https,
+        "redirect_to_primary": h.redirect_to_primary,
         "pool_id": h.pool_id,
         "cert_id": h.cert_id,
         "access_list_id": h.access_list_id,
@@ -3366,6 +3396,14 @@ async def list_certs(g: ObjectGuard = Depends(guard)):
                 # as a broken one.
                 "has_material": c.has_material(),
                 "awaiting_csr": bool(c.csr_pem and not c.not_after),
+                # Names the sites using this certificate serve and it does not
+                # carry.  A browser warning waiting to happen, and both lists
+                # are right here, so there is no excuse for not saying it.
+                "short_of": sorted({
+                    name
+                    for h in c.hosts
+                    for name in hostnames.uncovered(c.domain_list(), h.name_list())
+                }),
             }
             for c in certs
         ]

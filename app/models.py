@@ -327,6 +327,16 @@ class VirtualHost(Base):
 
     force_https = Column(Boolean, default=True)
 
+    # Send every other name to the first one with a 301.
+    #
+    # Serving two names is not the same as choosing one.  A site answering on
+    # both example.com and www.example.com has two of every page as far as a
+    # search engine is concerned, and people expect to pick a canonical one.
+    # The first name in server_names is the one kept, so the direction is
+    # decided by putting the winner first, which means one switch does both
+    # www to bare and bare to www.
+    redirect_to_primary = Column(Boolean, default=False)
+
     cert_id = Column(Integer, ForeignKey("certificates.id", ondelete="SET NULL"))
     cert = relationship("Certificate", back_populates="hosts")
 

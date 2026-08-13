@@ -124,6 +124,39 @@ def main():
             check(f"GET {path}", False, f"{type(exc).__name__}: {exc}")
 
     print()
+    # The detail pages, which the list above never reaches.
+    #
+    # A template error on one of these is a 500 on the page somebody spends
+    # most of their time on, and the sweep used to open /sites and stop there,
+    # so it proved nothing about the page /sites leads to.  One shipped that
+    # way: a jinja filter that does not exist, which no amount of reading the
+    # python would have caught.
+    with session_scope() as session:
+        from app.models import Pool as _Pool, VirtualHost as _VH
+        detail_paths = []
+        first_host = session.query(_VH).first()
+        if first_host:
+            detail_paths.append(f"/sites/{first_host.id}")
+        first_pool = session.query(_Pool).first()
+        if first_pool:
+            detail_paths.append(f"/pools/{first_pool.id}")
+
+    if not detail_paths:
+        print("    skip  the detail pages, because this node has none to open")
+    else:
+        for path in detail_paths:
+            try:
+                response = client.get(path, follow_redirects=False)
+                ok = response.status_code < 500
+                detail = ""
+                if not ok:
+                    detail = next((ln for ln in response.text.splitlines()
+                                   if "Error" in ln), response.text[:200])
+                check(f"GET {path} -> {response.status_code}", ok, detail)
+            except Exception as exc:
+                check(f"GET {path}", False, f"{type(exc).__name__}: {exc}")
+
+    print()
     print("  read only endpoints")
     for path in ENDPOINTS:
         try:

@@ -16,6 +16,39 @@
   </div>
 </div>
 
+{# The warning that matters most on this page.  A site serving a name its
+   certificate does not carry is green here, valid on the certificates page, and
+   a browser warning to anybody who types that name.  Both lists are in the
+   database, so there is no reason for anybody to find this out from a visitor.
+
+   Rendered server side because the wildcard rule decides it, and that rule
+   belongs in one place rather than being written again in JavaScript slightly
+   differently. #}
+{% if uncovered_names %}
+  <div class="notice warn">
+    <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.5 15 14H1L8 1.5zm0 3.2L3.4 12.8h9.2L8 4.7zM7.3 7h1.4v3H7.3V7zm0 3.7h1.4V12H7.3v-1.3z"/></svg>
+    <div>
+      <strong>The certificate does not cover
+        {{ uncovered_names|join(', ') }}.</strong>
+      This site answers to {{ uncovered_names|length }} name{{ '' if uncovered_names|length == 1 else 's' }}
+      that <span class="mono">{{ host.cert.name }}</span> was not issued for, so a
+      browser asking for {{ uncovered_names[0] }} gets a warning before it sees
+      anything.  Nothing else here will say so: this page is green and the
+      certificate is valid, it is just valid for other names.
+      <div class="mt">
+        Fix it by reissuing the certificate for every name, on the
+        <a href="{{ base }}/certificates">certificates page</a>, or by taking
+        those names off this site.
+        {% if cert_wildcards %}
+          <br>Worth knowing: a wildcard like
+          <span class="mono">{{ cert_wildcards[0] }}</span> covers exactly one
+          label, so it is good for www and not for the domain on its own.
+        {% endif %}
+      </div>
+    </div>
+  </div>
+{% endif %}
+
 <div class="notice info" id="unsaved" hidden>
   <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 3a.9.9 0 1 1 0 1.8A.9.9 0 0 1 8 4zm1.2 8H6.8v-.9h.7V7.9h-.7V7h2.1v4.1h.3V12z"/></svg>
   <div>
@@ -46,6 +79,31 @@
           </label>
           <input type="text" id="f-names" value="{{ host.name_list()|join(' ') }}">
           <div class="hint">Space separated hostnames this site answers to.</div>
+          {# Offered rather than assumed.  Somebody who typed a bare domain
+             nearly always wants the www as well and will not think of it until
+             a visitor does.  Only shown when there is a pair worth making, so
+             it never appears on api.example.com. #}
+          {% if www_partner %}
+            <div class="hint mt">
+              <button class="btn small" type="button" id="add-www"
+                      data-name="{{ www_partner }}">Also answer to {{ www_partner }}</button>
+            </div>
+          {% endif %}
+        </div>
+
+        <div class="field" id="canonical-wrap"
+             {{ '' if host.name_list()|length > 1 else 'style=display:none' }}>
+          <label for="f-canonical">When it answers to more than one name</label>
+          <select id="f-canonical">
+            <option value="both" {{ '' if host.redirect_to_primary else 'selected' }}>Serve them all the same</option>
+            <option value="primary" {{ 'selected' if host.redirect_to_primary }}>Send the rest to the first one</option>
+          </select>
+          <div class="hint">
+            Serving two names means two of every page as far as a search engine
+            is concerned.  Sending the rest to the first one picks a winner, and
+            the winner is whichever name you put first, so the same switch does
+            www to bare and bare to www.
+          </div>
         </div>
 
         <div class="field">
@@ -909,6 +967,32 @@ document.addEventListener("DOMContentLoaded", function () {
         <label for="l-enabled">Enabled</label></div>`;
   }
 
+  // Adding the www, and showing the canonical choice once there is more than
+  // one name to choose between.  Both are about the same thing: two names is
+  // the ordinary case and nothing here used to acknowledge it.
+  const namesField = document.getElementById("f-names");
+  const canonicalWrap = document.getElementById("canonical-wrap");
+
+  function syncCanonical() {
+    const count = namesField.value.trim().split(/\s+/).filter(Boolean).length;
+    canonicalWrap.style.display = count > 1 ? "" : "none";
+  }
+  namesField.addEventListener("input", syncCanonical);
+  syncCanonical();
+
+  const addWww = document.getElementById("add-www");
+  if (addWww) {
+    addWww.addEventListener("click", function () {
+      const extra = addWww.getAttribute("data-name");
+      const have = namesField.value.trim().split(/\s+/).filter(Boolean);
+      if (have.indexOf(extra) === -1) { have.push(extra); }
+      namesField.value = have.join(" ");
+      namesField.dispatchEvent(new Event("input"));
+      addWww.disabled = true;
+      NFM.toast("Added.  Save, then check the certificate covers it too.", "ok");
+    });
+  }
+
   function syncModeFields() {
     const mode = (document.getElementById("l-mode") || {}).value;
     document.querySelectorAll("[data-lmode]").forEach(el => {
@@ -1009,6 +1093,8 @@ document.addEventListener("DOMContentLoaded", function () {
     body.access_list_id = acl ? parseInt(acl, 10) : null;
     const errpage = document.getElementById("f-errorpage").value;
     body.error_page_template_id = errpage ? parseInt(errpage, 10) : null;
+    body.redirect_to_primary =
+      document.getElementById("f-canonical").value === "primary";
 
     if (mode === "static") body.document_root = document.getElementById("f-root").value.trim();
     if (mode === "redirect") body.redirect_target = document.getElementById("f-target").value.trim();

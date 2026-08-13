@@ -30,7 +30,7 @@ from app.auth.service import (
     save_totp,
 )
 from app.config import get_settings
-from app.core import audit, error_pages
+from app.core import audit, error_pages, hostnames
 from app.core.capabilities import get_local_capabilities
 from app.core.cluster import get_cluster
 from app.db import get_db, session_scope
@@ -547,6 +547,17 @@ async def site_detail(host_id: str, request: Request, db: DBSession = Depends(ge
         acl_summary=[_acl_summary(a) for a in acls],
         error_templates=db.query(ErrorPageTemplate)
                           .order_by(ErrorPageTemplate.name).all(),
+        # Worked out here rather than in the page, because the wildcard rule is
+        # the whole point and it does not belong in JavaScript where the next
+        # person will reimplement it slightly differently.
+        uncovered_names=(hostnames.uncovered(host.cert.domain_list(),
+                                             host.name_list())
+                         if host.cert else []),
+        www_partner=next(
+            (p for p in (hostnames.www_partner(n) for n in host.name_list())
+             if p and p not in host.name_list()), None),
+        cert_wildcards=[d for d in (host.cert.domain_list() if host.cert else [])
+                        if d.startswith("*.")],
         # What address this request came from, so the page can tell somebody
         # they are about to shut themselves out.  See the note in the template.
         viewer_ip=client_ip(request),
@@ -703,6 +714,24 @@ async def certs_page(request: Request, db: DBSession = Depends(get_db)):
         request, "certificates.html", user, csrf_token=token,
         certs=db.query(Certificate).order_by(Certificate.name).all(),
         nodes=db.query(Node).all(),
+        # Which names each certificate is short of, worked out here so the
+        # wildcard rule lives in one place.  See app/core/hostnames.py.
+        # Every site's full list of names, so a new certificate can be filled
+        # in from one rather than typed and half remembered.
+        sites_with_names=[
+            {"name": h.name, "names": [n for n in h.name_list()
+                                       if hostnames.is_real_name(n)]}
+            for h in db.query(VirtualHost).order_by(VirtualHost.name).all()
+            if any(hostnames.is_real_name(n) for n in h.name_list())
+        ],
+        short_of={
+            c.id: sorted({
+                name
+                for h in c.hosts
+                for name in hostnames.uncovered(c.domain_list(), h.name_list())
+            })
+            for c in db.query(Certificate).all()
+        },
     )
     issue_csrf_token(response, token)
     return response

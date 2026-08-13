@@ -88,6 +88,15 @@
                   {% if c.hosts %}used by {{ c.hosts|map(attribute='name')|join(', ') }}
                   {% else %}not used by any site{% endif %}
                 </div>
+                {# Names the sites using this certificate serve and it does not
+                   carry.  Said here as well as on the site, because this is the
+                   page somebody is on when they decide what to reissue. #}
+                {% set short = short_of.get(c.id, []) %}
+                {% if short %}
+                  <div class="small" style="margin-top:4px; color:var(--warn)">
+                    does not cover {{ short|join(', ') }}
+                  </div>
+                {% endif %}
               </td>
               <td>
                 {% if c.status == 'valid' %}
@@ -355,6 +364,20 @@ document.addEventListener("DOMContentLoaded", function () {
           Space or comma separated.  One certificate can cover several names.
           A wildcard like *.example.com needs a DNS challenge.
         </div>
+        {# Prefilling from a site is the difference between remembering the www
+           and finding out from a visitor.  A certificate is nearly always being
+           made for a site that already exists and already knows its names. #}
+        {% if sites_with_names %}
+          <div class="hint mt">
+            Take the names from a site:
+            <select id="c-fromsite">
+              <option value="">pick one</option>
+              {% for s in sites_with_names %}
+                <option value="{{ s.names|join(' ') }}">{{ s.name }} ({{ s.names|join(', ') }})</option>
+              {% endfor %}
+            </select>
+          </div>
+        {% endif %}
       </div>
       <div class="field">
         <label for="c-challenge">How to prove you own it</label>
@@ -377,6 +400,15 @@ document.addEventListener("DOMContentLoaded", function () {
       </div>
       <div class="mt"><button class="btn primary" id="c-save">Create</button></div>
     `);
+
+    const fromSite = document.getElementById("c-fromsite");
+    if (fromSite) {
+      fromSite.addEventListener("change", function () {
+        if (fromSite.value) {
+          document.getElementById("c-domains").value = fromSite.value;
+        }
+      });
+    }
 
     document.getElementById("c-save").addEventListener("click", async function () {
       const body = {

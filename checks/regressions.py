@@ -29,6 +29,7 @@ from cryptography.x509.oid import NameOID as _NameOID
 # AttributeError on a list.
 from app.core import certs as cert_tools
 from app.core import error_pages
+from app.core import hostnames
 from app.core.render import Renderer
 from app.core.capabilities import fleet_capabilities
 from app.db import session_scope
@@ -875,6 +876,101 @@ check("one we hold the material for knows it can rebuild itself",
       _ready.has_material() and _ready.usable,
       "this is what lets a node that turns up without the files write them "
       "back from the database instead of waiting for a person")
+
+print()
+print("  the www case")
+# A wildcard covers exactly one label.  Getting that wrong in either direction
+# is a site that looks right everywhere in the manager and warns in a browser,
+# which is the failure this whole check exists to prevent.
+
+check("a wildcard covers the www",
+      hostnames.covers(["*.example.com"], "www.example.com"),
+      "if this is wrong the warning fires on a site that is perfectly fine and "
+      "people learn to ignore it")
+check("a wildcard does not cover the bare domain",
+      not hostnames.covers(["*.example.com"], "example.com"),
+      "this is the trap people meet the day they buy a wildcard, and treating "
+      "it as covered means the warning never fires when it should")
+check("a wildcard does not cover two labels down",
+      not hostnames.covers(["*.example.com"], "a.b.example.com"),
+      "one label means one label")
+check("an exact name still covers itself",
+      hostnames.covers(["example.com", "*.example.com"], "example.com"),
+      "the pair people actually buy has to come out clean")
+check("the catch all server name is never reported as uncovered",
+      hostnames.uncovered(["example.com"], ["_"]) == [],
+      "_ is nginx's catch all, nothing can be issued for it, and reporting it "
+      "puts a warning on the default site that can never be cleared")
+check("a site short of one name says which one",
+      hostnames.uncovered(["example.com"], ["example.com", "www.example.com"])
+      == ["www.example.com"],
+      "the whole point is naming the name, since the site page is otherwise "
+      "green and the certificate page says valid")
+
+check("the www is offered on a bare domain and not on a subdomain",
+      hostnames.www_partner("example.com") == "www.example.com"
+      and hostnames.www_partner("api.example.com") is None,
+      "offering www.api.example.com is noise nobody wants")
+check("the offer works the other way round too",
+      hostnames.www_partner("www.example.com") == "example.com",
+      "somebody who typed the www first still wants the bare name")
+check("a two part suffix is understood",
+      hostnames.www_partner("example.co.uk") == "www.example.co.uk"
+      and hostnames.www_partner("a.example.co.uk") is None,
+      "example.co.uk has three labels and is still the domain itself")
+
+# The redirect block, and the one thing that made it wrong the first time.
+_www_cert = Certificate(name="pair", domains=json_set(["pair.invalid", "www.pair.invalid"]),
+                        source="uploaded", not_after=_dt.datetime(2030, 1, 1),
+                        files_present=True)
+_www_cert.id = 941
+_www_pool = Pool(name="www_pool", lb_method="round_robin", settings="{}")
+_www_pool.id = 941
+_www_pool.members = [PoolMember(address="192.0.2.40", port=80, enabled=True,
+                                admin_state="up")]
+_www_site = VirtualHost(name="pairsite", enabled=True,
+                        server_names=json_set(["pair.invalid", "www.pair.invalid"]),
+                        listen_http=True, listen_https=True, force_https=False,
+                        http_port=80, https_port=443, http2=False, mode="proxy",
+                        settings="{}", redirect_to_primary=True)
+_www_site.id = 941
+_www_site.pool_id = 941
+_www_site.pool = _www_pool
+_www_site.cert_id = 941
+
+_www_conf = Renderer().render_all([_www_site], [_www_pool], [_www_cert], [], [],
+                                  [], [], [], []).get("sites/pairsite.conf", "")
+_redirect_block = _www_conf.split("server {")[1] if "server {" in _www_conf else ""
+
+check("the moved name gets its own server block",
+      "server_name www.pair.invalid;" in _www_conf
+      and "return 301 https://pair.invalid$request_uri;" in _www_conf,
+      "leaving it on the main block means nginx matches it there and the "
+      "redirect is never reached")
+
+check("the redirect is inside a location, not at the server level",
+      "location / {" in _redirect_block,
+      "a return at the server level runs in the rewrite phase, before nginx "
+      "picks a location, so it beats the challenge block and the certificate "
+      "covering that name could never be renewed.  Writing it the obvious way "
+      "produced exactly that")
+
+check("the moved name can still answer a certificate challenge",
+      "/.well-known/acme-challenge/" in _redirect_block,
+      "without it the name drops off the certificate at the first renewal")
+
+check("the redirect block carries the certificate",
+      "ssl_certificate " in _redirect_block,
+      "a browser asked for https does the handshake before it sees any "
+      "redirect, so no certificate here is a warning rather than a 301")
+
+_www_site.redirect_to_primary = False
+_both_conf = Renderer().render_all([_www_site], [_www_pool], [_www_cert], [], [],
+                                   [], [], [], []).get("sites/pairsite.conf", "")
+check("serving both names writes one block with both on it",
+      "server_name pair.invalid www.pair.invalid;" in _both_conf
+      and "return 301 https://pair.invalid" not in _both_conf,
+      "the default has to stay the simple thing it was")
 
 print()
 print("  map blocks")

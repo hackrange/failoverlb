@@ -912,7 +912,23 @@ map $cookie_{cookie} $sticky_{_safe_var(pool.name)} {{
             )
 
         cfg = host.setting_map()
-        names = " ".join(esc(n) for n in host.name_list())
+        all_names = host.name_list()
+
+        # Picking one name and sending the rest to it.
+        #
+        # The first name wins, so the direction is set by ordering rather than
+        # by a second switch: put example.com first to pull the www in, put
+        # www.example.com first to push it out.
+        #
+        # The names being redirected come out of the main server block
+        # entirely.  Leaving them on would mean nginx matching them there
+        # first, and the redirect block would never be reached.
+        redirecting = bool(getattr(host, "redirect_to_primary", False)) \
+            and len(all_names) > 1
+        served = all_names[:1] if redirecting else all_names
+        moved = all_names[1:] if redirecting else []
+
+        names = " ".join(esc(n) for n in served)
         cert = cert_by_id.get(host.cert_id)
         acl = acl_by_id.get(host.access_list_id)
 
@@ -960,6 +976,11 @@ map $cookie_{cookie} $sticky_{_safe_var(pool.name)} {{
                 lines.append(f"# {note_line}")
             lines.append("")
 
+        # ---- the names being sent somewhere else ----------------------------
+        if moved:
+            lines.append(self._render_canonical_redirect(
+                host, moved, served[0], cert if usable else None))
+
         # ---- the plain http server ------------------------------------------
         if host.listen_http:
             lines.append(self._render_http_block(host, names, cfg,
@@ -992,6 +1013,70 @@ map $cookie_{cookie} $sticky_{_safe_var(pool.name)} {{
                 f"# Issue or re-issue it from the Certificates page and apply again."
             )
 
+        return "\n".join(lines)
+
+    def _render_canonical_redirect(self, host, moved, primary, cert) -> str:
+        """
+        A server block whose only job is to send these names to the real one.
+
+        It listens on the same ports as the site, including https, and that
+        part matters: a browser asked for https://www.example.com does the TLS
+        handshake before it ever sees a redirect, so without a certificate here
+        the visitor gets a warning and never reaches the 301.  The certificate
+        has to cover the names being moved, which is exactly what the warning
+        on the site page is about.
+
+        The challenge location is repeated here on purpose.  These names still
+        need to be validated at renewal time, and a redirect on that path means
+        renewing a certificate that has already expired becomes impossible: the
+        redirect leads to https the validation server will no longer trust.
+
+        301 rather than 302.  This is a decision about which name the site has,
+        not a temporary arrangement, and a 302 leaves both names in search
+        results forever, which is the thing being fixed.
+        """
+        names = " ".join(esc(n) for n in moved)
+        usable = cert is not None and getattr(cert, "usable", True)
+
+        lines = [f"# {', '.join(moved)} are served from {primary}."]
+        lines.append("server {")
+        if host.listen_http:
+            lines.append(f"    listen {host.http_port or 80};")
+            lines.append(f"    listen [::]:{host.http_port or 80};")
+        if host.listen_https and usable:
+            cert_dir = self._cert_path(cert)
+            listen = f"    listen {host.https_port or 443} ssl"
+            if host.http2:
+                lines.append(listen + ";")
+                lines.append(f"    listen [::]:{host.https_port or 443} ssl;")
+                lines.append("    http2 on;")
+            else:
+                lines.append(listen + ";")
+                lines.append(f"    listen [::]:{host.https_port or 443} ssl;")
+            lines.append(f"    ssl_certificate     {cert_dir}/fullchain.pem;")
+            lines.append(f"    ssl_certificate_key {cert_dir}/privkey.pem;")
+        lines.append(f"    server_name {names};")
+        lines.append("")
+        lines.append("    # Still has to answer a challenge, or these names can")
+        lines.append("    # never be renewed on the certificate.")
+        lines.append("    location ^~ /.well-known/acme-challenge/ {")
+        lines.append("        root /var/www/certbot;")
+        lines.append('        default_type "text/plain";')
+        lines.append("        try_files $uri =404;")
+        lines.append("    }")
+        lines.append("")
+        scheme = "https" if (host.listen_https and usable) else "$scheme"
+        # Inside a location, not at the server level, and that is not a style
+        # choice.  A `return` written at the server level runs in the rewrite
+        # phase, which happens before nginx picks a location, so it beats the
+        # challenge block above and every request for a token gets a 301
+        # instead.  The certificate covering these names could then never be
+        # renewed, which is the exact failure the comment above is about, and
+        # writing it the obvious way produced it.
+        lines.append("    location / {")
+        lines.append(f"        return 301 {scheme}://{primary}$request_uri;")
+        lines.append("    }")
+        lines.append("}")
         return "\n".join(lines)
 
     def _render_http_block(self, host, names, cfg, cert=None, error_lines=None,
