@@ -407,6 +407,20 @@ async def cert_export(request: Request):
         raise HTTPException(status_code=404, detail=str(exc))
 
 
+@router.post("/peer/cert/forget")
+async def cert_forget(request: Request):
+    """
+    Take a deleted certificate's files off this node.
+
+    Only our own folder, never certbot's.  See the agent verb for why.
+    """
+    node, payload = await authenticate(request)
+    try:
+        return await get_agent().cert_forget(name=payload.get("name"))
+    except AgentError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 @router.post("/peer/cert/import")
 async def cert_import(request: Request):
     """Take a cert bundle from the node that got it."""

@@ -1183,6 +1183,28 @@ class Certificate(Base):
     uploaded_fullchain = Column(Text)
     uploaded_privkey_encrypted = Column(Text)
 
+    # The signing request somebody is waiting on an authority to answer.
+    #
+    # The key is already in uploaded_privkey_encrypted and never goes anywhere:
+    # that is the whole point of a signing request, they sign a statement about
+    # the public half and never see the private one.  A row in this state has no
+    # not_after, so `usable` is False and the renderer leaves it out, which is
+    # exactly right for a certificate that does not exist yet.
+    csr_pem = Column(Text)
+    csr_created_at = Column(DateTime)
+
+    def has_material(self) -> bool:
+        """
+        Do we hold the certificate itself, rather than only a row about one.
+
+        True for anything uploaded, self signed, or a completed signing
+        request.  Those can be written to any node from the database alone,
+        which is what makes them recover on their own when a node turns up
+        without the files.  A Lets Encrypt certificate lives in certbot's
+        folder on whichever node issued it and cannot.
+        """
+        return bool(self.uploaded_fullchain and self.uploaded_privkey_encrypted)
+
     created_at = Column(DateTime, default=utcnow)
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
 

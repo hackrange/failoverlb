@@ -166,6 +166,9 @@ class AgentClient:
     async def cert_import(self, name: str, bundle: dict):
         return await self.call("cert_import", name=name, bundle=bundle, timeout=60)
 
+    async def cert_forget(self, name: str):
+        return await self.call("cert_forget", name=name, timeout=30)
+
     async def list_backups(self):
         return await self.call("list_backups", timeout=30)
 

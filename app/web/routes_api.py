@@ -28,11 +28,11 @@ from app.auth.service import can, current_user
 from app.catalog import CATEGORIES, all_features, plus_only_features, validate_value
 from app.catalog.registry import get_feature
 from app.config import get_settings
-from app.core import audit, error_pages, settings_store
+from app.core import audit, certs, error_pages, settings_store
 from app.core.acme import AcmeError, get_cert_manager, pick_issuing_node, resolve_domain
 from app.core.agent_client import AgentError, get_agent
 from app.core.capabilities import fleet_capabilities, get_local_capabilities
-from app.core.cluster import ClusterError, get_cluster
+from app.core.cluster import ClusterError, PeerClient, get_cluster
 from app.core.crypto import encrypt, new_token
 from app.core.nginx_parser import ParseError, extract_settings, parse, quick_check
 from app.core.render import Renderer, safe_name, safe_var
@@ -2872,6 +2872,12 @@ async def list_certs(g: ObjectGuard = Depends(guard)):
                 "synced_nodes": list(c.sync_map().keys()),
                 "last_error": c.last_renewal_error,
                 "renewal_failures": c.renewal_failures,
+                # Nothing renews an uploaded one, so the page has to be the
+                # thing that says the expiry is coming.  A row waiting on an
+                # authority has no certificate at all yet and should not read
+                # as a broken one.
+                "has_material": c.has_material(),
+                "awaiting_csr": bool(c.csr_pem and not c.not_after),
             }
             for c in certs
         ]
@@ -2932,6 +2938,313 @@ async def create_cert(request: Request, g: ObjectGuard = Depends(changing)):
     audit.record("cert.create", user=g.user, object_type="cert", object_name=name,
                  changes={"domains": domains, "challenge": challenge})
     return {"id": cert.id, "name": cert.name}
+
+
+# ---- certificates we did not get from Lets Encrypt ---------------------------
+
+def _cert_name_for(payload, domains, what="certificate"):
+    name = (payload.get("name") or (domains[0] if domains else "")).replace("*.", "")
+    if not name:
+        raise HTTPException(status_code=400, detail=f"give the {what} a name")
+    validate_name(name.replace(".", "_"), f"{what} name")
+    return name
+
+
+def _store_material(g, cert, material, source):
+    """
+    Put the certificate and its key on the row, together, or not at all.
+
+    Written as one step on purpose.  Half of a pair on a row is the same
+    problem as half of a pair on disk, and this system has met that twice.
+    """
+    from app.core.crypto import encrypt
+
+    cert.source = source
+    cert.uploaded_fullchain = material["fullchain"]
+    cert.uploaded_privkey_encrypted = encrypt(material["privkey"])
+    cert.domains = json.dumps(material["domains"])
+    cert.not_before = material["not_before"]
+    cert.not_after = material["not_after"]
+    cert.issuer = material["issuer"][:255]
+    cert.serial = material["serial"][:128]
+    cert.fingerprint = material["fingerprint"][:128]
+
+    # Nothing renews these for us.  Lets Encrypt certificates get a renewal
+    # scheduled and these get a warning on the page instead, so leaving
+    # auto_renew on would put them in a queue that can never do anything for
+    # them and hide the fact that a person has to act.
+    cert.auto_renew = False
+    cert.csr_pem = None
+    cert.csr_created_at = None
+
+
+@router.post("/certs/analyse")
+async def analyse_cert_upload(request: Request, g: ObjectGuard = Depends(changing)):
+    """
+    Say what an upload is before anything is kept.
+
+    Same call the save uses, so what somebody is shown and what gets stored
+    cannot disagree.  A preview that is its own code path is a preview that can
+    be right about a certificate which then goes in wrong.
+    """
+    g.require("edit_certs")
+    payload = await request.json()
+
+    try:
+        material = certs.analyse_upload(
+            cert_data=_decode_upload(payload.get("certificate")),
+            key_data=_decode_upload(payload.get("private_key")),
+            chain_data=_decode_upload(payload.get("chain")),
+            pkcs12_data=_decode_upload(payload.get("pkcs12")),
+            password=payload.get("password") or None,
+        )
+    except certs.CertProblem as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    return _material_summary(material)
+
+
+def _material_summary(material):
+    """Everything worth showing, and never the private key."""
+    return {
+        "subject": material["subject"],
+        "issuer": material["issuer"],
+        "domains": material["domains"],
+        "not_before": material["not_before"].isoformat(),
+        "not_after": material["not_after"].isoformat(),
+        "serial": material["serial"],
+        "fingerprint": material["fingerprint"],
+        "key": material["key"],
+        "self_signed": material["self_signed"],
+        "chain_length": material["chain_length"],
+        "warnings": material["warnings"],
+    }
+
+
+def _decode_upload(value):
+    """
+    Take a field that might be pasted text or a base64 file from the browser.
+
+    A certificate is usually pasted and a PKCS12 never can be, so both arrive
+    through the same fields and this works out which is which.
+    """
+    if not value:
+        return None
+    if isinstance(value, str) and value.startswith("data:"):
+        value = value.split(",", 1)[-1]
+        try:
+            return base64.b64decode(value, validate=True)
+        except Exception:
+            raise HTTPException(status_code=400, detail="that upload is not valid base64")
+    return value
+
+
+@router.post("/certs/upload")
+async def upload_cert(request: Request, g: ObjectGuard = Depends(changing)):
+    """Take a certificate somebody already has and put it on every node."""
+    g.require("edit_certs")
+    payload = await request.json()
+
+    try:
+        material = certs.analyse_upload(
+            cert_data=_decode_upload(payload.get("certificate")),
+            key_data=_decode_upload(payload.get("private_key")),
+            chain_data=_decode_upload(payload.get("chain")),
+            pkcs12_data=_decode_upload(payload.get("pkcs12")),
+            password=payload.get("password") or None,
+        )
+    except certs.CertProblem as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    name = _cert_name_for(payload, material["domains"])
+
+    cert = g.session.query(Certificate).filter(Certificate.name == name).first()
+    replacing = cert is not None
+    if replacing and cert.source == "letsencrypt" and cert.not_after:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"{name} is a Lets Encrypt certificate this system renews.  "
+                f"Uploading over it would leave the renewal pointed at a "
+                f"certificate it did not issue.  Use a different name, or delete "
+                f"that one first."
+            ),
+        )
+    if not replacing:
+        cert = Certificate(name=name)
+        g.session.add(cert)
+
+    _store_material(g, cert, material, "uploaded")
+    g.session.commit()
+
+    result = await _place_and_report(cert.id)
+    audit.record("cert.upload", user=g.user, object_type="cert", object_name=name,
+                 changes={"domains": material["domains"],
+                          "not_after": material["not_after"].isoformat(),
+                          "replaced": replacing})
+    return {"id": cert.id, "name": name, "replaced": replacing,
+            "placed": result, **_material_summary(material)}
+
+
+@router.post("/certs/self-signed")
+async def create_self_signed(request: Request, g: ObjectGuard = Depends(changing)):
+    """Make one on the spot, for a name no public authority will sign."""
+    g.require("edit_certs")
+    payload = await request.json()
+
+    domains = payload.get("domains") or []
+    if isinstance(domains, str):
+        domains = [d.strip() for d in domains.replace(",", " ").split() if d.strip()]
+
+    try:
+        material = certs.self_signed(
+            domains,
+            key_type=payload.get("key_type", "ecdsa"),
+            key_size=int(payload.get("key_size") or 2048),
+            days=int(payload.get("days") or certs.SELF_SIGNED_DEFAULT_DAYS),
+            subject=payload.get("subject") or {},
+        )
+    except certs.CertProblem as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="those key settings are not valid")
+
+    name = _cert_name_for(payload, material["domains"])
+    if g.session.query(Certificate).filter(Certificate.name == name).first():
+        raise HTTPException(status_code=409,
+                            detail=f"there is already a certificate called {name}")
+
+    cert = Certificate(name=name)
+    g.session.add(cert)
+    _store_material(g, cert, material, "self_signed")
+    g.session.commit()
+
+    result = await _place_and_report(cert.id)
+    audit.record("cert.self_signed", user=g.user, object_type="cert",
+                 object_name=name, changes={"domains": material["domains"],
+                                            "key": material["key"]})
+    return {"id": cert.id, "name": name, "placed": result,
+            **_material_summary(material)}
+
+
+@router.post("/certs/csr")
+async def create_csr(request: Request, g: ObjectGuard = Depends(changing)):
+    """
+    Make a signing request, and keep the key here.
+
+    The row this creates has no certificate on it yet, so it has no not_after,
+    so the renderer will not point nginx at it.  That is what makes a half
+    finished request harmless to leave sitting there while an authority takes
+    its time.
+    """
+    g.require("edit_certs")
+    payload = await request.json()
+
+    domains = payload.get("domains") or []
+    if isinstance(domains, str):
+        domains = [d.strip() for d in domains.replace(",", " ").split() if d.strip()]
+
+    try:
+        made = certs.make_csr(domains,
+                              key_size=int(payload.get("key_size") or 2048),
+                              subject=payload.get("subject") or {})
+    except certs.CertProblem as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="that key length is not valid")
+
+    name = _cert_name_for(payload, made["domains"])
+    if g.session.query(Certificate).filter(Certificate.name == name).first():
+        raise HTTPException(status_code=409,
+                            detail=f"there is already a certificate called {name}")
+
+    from app.core.crypto import encrypt
+
+    cert = Certificate(
+        name=name,
+        domains=json.dumps(made["domains"]),
+        source="uploaded",
+        auto_renew=False,
+        csr_pem=made["csr"],
+        csr_created_at=utcnow(),
+        uploaded_privkey_encrypted=encrypt(made["privkey"]),
+    )
+    g.session.add(cert)
+    g.session.commit()
+
+    audit.record("cert.csr", user=g.user, object_type="cert", object_name=name,
+                 changes={"domains": made["domains"], "key": made["key"]})
+    return {"id": cert.id, "name": name, "csr": made["csr"],
+            "domains": made["domains"], "key": made["key"],
+            "subject": made["subject"]}
+
+
+@router.get("/certs/{cert_id}/csr")
+async def get_csr(cert_id: str, g: ObjectGuard = Depends(guard)):
+    cert = g.get(Certificate, cert_id)
+    if not cert.csr_pem:
+        raise HTTPException(status_code=404, detail="there is no signing request on this one")
+    return {"name": cert.name, "csr": cert.csr_pem,
+            "domains": cert.domain_list(),
+            "created_at": cert.csr_created_at.isoformat() if cert.csr_created_at else None}
+
+
+@router.post("/certs/{cert_id}/csr/complete")
+async def complete_csr(cert_id: str, request: Request,
+                       g: ObjectGuard = Depends(changing)):
+    """Pair the certificate an authority sent back with the key we kept."""
+    cert = g.get(Certificate, cert_id, "edit_certs")
+    payload = await request.json()
+
+    if not cert.csr_pem or not cert.uploaded_privkey_encrypted:
+        raise HTTPException(
+            status_code=409,
+            detail="there is no outstanding signing request on this certificate")
+
+    from app.core.crypto import decrypt
+
+    stored_key = decrypt(cert.uploaded_privkey_encrypted)
+    if not stored_key:
+        raise HTTPException(
+            status_code=409,
+            detail=("the key held for this request will not decrypt, which "
+                    "happens when NFM_SECRET_KEY changed.  The request cannot be "
+                    "completed, so make a new one."))
+
+    try:
+        material = certs.complete_csr(
+            stored_key,
+            cert_data=_decode_upload(payload.get("certificate")),
+            chain_data=_decode_upload(payload.get("chain")),
+        )
+    except certs.CertProblem as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    _store_material(g, cert, material, "uploaded")
+    g.session.commit()
+
+    result = await _place_and_report(cert.id)
+    audit.record("cert.csr.complete", user=g.user, object_type="cert",
+                 object_name=cert.name,
+                 changes={"not_after": material["not_after"].isoformat()})
+    return {"id": cert.id, "name": cert.name, "placed": result,
+            **_material_summary(material)}
+
+
+async def _place_and_report(cert_id):
+    """
+    Write the material to every node, and never let that fail the save.
+
+    The row is already committed by the time this runs, and that ordering is
+    deliberate.  A peer being down is a copy to make later, not a reason to
+    throw away a certificate somebody just uploaded, and the file check puts it
+    right on its own within the minute.
+    """
+    try:
+        return await get_cert_manager().place_material(cert_id)
+    except Exception as exc:
+        log.error("stored the certificate but could not write it everywhere: %s", exc)
+        return {"ok": [], "failed": [{"node": "?", "error": str(exc)}]}
 
 
 @router.post("/certs/{cert_id}/issue")
@@ -3019,8 +3332,63 @@ async def delete_cert(cert_id: str, g: ObjectGuard = Depends(changing)):
     g.session.delete(cert)
     g.session.commit()
 
-    audit.record("cert.delete", user=g.user, object_type="cert", object_name=name)
-    return {"ok": True, "deleted": name}
+    # Take the files off every node as well.
+    #
+    # Deleting the row used to leave the private key on the disk of every box,
+    # forever.  Nothing pointed at it and nothing listed it, so the only way to
+    # find out was to go and look, which nobody does until an audit.  It
+    # mattered more once certificates could be uploaded, because then this is
+    # the only copy anywhere and deleting it is the only way to get rid of it.
+    #
+    # Never certbot's folder.  It keeps renewal state next to its copies and
+    # `certbot delete` is the way to remove those.
+    forgotten = await _forget_cert_files(name)
+
+    audit.record("cert.delete", user=g.user, object_type="cert", object_name=name,
+                 changes={"files_removed_from": forgotten["ok"],
+                          "files_left_on": [f["node"] for f in forgotten["failed"]]})
+    return {"ok": True, "deleted": name, "files": forgotten}
+
+
+async def _forget_cert_files(name):
+    """
+    Remove a certificate's files fleet wide, without ever failing the delete.
+
+    A node being down is a file to clear up later, not a reason to keep a row
+    somebody asked to be rid of.  What is left where goes in the audit log, so
+    there is a record rather than a surprise.
+    """
+    results = {"ok": [], "failed": []}
+    settings = get_settings()
+
+    try:
+        await get_agent().cert_forget(name=name)
+        results["ok"].append(settings.node_name)
+    except Exception as exc:
+        results["failed"].append({"node": settings.node_name, "error": str(exc)})
+
+    cluster = get_cluster()
+    try:
+        with session_scope() as session:
+            peers = [(p.id, p.name) for p in cluster.peers(session)]
+    except Exception as exc:
+        log.error("could not list peers to clear up %s: %s", name, exc)
+        return results
+
+    for peer_id, peer_name in peers:
+        try:
+            with session_scope() as session:
+                node = session.query(Node).filter(Node.id == peer_id).first()
+                if not node:
+                    continue
+                client = PeerClient(node, cluster.ca)
+            await client.call("/peer/cert/forget", {"name": name}, timeout=30)
+            results["ok"].append(peer_name)
+        except Exception as exc:
+            log.error("could not remove %s from %s: %s", name, peer_name, exc)
+            results["failed"].append({"node": peer_name, "error": str(exc)})
+
+    return results
 
 
 @router.get("/dns/lookup")

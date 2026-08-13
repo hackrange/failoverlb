@@ -16,6 +16,18 @@ import ssl
 import sys
 import urllib.request
 
+import datetime as _dt
+
+from cryptography import x509 as _x509
+from cryptography.hazmat.primitives import hashes as _hashes
+from cryptography.hazmat.primitives import serialization as _ser
+from cryptography.hazmat.primitives.asymmetric import rsa as _rsa
+from cryptography.x509.oid import NameOID as _NameOID
+
+# Imported under another name: this file already uses `certs` for a list of
+# rows further down, and the shadowing turns every call here into an
+# AttributeError on a list.
+from app.core import certs as cert_tools
 from app.core import error_pages
 from app.core.render import Renderer
 from app.core.capabilities import fleet_capabilities
@@ -712,6 +724,156 @@ check("a path with no template of its own writes no error_page lines",
       "error_page" not in _lconf.split("location / {")[-1].split("\n    }")[0],
       "it has to inherit the server block's, which is nginx's own behaviour "
       "and the reason the plain case needs nothing written at all")
+
+print()
+print("  certificates that did not come from Lets Encrypt")
+# The pair check is the whole feature.  A key and a certificate that are not a
+# pair is a documented trap here that crash looped the process twice, and nginx
+# loads a mismatched pair without a word and then fails every handshake, so the
+# only place it can be caught is before anything is stored.
+
+
+def _mk_cert(cn, issuer_key=None, issuer=None, ca=True, sans=None, days=400):
+    key = _rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    subject = _x509.Name([_x509.NameAttribute(_NameOID.COMMON_NAME, cn)])
+    now = _dt.datetime.now(_dt.timezone.utc)
+    builder = (_x509.CertificateBuilder().subject_name(subject)
+               .issuer_name(issuer or subject)
+               .public_key(key.public_key())
+               .serial_number(_x509.random_serial_number())
+               .not_valid_before(now - _dt.timedelta(days=1))
+               .not_valid_after(now + _dt.timedelta(days=days))
+               .add_extension(_x509.BasicConstraints(ca=ca, path_length=None), True))
+    if sans:
+        builder = builder.add_extension(
+            _x509.SubjectAlternativeName([_x509.DNSName(n) for n in sans]), False)
+    return key, builder.sign(issuer_key or key, _hashes.SHA256())
+
+
+def _pem(cert):
+    return cert.public_bytes(_ser.Encoding.PEM).decode()
+
+
+def _keypem(key):
+    return key.private_bytes(_ser.Encoding.PEM, _ser.PrivateFormat.PKCS8,
+                             _ser.NoEncryption()).decode()
+
+
+_root_k, _root_c = _mk_cert("Regress Root")
+_int_k, _int_c = _mk_cert("Regress Intermediate", issuer_key=_root_k, issuer=_root_c.subject)
+_leaf_k, _leaf_c = _mk_cert("leaf.invalid", issuer_key=_int_k, issuer=_int_c.subject,
+                            ca=False, sans=["leaf.invalid", "www.leaf.invalid"])
+
+
+def _upload_refused(cert_pem, key_pem):
+    try:
+        cert_tools.analyse_upload(cert_data=cert_pem, key_data=key_pem)
+        return False
+    except cert_tools.CertProblem:
+        return True
+
+
+check("a key that does not match the certificate is refused",
+      _upload_refused(_pem(_leaf_c), _keypem(_int_k)),
+      "nginx loads a mismatched pair without complaining and then fails every "
+      "handshake, so this is the only place it can be caught")
+
+check("a matching pair is accepted",
+      not _upload_refused(_pem(_leaf_c), _keypem(_leaf_k)),
+      "the pair check has gone from catching mismatches to refusing everything")
+
+# Handed over root first, which plenty of tools write.
+_bundle = cert_tools.analyse_upload(
+    cert_data=_pem(_root_c) + _pem(_int_c) + _pem(_leaf_c),
+    key_data=_keypem(_leaf_k))
+
+check("the leaf is found even when the bundle is written root first",
+      _bundle["domains"] == ["leaf.invalid", "www.leaf.invalid"],
+      "taking the first certificate in the file is right most of the time and "
+      "wrong often enough to matter")
+
+check("the chain comes out leaf first",
+      _bundle["fullchain"].index(_pem(_leaf_c)) == 0,
+      "a chain in the wrong order works on some clients and fails on others, "
+      "which is a miserable thing to debug from the outside")
+
+check("the self signed root is left out of the chain",
+      _pem(_root_c) not in _bundle["fullchain"] and _bundle["chain_length"] == 2,
+      "sending the root costs bytes on every handshake and helps nobody, since "
+      "a client that trusts it already has it")
+
+# Both dates in the past, since a certificate cannot end before it starts.
+_expired_k = _rsa.generate_private_key(public_exponent=65537, key_size=2048)
+_then = _dt.datetime.now(_dt.timezone.utc)
+_expired_c = (
+    _x509.CertificateBuilder()
+    .subject_name(_x509.Name([_x509.NameAttribute(_NameOID.COMMON_NAME, "old.invalid")]))
+    .issuer_name(_int_c.subject)
+    .public_key(_expired_k.public_key())
+    .serial_number(_x509.random_serial_number())
+    .not_valid_before(_then - _dt.timedelta(days=400))
+    .not_valid_after(_then - _dt.timedelta(days=5))
+    .add_extension(_x509.SubjectAlternativeName([_x509.DNSName("old.invalid")]), False)
+    .sign(_int_k, _hashes.SHA256()))
+_expired = cert_tools.analyse_upload(cert_data=_pem(_expired_c), key_data=_keypem(_expired_k))
+check("an expired certificate is stored but said out loud",
+      any("expired" in w for w in _expired["warnings"]),
+      "refusing it outright would stop somebody staging a replacement, and "
+      "saying nothing would let it go live")
+
+_solo = cert_tools.analyse_upload(cert_data=_pem(_leaf_c), key_data=_keypem(_leaf_k))
+check("a leaf with no intermediates warns about the chain",
+      any("intermediate" in w for w in _solo["warnings"]),
+      "some clients keep a copy and are fine, others refuse the site outright, "
+      "which is the worst way for this to be discovered")
+
+_ss = cert_tools.self_signed(["self.invalid", "192.0.2.7"], key_type="ecdsa")
+check("a self signed certificate carries its names as SANs",
+      set(_ss["domains"]) == {"self.invalid", "192.0.2.7"},
+      "every client stopped reading the common name years ago, so a "
+      "certificate with names only there is one nothing will accept")
+check("a self signed certificate is honest about what it is",
+      _ss["self_signed"] and any("browsers will warn" in w for w in _ss["warnings"]),
+      "this is the one people reach for in a hurry and then leave in place")
+
+for _size in (2048, 4096):
+    _req = cert_tools.make_csr(["req.invalid"], key_size=_size)
+    _parsed = _x509.load_pem_x509_csr(_req["csr"].encode())
+    check(f"a signing request at {_size} is valid and asks for the right names",
+          _parsed.is_signature_valid
+          and [n.value for n in _parsed.extensions.get_extension_for_class(
+              _x509.SubjectAlternativeName).value] == ["req.invalid"],
+          "an authority refuses a request it cannot verify, and a request with "
+          "no SANs produces a certificate nothing modern accepts")
+
+try:
+    cert_tools.make_csr(["req.invalid"], key_size=1024)
+    _weak_refused = False
+except cert_tools.CertProblem:
+    _weak_refused = True
+check("a key length no authority will sign is refused up front",
+      _weak_refused,
+      "finding out months later that the request cannot be issued is the whole "
+      "cost of not checking here")
+
+# A row waiting on an authority holds a key and no certificate.  It must not
+# reach the renderer, because a config pointing at a certificate that does not
+# exist yet is a config nginx will not load, and then nothing can be applied
+# anywhere.
+_waiting = Certificate(name="waiting.invalid", domains=json_set(["waiting.invalid"]),
+                       source="uploaded", csr_pem="-----BEGIN CERTIFICATE REQUEST-----")
+check("a certificate still waiting on an authority is not usable",
+      not _waiting.usable and not _waiting.has_material(),
+      "the renderer would otherwise point nginx at files nobody has written, "
+      "and one of those stops every apply on every node")
+
+_ready = Certificate(name="ready.invalid", domains=json_set(["ready.invalid"]),
+                     source="uploaded", uploaded_fullchain=_pem(_leaf_c),
+                     uploaded_privkey_encrypted="x", not_after=_dt.datetime(2030, 1, 1))
+check("one we hold the material for knows it can rebuild itself",
+      _ready.has_material() and _ready.usable,
+      "this is what lets a node that turns up without the files write them "
+      "back from the database instead of waiting for a person")
 
 print()
 print("  live behaviour")

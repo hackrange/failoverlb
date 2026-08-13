@@ -601,6 +601,77 @@ class CertificateManager:
 
     # -------------------------------------------------------------------------
 
+    async def place_material(self, cert_id: int) -> dict:
+        """
+        Write a certificate we hold ourselves to every node.
+
+        Uploaded, self signed and completed signing requests all keep the
+        material in the database, so this needs no source node and no export
+        from anywhere: it reads the row and writes the files.
+
+        That is a real difference from a Lets Encrypt certificate, not an
+        implementation detail.  Those live in certbot's folder on whichever node
+        issued them, so a node that never had them has to be handed a copy by a
+        node that did, and if no such node is up there is nothing to be done.
+        These can be rebuilt on any node from the database, which the snapshot
+        already carries everywhere, so they come back on their own.
+        """
+        from app.core.crypto import decrypt
+
+        with session_scope() as session:
+            cert = session.query(Certificate).filter(Certificate.id == cert_id).first()
+            if not cert:
+                raise AcmeError("no such certificate")
+            if not cert.has_material():
+                raise AcmeError(f"{cert.name} has no stored certificate to write")
+            name = cert.name
+            fullchain = cert.uploaded_fullchain
+            privkey = decrypt(cert.uploaded_privkey_encrypted)
+            peers = [{"id": p.id, "name": p.name} for p in self.cluster.peers(session)]
+
+        if not privkey:
+            # The key is sealed with this node's secret.  Failing to open it
+            # means NFM_SECRET_KEY changed, and writing the certificate without
+            # a key would leave nginx pointed at half a pair.
+            raise AcmeError(
+                f"the stored private key for {name} will not decrypt.  That "
+                f"happens when NFM_SECRET_KEY changed on this node.  Upload the "
+                f"certificate again."
+            )
+
+        bundle = {"fullchain.pem": fullchain, "privkey.pem": privkey}
+        results = {"ok": [], "failed": []}
+
+        try:
+            await get_agent().cert_import(name=name, bundle=bundle)
+            await _reload_for_new_cert(name)
+            results["ok"].append(self.settings.node_name)
+        except AgentError as exc:
+            results["failed"].append({"node": self.settings.node_name, "error": str(exc)})
+
+        for info in peers:
+            try:
+                with session_scope() as session:
+                    node = session.query(Node).filter(Node.id == info["id"]).first()
+                    if not node:
+                        continue
+                    client = PeerClient(node, self.cluster.ca)
+                await client.call("/peer/cert/import",
+                                  {"name": name, "bundle": bundle}, timeout=60)
+                results["ok"].append(info["name"])
+            except Exception as exc:
+                log.error("could not copy %s to %s: %s", name, info["name"], exc)
+                results["failed"].append({"node": info["name"], "error": str(exc)})
+
+        with session_scope() as session:
+            cert = session.query(Certificate).filter(Certificate.id == cert_id).first()
+            if cert:
+                cert.files_present = self.settings.node_name in results["ok"]
+                cert.files_checked_at = utcnow()
+                session.commit()
+
+        return results
+
     async def verify_files(self):
         """
         Check the certificates we think exist are really on disk.
@@ -651,6 +722,26 @@ class CertificateManager:
                     present = False
                 else:
                     continue
+
+            # Anything we hold the material for can put itself back.
+            #
+            # This is the case a promoted standby lands in: the snapshot brought
+            # the row, so the certificate is right there in the database, and
+            # the only thing missing is a file.  Waiting for a person to notice
+            # and press something would mean the site serves plain http until
+            # they do, when nothing was actually lost.
+            if not present:
+                with session_scope() as session:
+                    cert = session.query(Certificate).filter(
+                        Certificate.id == cert_id).first()
+                    can_rebuild = bool(cert and cert.has_material())
+                if can_rebuild:
+                    try:
+                        await self.place_material(cert_id)
+                        log.info("wrote %s back to disk from what we hold", name)
+                        continue
+                    except Exception as exc:
+                        log.error("could not write %s back to disk: %s", name, exc)
 
             with session_scope() as session:
                 cert = session.query(Certificate).filter(Certificate.id == cert_id).first()

@@ -1221,6 +1221,32 @@ def v_cert_import(req):
     return {"name": name, "written": written, "path": str(synced)}
 
 
+def v_cert_forget(req):
+    """
+    Take a certificate's files off this node.
+
+    Only the folder we own, never certbot's.  certbot keeps renewal state
+    alongside its copies and deleting one out from under it leaves an account
+    with a lineage it can no longer complete.  `certbot delete` is the way to
+    remove those and it is a person's decision, not ours.
+
+    Worth having at all because a deleted certificate used to leave its private
+    key sitting on every node forever.  Nothing pointed at it and nothing
+    listed it, so the only way anybody would find out is by looking at the
+    disk, which is exactly the sort of thing nobody does until an audit.
+    """
+    name = req.get("name", "")
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,253}", str(name)):
+        raise AgentError("that is not a valid cert name", "bad_request")
+
+    folder = check_write_path(str(MANAGED_DIR / "certs" / name))
+    if not folder.is_dir():
+        return {"name": name, "removed": False}
+
+    shutil.rmtree(folder)
+    return {"name": name, "removed": True}
+
+
 def v_list_backups(req):
     if not BACKUP_DIR.is_dir():
         return {"backups": []}
@@ -1822,6 +1848,7 @@ VERBS = {
     "cert_list": v_cert_list,
     "cert_export": v_cert_export,
     "cert_import": v_cert_import,
+    "cert_forget": v_cert_forget,
     "list_backups": v_list_backups,
     "rollback": v_rollback,
     "nginx_metrics": v_nginx_metrics,
