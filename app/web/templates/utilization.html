@@ -30,30 +30,6 @@
 
 <div id="charts"></div>
 
-<div class="card">
-  <div class="card-head"><h2>What is not on this page</h2></div>
-  <div class="card-body">
-    <p class="small muted" style="margin:0">
-      <strong>Per site and per backend numbers.</strong>  Request rates, status
-      code mix and latency percentiles broken down by site need the access log
-      read and parsed, which is not built.  The log format already carries
-      everything it would need.  See <code>docs/plus-parity.md</code>.
-      <br><br>
-      <strong>CPU and memory for the backends in a pool.</strong>  These are
-      somebody else's servers and there is no agent on them.  The plan is to
-      read a metrics endpoint they already expose rather than hold credentials
-      for every backend, which would turn this into something with the keys to
-      the estate.
-      <br><br>
-      <strong>Anything older than a couple of hours.</strong>  The numbers are
-      kept in memory, so a restart of the manager loses the history and nothing
-      is written to disk.  That is on purpose: a table that grows forever on a
-      load balancer is a way to fill a disk, and a full disk on a load balancer
-      is a worse outage than a missing chart.
-    </p>
-  </div>
-</div>
-
 <style>
   .tile-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
               gap: .75rem; margin-bottom: 1.25rem; }
@@ -75,7 +51,10 @@
             font-size: .8rem; }
   .legend span { display: inline-flex; align-items: center; gap: .35rem; }
   .swatch { width: 1.6rem; height: 0; border-top-width: 2px; display: inline-block; }
-  svg.chart { display: block; width: 100%; height: 190px; }
+  /* Sized by the attributes the script writes, not stretched by css.
+     max-width keeps it inside the card if the measurement is ever
+     briefly stale, without scaling it. */
+  svg.chart { display: block; max-width: 100%; height: auto; }
   svg.chart .grid { stroke: currentColor; opacity: .12; stroke-width: 1; }
   svg.chart .axis { fill: currentColor; opacity: .55; font-size: 10px; }
   svg.chart .line { fill: none; stroke-width: 2; stroke-linejoin: round;
@@ -159,6 +138,25 @@ document.addEventListener("DOMContentLoaded", function () {
     return step * mag;
   }
 
+  // How wide to draw, in real pixels.
+  //
+  // The viewBox has to match the size the SVG is actually displayed at.  A
+  // fixed viewBox stretched to fit with preserveAspectRatio="none" scales x and
+  // y by different amounts, which makes a 2px line an ellipse and squashes the
+  // axis text sideways.  It looks fine at the width it was designed for and
+  // gets worse the wider the window, which is exactly when somebody notices.
+  //
+  // Measuring instead means the geometry is always right, at any size, and the
+  // cost is redrawing on resize.
+  function chartWidth() {
+    const box = el("charts");
+    const w = box ? box.clientWidth : 0;
+    // A floor so the maths stays sane on a very narrow phone, and a ceiling so
+    // an ultrawide monitor does not get a line one pixel tall stretched across
+    // three thousand points.
+    return Math.max(360, Math.min(w || 1000, 2400));
+  }
+
   function drawChart(spec, nodes) {
     const names = Object.keys(nodes).sort();
     const seriesByNode = {};
@@ -188,16 +186,18 @@ document.addEventListener("DOMContentLoaded", function () {
     // Starting an axis at the minimum makes ordinary noise look like a crisis,
     // which is the most common way a chart lies.
     const top = spec.max ? spec.max : niceMax(peak * 1.15 || 1);
-    const W = 1000, H = 190, padL = 46, padR = 12, padT = 12, padB = 26;
+    const W = chartWidth(), H = 190, padL = 46, padR = 12, padT = 12, padB = 26;
     const plotW = W - padL - padR, plotH = H - padT - padB;
     const span = Math.max(1, to - from);
 
     const x = function (at) { return padL + (at - from) / span * plotW; };
     const y = function (v) { return padT + plotH - (v / top) * plotH; };
 
+    // No preserveAspectRatio override, so it keeps its proportions, and the
+    // viewBox is the real pixel size so there is nothing to distort.
     let svg = '<svg class="chart" viewBox="0 0 ' + W + " " + H +
-              '" preserveAspectRatio="none" role="img" aria-label="' +
-              NFM.escapeHtml(spec.title) + '">';
+              '" width="' + W + '" height="' + H +
+              '" role="img" aria-label="' + NFM.escapeHtml(spec.title) + '">';
 
     for (let i = 0; i <= 4; i++) {
       const v = top * i / 4;
@@ -259,6 +259,7 @@ document.addEventListener("DOMContentLoaded", function () {
   let LAST = {};
 
   function draw(data) {
+    lastPayload = data;
     const nodes = data.nodes || {};
     LAST = nodes;
     tiles(nodes);
@@ -338,6 +339,18 @@ document.addEventListener("DOMContentLoaded", function () {
         "Could not load: " + (err && err.message ? err.message : err);
     }
   }
+
+  // Redraw when the window changes size, because the geometry is measured
+  // rather than scaled.  Debounced: a drag across the screen fires this
+  // continuously and redrawing five charts on every pixel is wasteful.
+  let resizeTimer = null;
+  let lastPayload = null;
+  window.addEventListener("resize", function () {
+    if (resizeTimer) { clearTimeout(resizeTimer); }
+    resizeTimer = setTimeout(function () {
+      if (lastPayload) { draw(lastPayload); }
+    }, 150);
+  });
 
   el("window").addEventListener("change", load);
   el("refresh").addEventListener("click", load);
