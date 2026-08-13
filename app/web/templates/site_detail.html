@@ -141,7 +141,24 @@
         </select>
         <div class="hint">
           Lists are made on the <a href="{{ base }}/zones">zones and access page</a>,
-          so more than one site can share one.
+          so more than one site can share one.  A list is also where a username
+          and password in front of the site lives, which is not an obvious place
+          to look for it.
+        </div>
+      </div>
+
+      <div class="field mt">
+        <label for="f-errorpage">What visitors see when something goes wrong</label>
+        <select id="f-errorpage">
+          <option value="">The stock nginx pages</option>
+          {% for t in error_templates %}
+            <option value="{{ t.id }}" {{ 'selected' if host.error_page_template_id == t.id }}>{{ t.name }}{% if t.description %} - {{ t.description }}{% endif %}</option>
+          {% endfor %}
+        </select>
+        <div class="hint">
+          Templates are made on the <a href="{{ base }}/error-pages">error pages
+          page</a>.  A template only covers the status codes it was ticked for,
+          and anything else falls back to the stock page.
         </div>
       </div>
 
@@ -958,6 +975,8 @@ document.addEventListener("DOMContentLoaded", function () {
     body.cert_id = cert ? parseInt(cert, 10) : null;
     const acl = document.getElementById("f-acl").value;
     body.access_list_id = acl ? parseInt(acl, 10) : null;
+    const errpage = document.getElementById("f-errorpage").value;
+    body.error_page_template_id = errpage ? parseInt(errpage, 10) : null;
 
     if (mode === "static") body.document_root = document.getElementById("f-root").value.trim();
     if (mode === "redirect") body.redirect_target = document.getElementById("f-target").value.trim();

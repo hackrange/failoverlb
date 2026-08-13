@@ -517,6 +517,28 @@ def v_config_test(req):
     }
 
 
+def _staged_mode(rel_path):
+    """
+    How readable a staged file has to be, which is not the same for all of them.
+
+    Nearly everything we stage is config, and config is read by the nginx master
+    process while it is still root, so 0640 root only is right and is what we
+    want: those files carry backend tokens and htpasswd hashes.
+
+    Error pages are different.  They are read by a worker at request time, and
+    workers have already dropped to www-data, so a page written 0640 cannot be
+    opened at all.  That failure is not quiet and it is not harmless: nginx
+    throws away the status it was going to send and answers 403 instead.  A 502
+    from a dead backend turns into a 403 about nothing, and the error log line
+    is about a file rather than about the backend that actually broke.
+
+    Worth knowing that a *missing* page does not do this.  nginx falls back to
+    its own page and keeps the real status.  Only an unreadable one lies.
+    """
+    first = Path(rel_path).parts[0] if Path(rel_path).parts else ""
+    return 0o644 if first == "errorpages" else 0o640
+
+
 def v_write_staging(req):
     """
     Drop a whole set of files into the staging folder.
@@ -541,7 +563,7 @@ def v_write_staging(req):
             raise AgentError(f"{rel_path} has to be a relative path with no ..", "bad_path")
 
         target = check_write_path(str(STAGING_DIR / rel_path))
-        atomic_write(target, content, mode=0o640)
+        atomic_write(target, content, mode=_staged_mode(rel_path))
         written.append(rel_path)
 
     return {"written": written, "count": len(written)}

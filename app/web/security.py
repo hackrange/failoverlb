@@ -144,6 +144,40 @@ def ip_allowed(ip: str, networks) -> bool:
 # Middleware
 # ==============================================================================
 
+# The header a response sets to say it has its own security headers and the
+# middleware should not overwrite them.  It never reaches the browser: the
+# middleware takes it back off on the way out.
+SANDBOX_OPT_OUT = "X-NFM-Own-Security-Headers"
+
+
+def sandboxed_html_headers() -> dict:
+    """
+    Headers for handing back HTML that somebody else wrote.
+
+    `sandbox` in a CSP drops the document into an origin of its own, so even
+    opened straight in a tab it cannot read our cookies, our storage or the
+    page that framed it.  That is the part that matters, and it is why this is
+    safe to serve from the same host as the GUI.
+
+    The rest is about the preview being honest.  Styles have to work or you are
+    not looking at your page, pictures have to work but only the ones already
+    in the page as data, and everything else is off: no script, and nothing
+    fetched from anywhere, so a preview cannot phone home or become a way of
+    scanning the network from an admin's browser.
+    """
+    return {
+        SANDBOX_OPT_OUT: "1",
+        "Content-Security-Policy": (
+            "sandbox; "
+            "default-src 'none'; "
+            "style-src 'unsafe-inline'; "
+            "img-src data:; "
+            "frame-ancestors 'self'"
+        ),
+        "X-Frame-Options": "SAMEORIGIN",
+    }
+
+
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     """
     Security headers on every response.
@@ -154,6 +188,15 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     no reason to weaken it.
 
     No unsafe-inline for scripts.  Any inline script gets a nonce.
+
+    One response is allowed to opt out, and only one: the error page preview,
+    which hands back HTML somebody else wrote so they can see what their
+    visitors will see.  Serving that under the policy below would block the
+    styles that are the entire point of looking at it, and serving it under no
+    policy at all would run their markup on our origin with an admin session
+    sitting in the cookie jar.  It sets its own, which is stricter than this one
+    in every way that matters, and says so with SANDBOX_OPT_OUT.  See
+    sandboxed_html_headers.
     """
 
     async def dispatch(self, request: Request, call_next):
@@ -161,6 +204,18 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         request.state.csp_nonce = nonce
 
         response = await call_next(request)
+
+        # MutableHeaders has no pop, so read it and then take it back off.  It
+        # must not reach the browser: it says nothing useful to a client and
+        # naming our own middleware in a response header is free reconnaissance.
+        if response.headers.get(SANDBOX_OPT_OUT):
+            del response.headers[SANDBOX_OPT_OUT]
+            # It brought its own CSP and its own frame rules.  Everything below
+            # this line would either overwrite them or contradict them.
+            response.headers["X-Content-Type-Options"] = "nosniff"
+            response.headers["Referrer-Policy"] = "no-referrer"
+            response.headers["Cache-Control"] = "no-store"
+            return response
 
         csp = (
             "default-src 'self'; "

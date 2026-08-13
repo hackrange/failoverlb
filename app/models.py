@@ -348,6 +348,14 @@ class VirtualHost(Base):
     access_list_id = Column(Integer, ForeignKey("access_lists.id", ondelete="SET NULL"))
     access_list = relationship("AccessList")
 
+    # Which custom error page this site shows.  SET NULL rather than a refusal,
+    # because a template going missing has to drop the site back to the stock
+    # nginx page and not stop the site rendering at all.
+    error_page_template_id = Column(
+        Integer, ForeignKey("error_page_templates.id", ondelete="SET NULL")
+    )
+    error_page_template = relationship("ErrorPageTemplate")
+
     # Lock the whole site down to the management allow list.  Handy for a
     # staging site or an admin panel that should never face the internet.
     admin_only = Column(Boolean, default=False)
@@ -846,6 +854,94 @@ class AccessList(Base):
 
     def auth_users(self):
         return json_get(self.basic_auth_users, [])
+
+
+class ErrorPageTemplate(Base):
+    """
+    A custom error page, written once and pointed at by any number of sites.
+
+    The status code is not part of the template.  One template answers for 404,
+    500, 502 and the rest, with the code and its description dropped in where
+    the template asks for them.  That is the whole reason these are their own
+    objects: without it you are back to a page per code per site, which is how
+    they drift apart, and a page owned by one site has to be copied by hand for
+    every other site that wants the same look.
+    """
+
+    __tablename__ = "error_page_templates"
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String(128), unique=True, nullable=False, index=True)
+    description = Column(String(500))
+
+    # The HTML somebody wrote, with our placeholders still in it.
+    #
+    # Placeholders are filled in by plain string swaps at render time and never
+    # by a template engine.  This text comes out of a form on a page, and an
+    # engine that can evaluate an expression turns that form into a way of
+    # reading the manager's own process.  There are four swaps, they are listed
+    # in render.py, and nothing else in the text means anything.
+    html = Column(Text, nullable=False, default="")
+
+    # Which status codes this template answers for.  A json list of ints.
+    codes = Column(Text, default="[]")
+
+    created_at = Column(DateTime, default=utcnow)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
+    updated_by = Column(String(64))
+
+    images = relationship(
+        "ErrorPageImage",
+        back_populates="template",
+        cascade="all, delete-orphan",
+    )
+
+    def code_list(self):
+        return json_get(self.codes, [])
+
+
+class ErrorPageImage(Base):
+    """
+    A picture an error page uses, kept here rather than as a file on disk.
+
+    It goes into the HTML as a data URI when the page is rendered, so the
+    finished page carries its own pictures and there is nothing else to fetch.
+
+    That is deliberate and it settles three problems at once.  An error page
+    that references a picture which is not there is a broken page at exactly
+    the moment the site is already in trouble.  A folder of uploads is a second
+    thing that has to replicate to every node and stay in step with the config.
+    And serving uploads means a location with a path in it, which is a path
+    somebody can try to walk out of.  Inlining has none of that.
+
+    The cost is size, which is why uploads are capped.  A logo is a few
+    kilobytes and base64 makes it a third bigger again, which is nothing next
+    to being unable to fail.
+    """
+
+    __tablename__ = "error_page_images"
+
+    id = Column(Integer, primary_key=True)
+    template_id = Column(
+        Integer,
+        ForeignKey("error_page_templates.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    template = relationship("ErrorPageTemplate", back_populates="images")
+
+    # What the template calls it, in {{image:name}}.
+    name = Column(String(128), nullable=False)
+
+    # Worked out from the file's own first bytes, not from what the browser
+    # claimed, because the browser is repeating whatever the uploader named it.
+    content_type = Column(String(60), nullable=False)
+
+    # base64, so the row travels through the same json the rest of a snapshot
+    # goes through without anybody needing a binary path.
+    data = Column(Text, nullable=False)
+    size_bytes = Column(Integer, default=0)
+
+    created_at = Column(DateTime, default=utcnow)
 
 
 class RateLimitZone(Base):

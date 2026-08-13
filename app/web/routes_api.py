@@ -12,6 +12,7 @@ queries a table by id directly, so there is no route that can forget the check.
 """
 
 import asyncio
+import base64
 import difflib
 import ipaddress
 import json
@@ -20,13 +21,14 @@ import re
 import socket
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session as DBSession
 
 from app.auth.service import can, current_user
 from app.catalog import CATEGORIES, all_features, plus_only_features, validate_value
 from app.catalog.registry import get_feature
 from app.config import get_settings
-from app.core import audit, settings_store
+from app.core import audit, error_pages, settings_store
 from app.core.acme import AcmeError, get_cert_manager, pick_issuing_node, resolve_domain
 from app.core.agent_client import AgentError, get_agent
 from app.core.capabilities import fleet_capabilities, get_local_capabilities
@@ -42,6 +44,8 @@ from app.models import (
     Certificate,
     ConfigVersion,
     ConnLimitZone,
+    ErrorPageImage,
+    ErrorPageTemplate,
     HealthEvent,
     Location,
     MapBlock,
@@ -62,6 +66,7 @@ from app.web.security import (
     check_csrf,
     client_ip,
     pick_fields,
+    sandboxed_html_headers,
     validate_cidr,
     validate_hostname,
     validate_name,
@@ -180,6 +185,7 @@ def render_current(session, ignore_health: bool = False) -> tuple:
     pools = session.query(Pool).all()
     certs = session.query(Certificate).all()
     acls = session.query(AccessList).all()
+    error_templates = session.query(ErrorPageTemplate).all()
     rate_zones = session.query(RateLimitZone).all()
     conn_zones = session.query(ConnLimitZone).all()
     cache_zones = session.query(CacheZone).all()
@@ -217,7 +223,8 @@ def render_current(session, ignore_health: bool = False) -> tuple:
     )
 
     files = renderer.render_all(
-        hosts, pools, certs, acls, rate_zones, conn_zones, cache_zones, maps, streams
+        hosts, pools, certs, acls, rate_zones, conn_zones, cache_zones, maps, streams,
+        error_templates=error_templates,
     )
 
     # The objects themselves, not a count of them.  This is what lets a node
@@ -525,6 +532,7 @@ HOST_FIELDS = {
     "http_port", "https_port", "default_server", "http2", "force_https",
     "cert_id", "mode", "pool_id", "document_root", "redirect_target",
     "redirect_code", "settings", "access_list_id", "admin_only",
+    "error_page_template_id",
     "custom_config", "notes", "config_mode",
 }
 
@@ -626,7 +634,8 @@ def _apply_host_fields(g, host, payload):
     # Foreign keys go through the guard too, so pointing a site at a pool you
     # are not allowed to see fails the same way as asking for it directly.
     for field, model in (("pool_id", Pool), ("cert_id", Certificate),
-                         ("access_list_id", AccessList)):
+                         ("access_list_id", AccessList),
+                         ("error_page_template_id", ErrorPageTemplate)):
         if field in payload:
             value = payload[field]
             if value in (None, "", 0):
@@ -823,6 +832,7 @@ def _host_detail(h):
         "pool_id": h.pool_id,
         "cert_id": h.cert_id,
         "access_list_id": h.access_list_id,
+        "error_page_template_id": h.error_page_template_id,
         "document_root": h.document_root,
         "redirect_target": h.redirect_target,
         "redirect_code": h.redirect_code,
@@ -2297,6 +2307,272 @@ def _apply_zone_fields(kind: str, zone, payload: dict):
                 detail="cache paths have to be under /var/cache, /srv or /data",
             )
         zone.path = path
+
+
+# ==============================================================================
+# Error page templates
+# ==============================================================================
+
+def _error_template_summary(t):
+    return {
+        "id": t.id,
+        "name": t.name,
+        "description": t.description,
+        "codes": t.code_list(),
+        "image_count": len(t.images or []),
+        "updated_at": t.updated_at.isoformat() if t.updated_at else None,
+    }
+
+
+def _error_template_detail(session, t):
+    out = _error_template_summary(t)
+    out["html"] = t.html or ""
+    out["images"] = [
+        {
+            "id": i.id,
+            "name": i.name,
+            "content_type": i.content_type,
+            "size_bytes": i.size_bytes,
+            "token": "{{image:%s}}" % i.name,
+        }
+        for i in sorted(t.images or [], key=lambda x: x.name)
+    ]
+    out["used_by"] = sorted(
+        h.name for h in session.query(VirtualHost)
+        .filter(VirtualHost.error_page_template_id == t.id).all()
+    )
+    out["placeholders"] = [
+        {"token": token, "what": what} for token, what in error_pages.PLACEHOLDER_HELP
+    ]
+    return out
+
+
+@router.get("/error-pages")
+async def list_error_templates(g: ObjectGuard = Depends(guard)):
+    return {"templates": [_error_template_summary(t) for t in g.list(ErrorPageTemplate)]}
+
+
+@router.get("/error-pages/{template_id}")
+async def get_error_template(template_id: str, g: ObjectGuard = Depends(guard)):
+    return _error_template_detail(g.session, g.get(ErrorPageTemplate, template_id))
+
+
+@router.get("/error-pages/{template_id}/preview")
+async def preview_error_template(template_id: str, code: int = 404,
+                                 g: ObjectGuard = Depends(guard)):
+    """
+    What one page really looks like, rendered the same way the fleet renders it.
+
+    Deliberately the same function the renderer calls, not a second one that
+    does nearly the same thing.  A preview that is its own code path is a
+    preview that can be right about a page which then comes out wrong.
+
+    Handed back as HTML rather than as a string in some json, because a person
+    looking at their page wants to see the page.  See sandboxed_html_headers
+    for what stops that being a way of running their markup on our origin.
+    """
+    template = g.get(ErrorPageTemplate, template_id)
+    try:
+        code = error_pages.valid_codes([code])[0]
+        body = error_pages.render_page(
+            template, code, error_pages.images_for(template)
+        )
+    except error_pages.ErrorPageProblem as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except IndexError:
+        raise HTTPException(status_code=400, detail="pick a status code to preview")
+
+    return HTMLResponse(content=body, headers=sandboxed_html_headers())
+
+
+@router.post("/error-pages")
+async def create_error_template(request: Request, g: ObjectGuard = Depends(changing)):
+    g.require("edit_sites")
+    payload = await request.json()
+
+    name = validate_name(payload.get("name"), "template name")
+    claim_name(g.session, ErrorPageTemplate, name, "error page template")
+
+    template = ErrorPageTemplate(
+        name=name,
+        html=error_pages.starter_html(),
+        codes=json.dumps(error_pages.DEFAULT_CODES),
+    )
+    _apply_error_template_fields(g, template, payload)
+    g.session.add(template)
+    g.session.commit()
+
+    audit.record("error_page.create", user=g.user, object_type="error_page",
+                 object_name=name)
+    return _error_template_detail(g.session, template)
+
+
+@router.put("/error-pages/{template_id}")
+async def update_error_template(template_id: str, request: Request,
+                                g: ObjectGuard = Depends(changing)):
+    template = g.get(ErrorPageTemplate, template_id, "edit_sites")
+    payload = await request.json()
+
+    _apply_error_template_fields(g, template, payload)
+    g.session.commit()
+
+    audit.record("error_page.update", user=g.user, object_type="error_page",
+                 object_name=template.name)
+    return _error_template_detail(g.session, template)
+
+
+@router.delete("/error-pages/{template_id}")
+async def delete_error_template(template_id: str, g: ObjectGuard = Depends(changing)):
+    template = g.get(ErrorPageTemplate, template_id, "edit_sites")
+
+    # Unlike a pool, a template going away cannot break a site: nginx falls back
+    # to its own page and keeps the real status.  It still gets refused, because
+    # a template being deleted out from under four sites is a change to four
+    # sites and the person doing it should know that before it happens.
+    users = g.session.query(VirtualHost).filter(
+        VirtualHost.error_page_template_id == template.id).all()
+    if users:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"{template.name} is still used by: {', '.join(h.name for h in users)}.  "
+                f"Those sites would go back to the stock nginx pages.  Take it off "
+                f"them first if that is what you want."
+            ),
+        )
+
+    name = template.name
+    g.session.delete(template)
+    g.session.commit()
+
+    audit.record("error_page.delete", user=g.user, object_type="error_page",
+                 object_name=name)
+    return {"ok": True}
+
+
+def _apply_error_template_fields(g, template, payload):
+    if "name" in payload:
+        name = validate_name(payload["name"], "template name")
+        claim_name(g.session, ErrorPageTemplate, name, "error page template",
+                   exclude_id=template.id)
+        template.name = name
+
+    if "description" in payload:
+        template.description = (payload.get("description") or "")[:500] or None
+
+    if "codes" in payload:
+        try:
+            codes = error_pages.valid_codes(payload["codes"])
+        except error_pages.ErrorPageProblem as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        if not codes:
+            raise HTTPException(
+                status_code=400,
+                detail=("a template that answers for no status codes never gets "
+                        "shown.  Pick at least one."),
+            )
+        template.codes = json.dumps(codes)
+
+    if "html" in payload:
+        body = payload["html"]
+        if not isinstance(body, str) or not body.strip():
+            raise HTTPException(status_code=400, detail="the page cannot be empty")
+        if len(body.encode("utf-8")) > error_pages.MAX_PAGE_BYTES:
+            raise HTTPException(
+                status_code=400,
+                detail=(f"that page is bigger than "
+                        f"{error_pages.MAX_PAGE_BYTES // 1024}KB, which is a lot "
+                        f"for something you serve when the site is already "
+                        f"struggling."),
+            )
+        template.html = body
+
+    template.updated_by = getattr(g.user, "username", None)
+
+
+@router.post("/error-pages/{template_id}/images")
+async def upload_error_image(template_id: str, request: Request,
+                             g: ObjectGuard = Depends(changing)):
+    """
+    Take a picture for a template.
+
+    The name is ours, not the uploader's: it goes through validate_name and it
+    is only ever used as a lookup key in {{image:...}}.  Nothing here ever
+    becomes a path, which is the point of keeping these in the database and
+    inlining them rather than writing them out as files.
+    """
+    template = g.get(ErrorPageTemplate, template_id, "edit_sites")
+    payload = await request.json()
+
+    name = validate_name(payload.get("name"), "picture name")
+    raw_b64 = payload.get("data") or ""
+    if not isinstance(raw_b64, str):
+        raise HTTPException(status_code=400, detail="send the picture as base64")
+
+    # Strip a data: prefix, since that is what a browser FileReader hands over.
+    if raw_b64.startswith("data:"):
+        raw_b64 = raw_b64.split(",", 1)[-1]
+
+    try:
+        raw = base64.b64decode(raw_b64, validate=True)
+    except Exception:
+        raise HTTPException(status_code=400, detail="that upload is not valid base64")
+
+    try:
+        content_type = error_pages.sniff_image(raw, payload.get("filename", ""))
+    except error_pages.ErrorPageProblem as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    existing = [i for i in (template.images or []) if i.name != name]
+    total = sum(i.size_bytes or 0 for i in existing) + len(raw)
+    if total > error_pages.MAX_IMAGES_TOTAL_BYTES:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"that would take this template past "
+                    f"{error_pages.MAX_IMAGES_TOTAL_BYTES // 1024}KB of pictures.  "
+                    f"They all travel to every node on every apply."),
+        )
+
+    # Same name replaces, so re-uploading a logo does not leave the old one
+    # behind taking up the budget and never being referenced by anything.
+    for image in list(template.images or []):
+        if image.name == name:
+            g.session.delete(image)
+    g.session.flush()
+
+    g.session.add(ErrorPageImage(
+        template_id=template.id,
+        name=name,
+        content_type=content_type,
+        data=base64.b64encode(raw).decode(),
+        size_bytes=len(raw),
+    ))
+    g.session.commit()
+
+    audit.record("error_page.image.add", user=g.user, object_type="error_page",
+                 object_name=f"{template.name}/{name}",
+                 changes={"content_type": content_type, "size_bytes": len(raw)})
+    g.session.refresh(template)
+    return _error_template_detail(g.session, template)
+
+
+@router.delete("/error-pages/{template_id}/images/{image_id}")
+async def delete_error_image(template_id: str, image_id: str,
+                             g: ObjectGuard = Depends(changing)):
+    template = g.get(ErrorPageTemplate, template_id, "edit_sites")
+
+    image = next((i for i in (template.images or []) if str(i.id) == str(image_id)), None)
+    if image is None:
+        raise HTTPException(status_code=404, detail="not found")
+
+    name = image.name
+    g.session.delete(image)
+    g.session.commit()
+
+    audit.record("error_page.image.delete", user=g.user, object_type="error_page",
+                 object_name=f"{template.name}/{name}")
+    g.session.refresh(template)
+    return _error_template_detail(g.session, template)
 
 
 # ---- access lists ------------------------------------------------------------

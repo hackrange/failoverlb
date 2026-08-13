@@ -16,12 +16,13 @@ import ssl
 import sys
 import urllib.request
 
+from app.core import error_pages
 from app.core.render import Renderer
 from app.core.capabilities import fleet_capabilities
 from app.db import session_scope
 from app.models import (
-    CacheZone, Certificate, ConnLimitZone, MemberState, Pool, PoolMember,
-    VirtualHost, json_set,
+    CacheZone, Certificate, ConnLimitZone, ErrorPageImage, ErrorPageTemplate,
+    MemberState, Pool, PoolMember, VirtualHost, json_set,
 )
 from app.web.routes_api import render_current
 
@@ -499,6 +500,146 @@ check("a cache zone cannot take a rate zone's name",
 check("a zone name nothing is using is allowed",
       not _zone_refused(ConnLimitZone, "api_burst"),
       "checking across the kinds must not turn into refusing every zone name")
+
+def _refuses_image(raw):
+    try:
+        error_pages.sniff_image(raw, "upload")
+        return False
+    except error_pages.ErrorPageProblem:
+        return True
+
+
+print()
+print("  custom error pages")
+# Two things here cost real time to find and neither is visible in the code.
+#
+# nginx answers 403 when it cannot *read* the file an error_page points at, and
+# it throws the real status away doing it, so a 502 from a dead backend becomes
+# a 403 about nothing.  Everything else we stage is 0640 root because the nginx
+# master reads it while it is still root, but these are read by a worker after
+# it has dropped to www-data.  A missing page is fine, nginx falls back to its
+# own and keeps the status.  Only an unreadable one lies.
+#
+# And a template with a status code nginx will not take used to throw out of
+# the render, which stops every unrelated change on every node.
+
+
+def _template(name, codes, body=None, image=None):
+    t = ErrorPageTemplate(
+        name=name,
+        html=body if body is not None else error_pages.starter_html(),
+        codes=json_set(codes),
+    )
+    t.images = [image] if image else []
+    return t
+
+
+_logo = ErrorPageImage(
+    name="logo", content_type="image/png", size_bytes=68,
+    data=("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGA"
+          "hKmMIQAAAABJRU5ErkJggg=="))
+
+_tpl = _template("regress-style", [404, 502],
+                 '<h1>{{code}} {{message}}</h1><p>{{explain}}</p>'
+                 '<img src="{{image:logo}}">', _logo)
+_tpl.id = 901
+
+_ep_pool = Pool(name="regress_ep_pool", lb_method="round_robin")
+_ep_pool.id = 901
+_ep_pool.members = [PoolMember(address="192.0.2.10", port=8080,
+                               enabled=True, admin_state="up")]
+
+_ep_host = VirtualHost(name="ep.invalid", enabled=True, server_names='["ep.invalid"]',
+                       listen_http=True, listen_https=False, force_https=False,
+                       mode="proxy", settings="{}")
+_ep_host.id = 901
+_ep_host.pool_id = 901
+_ep_host.pool = _ep_pool
+_ep_host.error_page_template_id = 901
+
+_files = Renderer().render_all([_ep_host], [_ep_pool], [], [], [], [], [], [], [],
+                               error_templates=[_tpl])
+_conf = _files.get("sites/ep.invalid.conf", "")
+_page = _files.get("errorpages/regress-style/502.html", "")
+
+check("the pages are staged under errorpages, which the agent writes 0644",
+      all(p.startswith("errorpages/") for p in _files if p.endswith(".html")),
+      "the agent decides the mode from the first path segment, so a page "
+      "written anywhere else comes out root only and nginx answers 403 "
+      "instead of the status it meant to send")
+
+check("the code is in the page before nginx ever sees it",
+      "502" in _page and "Bad Gateway" in _page and "{{" not in _page,
+      "nothing substitutes at request time, so an unswapped placeholder is a "
+      "placeholder the visitor reads")
+
+check("pictures are inlined rather than fetched",
+      "data:image/png;base64," in _page,
+      "an error page that has to fetch something can be broken at exactly the "
+      "moment the site is already in trouble")
+
+check("the page location is internal", "        internal;" in _conf,
+      "without it anybody can fetch the 500 page off a site that is perfectly "
+      "well, and it is a prefix match so it is reachable by name")
+
+check("nothing but reading a file happens in that location",
+      "proxy_pass" not in _conf.split("__nfm_error/ {")[-1].split("}")[0],
+      "it is served from a location that must not be able to see the rest of "
+      "the config")
+
+_broken = _template("regress-broken", [99])
+_broken.id = 902
+_broken_host = VirtualHost(name="broken.invalid", enabled=True,
+                           server_names='["broken.invalid"]', listen_http=True,
+                           listen_https=False, force_https=False, mode="proxy",
+                           settings="{}")
+_broken_host.id = 902
+_broken_host.pool_id = 901
+_broken_host.pool = _ep_pool
+_broken_host.error_page_template_id = 902
+
+try:
+    _files2 = Renderer().render_all([_ep_host, _broken_host], [_ep_pool], [], [], [],
+                                    [], [], [], [],
+                                    error_templates=[_tpl, _broken])
+    _survived = ("sites/ep.invalid.conf" in _files2
+                 and "sites/broken.invalid.conf" in _files2)
+except Exception as exc:
+    _survived = False
+    _files2 = {}
+
+check("a template that cannot render does not stop every other change",
+      _survived,
+      "this threw out of the render once, which blocks the whole fleet until "
+      "somebody works out which template is at fault")
+
+check("the site using the bad template just gets no error page lines",
+      "__nfm_error" not in _files2.get("sites/broken.invalid.conf", "__nfm_error"),
+      "a site pointing at a broken template has to fall back to the stock "
+      "pages, not carry directives to files that were never written")
+
+_unused = _template("regress-unused", [404])
+_unused.id = 903
+_files3 = Renderer().render_all([_ep_host], [_ep_pool], [], [], [], [], [], [], [],
+                                error_templates=[_tpl, _unused])
+check("a template nothing points at is not written out",
+      not any(p.startswith("errorpages/regress-unused/") for p in _files3),
+      "a half finished page would otherwise land in the live config on every "
+      "node and grow the bundle for no reason")
+
+check("an upload that is not a picture is refused",
+      _refuses_image(b"this is plain text"),
+      "the check is on the file's own first bytes, because what the browser "
+      "said it was is only the name the uploader typed")
+
+check("an SVG with script in it is refused",
+      _refuses_image(b'<svg xmlns="http://www.w3.org/2000/svg"><script>x</script></svg>'),
+      "a browser will not run it inside an img tag, but the same file dropped "
+      "into a page later would, and the upload cannot know which it will be")
+
+check("a real PNG is accepted",
+      not _refuses_image(b"\x89PNG\r\n\x1a\n" + b"rest of a png"),
+      "the sniffing has gone from catching fakes to refusing everything")
 
 print()
 print("  live behaviour")

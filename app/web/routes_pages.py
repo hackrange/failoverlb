@@ -30,11 +30,14 @@ from app.auth.service import (
     save_totp,
 )
 from app.config import get_settings
-from app.core import audit
+from app.core import audit, error_pages
 from app.core.capabilities import get_local_capabilities
 from app.core.cluster import get_cluster
 from app.db import get_db, session_scope
-from app.models import AccessList, Certificate, ConfigVersion, Node, Pool, VirtualHost
+from app.models import (
+    AccessList, Certificate, ConfigVersion, ErrorPageTemplate, Node, Pool,
+    VirtualHost,
+)
 from app.web.security import (
     SESSION_COOKIE,
     check_csrf,
@@ -542,6 +545,8 @@ async def site_detail(host_id: str, request: Request, db: DBSession = Depends(ge
         certs=db.query(Certificate).order_by(Certificate.name).all(),
         access_lists=acls,
         acl_summary=[_acl_summary(a) for a in acls],
+        error_templates=db.query(ErrorPageTemplate)
+                          .order_by(ErrorPageTemplate.name).all(),
         # What address this request came from, so the page can tell somebody
         # they are about to shut themselves out.  See the note in the template.
         viewer_ip=client_ip(request),
@@ -646,6 +651,23 @@ async def zones_page(request: Request, db: DBSession = Depends(get_db)):
     user = require_page_user(request, db)
     token = ensure_csrf_token(request)
     response = render(request, "zones.html", user, csrf_token=token)
+    issue_csrf_token(response, token)
+    return response
+
+
+@router.get("/error-pages", response_class=HTMLResponse)
+async def error_pages_page(request: Request, db: DBSession = Depends(get_db)):
+    user = require_page_user(request, db)
+    token = ensure_csrf_token(request)
+    response = render(
+        request, "error_pages.html", user, csrf_token=token,
+        templates_list=db.query(ErrorPageTemplate).order_by(ErrorPageTemplate.name).all(),
+        default_codes=error_pages.DEFAULT_CODES,
+        messages=error_pages.MESSAGES,
+        placeholders=error_pages.PLACEHOLDER_HELP,
+        max_image_kb=error_pages.MAX_IMAGE_BYTES // 1024,
+        max_total_kb=error_pages.MAX_IMAGES_TOTAL_BYTES // 1024,
+    )
     issue_csrf_token(response, token)
     return response
 
