@@ -2,15 +2,17 @@
 #
 # Refuse to commit things that must never leave this machine.
 #
-# This exists because a content check is not enough.  Grepping the diff for
-# secrets catches a secret typed into a file.  It does not catch a whole folder
-# that should never have been tracked in the first place, because once it is
-# tracked it looks like part of the repository and every "git add -A" carries
-# it along.  That is how a folder of working notes ended up in fifty one
-# commits.
+# A content check alone is not enough.  Grepping a diff catches a secret typed
+# into a file.  It does not catch a whole folder that should never have been
+# tracked, because once it is tracked it looks like part of the repository and
+# every add-all carries it along.  So this checks paths as well as content, and
+# it checks what is staged rather than what is on disk.
 #
-# So this checks paths as well as content, and it checks what is staged rather
-# than what is on disk.
+# The names that must not ship are read from .githooks/forbidden.txt, which is
+# itself never committed.  That file holds customer names and any other private
+# identifier.  Putting them in this script instead would mean writing them into
+# the repository in the course of trying to keep them out of it, which is a
+# mistake this hook exists to prevent and which was made once already.
 set -euo pipefail
 
 fail=0
@@ -18,13 +20,14 @@ staged="$(git diff --cached --name-only --diff-filter=ACMR)"
 [[ -z "$staged" ]] && exit 0
 
 # ---------------------------------------------------------------- paths
-# Folders and files that are never part of the product.
-FORBIDDEN_PATHS='^(\.claude/|tools/manual/|\.env$|.*/\.env$|.*\.docx\.tmp$)'
+FORBIDDEN_PATHS='^(\.githooks/forbidden\.txt$|tools/manual/|\.env$|.*/\.env$)'
+# Working notes for any assistant that helps here.
+FORBIDDEN_PATHS+='|^\.[a-z]+/(PLAN|PROJECT|settings\.local)\.'
 
 while IFS= read -r path; do
     [[ -z "$path" ]] && continue
     if [[ "$path" =~ $FORBIDDEN_PATHS ]]; then
-        echo "  refused: $path"
+        echo "  refused: $path" >&2
         fail=1
     fi
 done <<< "$staged"
@@ -44,17 +47,25 @@ MSG
 fi
 
 # -------------------------------------------------------------- content
-# Anything that identifies a customer, and anything naming the assistant that
-# helps on this project.  Neither belongs in a repository somebody else clones.
-if git diff --cached -U0 | grep -inE '^\+.*(\bclaude\b|\bherc\b|REDACTED|REDACTED)' >/dev/null; then
-    echo "  refused: a name that must not ship appears in the staged changes" >&2
-    git diff --cached -U0 | grep -inE '^\+.*(\bclaude\b|\bherc\b|REDACTED|REDACTED)' \
-        | head -5 | sed 's/^/    /' >&2
-    exit 1
+added="$(git diff --cached -U0 | grep '^+' || true)"
+
+LIST=".githooks/forbidden.txt"
+if [[ -f "$LIST" ]]; then
+    while IFS= read -r pattern; do
+        [[ -z "$pattern" || "$pattern" == \#* ]] && continue
+        if grep -qiE -- "$pattern" <<< "$added"; then
+            echo "  refused: a name that must not ship appears in the staged changes" >&2
+            echo "  (it matches a pattern in $LIST, which is not printed here)" >&2
+            exit 1
+        fi
+    done < "$LIST"
+else
+    echo "  note: $LIST is missing, so only paths were checked" >&2
+    echo "  put one private name or pattern per line in it" >&2
 fi
 
-# Private keys, which are easy to paste in by accident while testing.
-if git diff --cached -U0 | grep -qE '^\+.*BEGIN (RSA |EC |OPENSSH |)PRIVATE KEY'; then
+# Private keys, easy to paste in by accident while testing.
+if grep -qE 'BEGIN (RSA |EC |OPENSSH |)PRIVATE KEY' <<< "$added"; then
     echo "  refused: that looks like a private key" >&2
     exit 1
 fi

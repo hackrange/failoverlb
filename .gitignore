@@ -128,3 +128,8 @@ test/
 # than part of the product: capture scripts, chapter sources, screenshots and
 # the intermediate images.  The finished guide is committed in docs/.
 tools/manual/
+
+# The list of names that must never be committed.  Kept out of git itself,
+# because writing private identifiers into the repository in order to keep them
+# out of it defeats the point.
+.githooks/forbidden.txt
