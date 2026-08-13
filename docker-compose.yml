@@ -55,6 +55,13 @@ services:
       # reached directly.  Set it to the proxy's address, and only that, when
       # you put one in front.
       NFM_TRUSTED_PROXIES: ${NFM_TRUSTED_PROXIES:-}
+      # Serving the GUI under a path, for putting it behind a reverse proxy at
+      # something like /lb.  Every link, form action and cookie path is built
+      # from this.  It was missing here, so the setting existed, the templates
+      # used it, and there was no way to give it a value: the login page came
+      # out with no stylesheet, which is exactly the symptom its own comment in
+      # config.py warns about.
+      NFM_ROOT_PATH: ${NFM_ROOT_PATH:-}
       NFM_SESSION_TIMEOUT_MINUTES: ${NFM_SESSION_TIMEOUT_MINUTES:-60}
 
       # ---- OIDC, optional.  Local break glass logins always work. --------
