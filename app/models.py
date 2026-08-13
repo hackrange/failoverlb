@@ -456,6 +456,13 @@ class Location(Base):
     custom_config = Column(Text)
     enabled = Column(Boolean, default=True)
 
+    # Take this location's path off the front before sending the request on.
+    # Off by default, because passing the path through whole is what most
+    # backends expect.  Turn it on when a backend is being mounted under a
+    # prefix it knows nothing about, which is the usual reason for a location
+    # like /lb in the first place.
+    strip_prefix = Column(Boolean, default=False)
+
     def setting_map(self):
         return json_get(self.settings, {})
 

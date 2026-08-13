@@ -4779,7 +4779,7 @@ async def import_apply(request: Request, g: ObjectGuard = Depends(changing)):
 LOCATION_FIELDS = (
     "path", "match_type", "mode", "document_root", "alias",
     "redirect_target", "redirect_code", "custom_config", "enabled",
-    "sort_order",
+    "sort_order", "strip_prefix",
 )
 
 MATCH_TYPES = {"prefix", "exact", "preferential", "regex", "regex_i"}
@@ -4847,6 +4847,9 @@ def _apply_location_fields(loc, payload, g):
         loc.redirect_code = int(payload.get("redirect_code") or 301)
     if "enabled" in payload:
         loc.enabled = bool(payload.get("enabled"))
+
+    if "strip_prefix" in payload:
+        loc.strip_prefix = bool(payload.get("strip_prefix"))
     if "sort_order" in payload:
         loc.sort_order = int(payload.get("sort_order") or 0)
 

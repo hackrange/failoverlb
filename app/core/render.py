@@ -1704,7 +1704,9 @@ map $cookie_{cookie} $sticky_set_{var} {{
             lines.extend(self._limit_lines(cfg, indent=8))
 
         if loc.mode == "proxy" and loc.pool:
-            lines.extend(self._proxy_lines(loc.pool, cfg, indent=8))
+            lines.extend(self._proxy_lines(
+                loc.pool, cfg, indent=8,
+                strip_prefix=bool(getattr(loc, "strip_prefix", False))))
         elif loc.mode == "static":
             if loc.alias:
                 lines.append(f"        alias {esc(loc.alias)};")
@@ -1753,13 +1755,23 @@ map $cookie_{cookie} $sticky_set_{var} {{
             f"{pad}return 503;",
         ]
 
-    def _proxy_lines(self, pool, cfg, indent=8) -> list:
+    def _proxy_lines(self, pool, cfg, indent=8, strip_prefix=False) -> list:
         if not self._pool_has_servers(pool):
             return self._empty_pool_lines(pool, indent)
 
         pad = " " * indent
         scheme = "https" if getattr(pool, "uses_backend_tls", False) else "http"
-        lines = [f"{pad}proxy_pass {scheme}://{_safe_name(pool.name)};"]
+
+        # A trailing slash on proxy_pass is what takes the location's path off
+        # the front before the request goes on.  It is one character and it
+        # changes the meaning completely, which is why it is a checkbox on the
+        # location rather than something anybody has to remember.
+        #
+        # /lb/thing reaches the backend as /thing.  Without it the backend gets
+        # /lb/thing and answers 404, which reads like the backend being broken
+        # rather than the path being passed on whole.
+        tail = "/" if strip_prefix else ""
+        lines = [f"{pad}proxy_pass {scheme}://{_safe_name(pool.name)}{tail};"]
 
         backend_name = getattr(pool, "backend_name", "") or ""
         is_site = getattr(pool, "backend_kind", "servers") == "site"

@@ -1090,6 +1090,16 @@ document.addEventListener("DOMContentLoaded", function () {
         </select></div>
       <div class="field" data-lmode="proxy"><label for="l-pool">Pool</label>
         <select id="l-pool"><option value="">none</option>${poolOpts}</select></div>
+      <div class="field" data-lmode="proxy">
+        <div class="checkline">
+          <input type="checkbox" id="l-strip" ${l.strip_prefix ? "checked" : ""}>
+          <label for="l-strip">Take this path off before sending it on</label>
+        </div>
+        <div class="hint">For a backend mounted under a prefix it knows nothing
+          about.  With this on, <code>/lb/thing</code> reaches the backend as
+          <code>/thing</code>.  With it off the backend gets the whole path and
+          usually answers 404, which looks like the backend being broken rather
+          than the path being passed through whole.</div></div>
       <div class="field" data-lmode="static"><label for="l-root">Directory</label>
         <input type="text" id="l-root" value="${NFM.escapeHtml(l.document_root || "")}" placeholder="/var/www/static">
         <div class="hint">Left as a root.  Use alias below instead if the path should be stripped.</div></div>
@@ -1162,6 +1172,7 @@ document.addEventListener("DOMContentLoaded", function () {
     body.alias = v("l-alias").trim() || null;
     body.redirect_target = v("l-target").trim() || null;
     body.redirect_code = parseInt(v("l-code") || "301", 10);
+    body.strip_prefix = (document.getElementById("l-strip") || {}).checked || false;
     return body;
   }
 
