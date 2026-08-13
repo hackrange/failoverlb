@@ -1,6 +1,0 @@
-# All rebuilt from a running system.  Large, and they change completely on
-# every build, which is not what git is for.
-shots/
-built/
-*.docx
-__pycache__/
