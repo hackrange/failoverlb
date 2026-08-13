@@ -18,16 +18,22 @@ After=network.target
 # useless at the only moment you really need it.
 Wants=nginx.service
 
+# Do not let a crash loop hammer the box.  If it dies 5 times in a minute, stop
+# and leave it stopped so somebody looks at it.
+#
+# These live in [Unit], not [Service].  They used to be in [Service] and systemd
+# ignored them with one line in the journal that nobody reads, so the limit was
+# never in force and a broken agent restarted every five seconds forever.  A
+# setting that is quietly doing nothing is worse than one that is missing,
+# because the unit file still reads as though the box is protected.
+StartLimitBurst=5
+StartLimitIntervalSec=60
+
 [Service]
 Type=simple
 ExecStart=/usr/bin/python3 /opt/nginx-fleet-manager/nginx-mgr-agent.py
 Restart=always
 RestartSec=5s
-
-# Do not let a crash loop hammer the box.  If it dies 5 times in a minute,
-# stop and leave it stopped so somebody looks at it.
-StartLimitBurst=5
-StartLimitIntervalSec=60
 
 Environment=NFM_AGENT_LOG_LEVEL=INFO
 Environment=NFM_AGENT_GROUP=nginxmgr

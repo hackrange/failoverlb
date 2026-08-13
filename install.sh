@@ -271,10 +271,21 @@ fi
 # on a new box has not happened yet.  Making them here is cheap and saves a
 # confusing failure.  The unit also marks the optional ones with a dash, so
 # this is belt and braces.
+#
+# /etc/nginx is in this list even though nginx owns it, and that is not an
+# oversight either.  This installer says the GUI comes up whether or not nginx
+# is here yet, and it leaves nginx-installer.sh behind so nginx can be built
+# later from the GUI.  Building it from the GUI means asking the agent to do
+# it.  So on a box with no nginx, the agent has to start before /etc/nginx
+# exists, or the one thing that would create it can never run.
+#
+# It is not marked optional in the unit, because an agent that starts happily
+# and then cannot write any config is worse than one that refuses to start.
+# Making the folder here is what keeps both of those true.
 mkdir -p /var/backups/nginx-fleet-manager /var/lib/nginx-fleet-manager \
          /usr/local/lib/nginx-fleet-manager /var/www/certbot \
          /etc/letsencrypt /var/log/letsencrypt /var/lib/letsencrypt \
-         /var/cache/nginx /var/log/nginx
+         /var/cache/nginx /var/log/nginx /etc/nginx
 chmod 0750 /usr/local/lib/nginx-fleet-manager
 
 install -m 0644 "$SCRIPT_DIR/host-agent/nginx-mgr-agent.service" "$AGENT_UNIT"
