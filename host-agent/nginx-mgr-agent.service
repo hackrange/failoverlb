@@ -126,7 +126,11 @@ ProcSubset=pid
 
 # No raw sockets, no weird address families.  Unix sockets and normal IP is all
 # curl and certbot need.
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# AF_NETLINK is here for one reason: nftables talks to the kernel over it, and
+# the agent installs one rule, the redirect that puts port 53 in front of the
+# manager's dns listener.  Without it nft fails with "Unable to initialize
+# Netlink socket", which reads like a missing package rather than a sandbox.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 RestrictNamespaces=yes
 RestrictRealtime=yes
 RestrictSUIDSGID=yes
@@ -186,7 +190,10 @@ SystemCallArchitectures=native
 #     of a config with a normal web port in it failed with
 #     "bind() to 0.0.0.0:80 failed (13: Permission denied)", and nothing could
 #     be applied.  The message points at nginx and the real cause is here.
-CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETUID CAP_SETGID CAP_KILL CAP_NET_BIND_SERVICE
+# CAP_NET_ADMIN is what writing a firewall rule needs.  It is a real widening
+# and it buys the one thing the container cannot do for itself, which is put
+# port 53 in front of a listener that runs unprivileged on purpose.
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETUID CAP_SETGID CAP_KILL CAP_NET_BIND_SERVICE CAP_NET_ADMIN
 
 # Keep one bad apply from eating the box.
 LimitNOFILE=4096

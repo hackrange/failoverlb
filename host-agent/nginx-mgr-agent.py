@@ -1419,16 +1419,29 @@ def v_dns_redirect(req):
     # rule on every restart, and the last one written is not necessarily the one
     # that matches.
     daddr = f"ip daddr {address} " if address else ""
+
+    # dnat rather than redirect, and the difference only shows on this box.
+    #
+    # `redirect` sends a packet to the local machine, and in the output chain
+    # that means 127.0.0.1.  The listener binds this node's public address, so
+    # a query made from the box to its own address landed on loopback where
+    # nothing was listening and came back refused, while the same query from
+    # anywhere else worked perfectly.  That is the worst shape of bug to leave
+    # in: it works everywhere except where somebody testing it will try first.
+    #
+    # Naming the address explicitly sends it to the socket that exists.
+    target = f"{address}:{port}" if address else f":{port}"
+    verb = "dnat to" if address else "redirect to"
     ruleset = f"""table ip {NFT_TABLE} {{
     chain prerouting {{
         type nat hook prerouting priority dstnat; policy accept;
-        {daddr}udp dport 53 redirect to :{port}
-        {daddr}tcp dport 53 redirect to :{port}
+        {daddr}udp dport 53 {verb} {target}
+        {daddr}tcp dport 53 {verb} {target}
     }}
     chain output {{
         type nat hook output priority dstnat; policy accept;
-        {daddr}udp dport 53 redirect to :{port}
-        {daddr}tcp dport 53 redirect to :{port}
+        {daddr}udp dport 53 {verb} {target}
+        {daddr}tcp dport 53 {verb} {target}
     }}
 }}
 """
