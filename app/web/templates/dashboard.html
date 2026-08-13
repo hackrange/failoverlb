@@ -1,5 +1,70 @@
 {% extends "base.html" %}
-{% block title %}Dashboard &middot; NGINX Management{% endblock %}
+{% block title %}Dashboard &middot; NGINX Management<script nonce="{{ csp_nonce }}">
+// Waits for app.js, which the layout loads after this block.
+document.addEventListener("DOMContentLoaded", function () {
+  function cell(v) {
+    // A rate we do not have yet is different from a rate of zero, and showing
+    // 0 for "no second sample" makes a busy box look idle.
+    return v === null || v === undefined ? '<span class="faint">&mdash;</span>' : v;
+  }
+
+  async function load() {
+    let data;
+    try {
+      data = await NFM.api("/metrics");
+    } catch (err) {
+      const c = document.createElement("td");
+      c.colSpan = 8;
+      c.className = "faint";
+      c.textContent = "Could not load: " + (err && err.message ? err.message : err);
+      const r = document.createElement("tr");
+      r.appendChild(c);
+      document.getElementById("metrics-rows").replaceChildren(r);
+      return;
+    }
+
+    const names = Object.keys(data.nodes || {}).sort();
+    if (!names.length) {
+      document.getElementById("metrics-rows").innerHTML =
+        '<tr><td colspan="8" class="faint">Nothing collected yet.</td></tr>';
+      return;
+    }
+
+    let newest = 0;
+    document.getElementById("metrics-rows").innerHTML = names.map(function (n) {
+      const d = data.nodes[n] || {};
+      const l = d.latest || {};
+      const r = d.rates || {};
+      if (l.at && l.at > newest) { newest = l.at; }
+      if (d.error) {
+        return "<tr><td><strong>" + NFM.escapeHtml(n) + "</strong></td>" +
+               '<td colspan="7" class="small" style="color:var(--warn)">' +
+               NFM.escapeHtml(d.error) + "</td></tr>";
+      }
+      return "<tr><td><strong>" + NFM.escapeHtml(n) + "</strong></td>" +
+        '<td class="right mono">' + cell(l.active_connections) + "</td>" +
+        '<td class="right mono">' + cell(r.requests_per_sec) + "</td>" +
+        '<td class="right mono">' + cell(r.accepts_per_sec) + "</td>" +
+        '<td class="right mono">' + cell(r.dropped_per_sec) + "</td>" +
+        '<td class="right mono">' + cell(l.reading) + "</td>" +
+        '<td class="right mono">' + cell(l.writing) + "</td>" +
+        '<td class="right mono">' + cell(l.waiting) + "</td></tr>";
+    }).join("");
+
+    const age = document.getElementById("metrics-age");
+    if (newest) {
+      const secs = Math.max(0, Math.round(Date.now() / 1000 - newest));
+      age.textContent = secs < 60 ? secs + "s ago"
+                                  : Math.round(secs / 60) + "m ago";
+    }
+  }
+
+  load();
+  setInterval(load, 15000);
+});
+</script>
+
+{% endblock %}
 
 {% block content %}
 
@@ -115,6 +180,47 @@
     <div class="value">{{ nodes|length }}</div>
     <div class="note">
       {{ nodes|selectattr('is_healthy')|list|length }} online
+    </div>
+  </div>
+</div>
+
+{# What nginx is actually doing right now, per node.
+
+   Free nginx gives seven numbers for the whole server and nothing per site, so
+   this is deliberately modest: connections and the rates behind the counters.
+   The per site and per backend picture needs the access log parsed, which is
+   written up in docs/plus-parity.md as a plan and is not built.  Saying that
+   plainly here beats a page that looks like it should have more on it. #}
+<div class="card">
+  <div class="card-head">
+    <h2>What nginx is doing</h2>
+    <span class="small faint" id="metrics-age"></span>
+  </div>
+  <div class="card-body tight">
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>Node</th>
+            <th class="right">Active</th>
+            <th class="right">Requests/s</th>
+            <th class="right">Connections/s</th>
+            <th class="right">Dropped/s</th>
+            <th class="right">Reading</th>
+            <th class="right">Writing</th>
+            <th class="right">Waiting</th>
+          </tr>
+        </thead>
+        <tbody id="metrics-rows">
+          <tr><td colspan="8" class="faint">Loading...</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="small faint" style="padding:.5rem .75rem 0">
+      From <code>stub_status</code>, sampled every fifteen seconds.  The rates
+      are worked out between two samples, so they take half a minute to appear
+      after a restart.  Dropped is connections nginx accepted and could not
+      handle, which is nearly always zero and is worth looking at when it is not.
     </div>
   </div>
 </div>

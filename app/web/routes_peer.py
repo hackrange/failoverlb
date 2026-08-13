@@ -469,6 +469,10 @@ PEER_AGENT_VERBS = {
     "nginx_revert",
     "status",
     "config_test",
+    # Connection counts off stub_status.  Read only, no arguments that reach
+    # the filesystem, and the whole reason for a fleet view is seeing the other
+    # node's numbers on whichever page somebody happens to be on.
+    "nginx_metrics",
 }
 
 

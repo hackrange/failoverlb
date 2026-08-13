@@ -59,12 +59,30 @@ back to send the same user to the same backend every time.
 which pins on anything you can name.  Neither one sets a cookie for you.
 
 **What we built:** the manager generates the cookie half.  You turn on sticky
-sessions for a pool and it writes out a `map` that reads a route cookie, an
-`add_header` that sets the cookie when the client does not have one yet, and an
-upstream that hashes on it with `consistent` turned on.
+sessions for a pool and it writes out two `map` blocks, one that reads the route
+cookie for the upstream to hash on and one that decides whether this client
+needs a cookie at all, plus an upstream that hashes with `consistent` on.
 
-Result is the same as what Plus does.  A user gets a cookie on their first
-request and lands on the same backend after that.
+A user gets a cookie on their first request and lands on the same backend after
+that.  The very first request is the exception: there is no cookie yet, so it
+goes wherever the client's address hashes to, and the cookie takes over from the
+second request onward.  Plus behaves the same way for the same reason.
+
+**Two things about the cookie that are not obvious**, both of which were wrong
+in the first version of this and produced a feature that looked configured and
+did the opposite of its name:
+
+The value has to be *stable* and does not have to mean anything.  It is a
+request id.  What makes a client stick is the same string coming back every
+time, not what the string says.  Writing the backend's own address in there
+seems natural and is actively harmful: the hash of an address does not land on
+that address, it lands wherever it lands, so the next response writes a
+different backend into the cookie and the client walks round the pool one
+request at a time.
+
+And it must only be set when the client does not already have one.  Setting it
+on every response overwrites the route they were given, every time, which undoes
+the whole thing.
 
 `consistent` matters and is worth knowing about.  Without it, taking one backend
 out of a pool of four reshuffles roughly everybody.  With it, only the users who
@@ -140,7 +158,16 @@ seconds, `least_conn` on its own reacts faster and you should just use that.
 
 ---
 
-### The live activity dashboard
+### The live activity dashboard  — NOT BUILT
+
+**This section describes something that does not exist.**  It is kept because
+the design is right and it is what should be built, but nothing below this line
+is in the product today.  Read it as a plan, not as instructions.
+
+There is a `log_parsing_enabled` setting in the database and nothing reads it.
+There is no log tailer, no `stub_status` scraper and no dashboard page.  The
+Setup line at the end of this section used to say "on by default", which was the
+worst kind of wrong: documentation promising a feature nobody had written.
 
 **Plus does:** `ngx_http_api_module` and the status dashboard.  Live numbers per
 server zone and per upstream, request rates, response codes, latency.
@@ -149,7 +176,7 @@ server zone and per upstream, request rates, response codes, latency.
 server.  Active connections, accepts, handled, requests, reading, writing,
 waiting.  That is it.  Nothing per site and nothing per backend.
 
-**What we built:** the dashboard reads two sources and puts them together.
+**What it should do:** read two sources and put them together.
 
 `stub_status` gives the connection level picture, and the manager scrapes it on
 a timer, so you get the same numbers with history behind them instead of just
@@ -172,12 +199,13 @@ watching a deploy or working out which backend is slow, a few seconds behind is
 fine.  Where Plus wins is that it also shows in-flight requests, which a log
 cannot show you because the line is not written until the request finishes.
 
-**Cost:** parsing logs takes some CPU.  On a busy box it is worth watching.  You
-can turn the log parsing off and keep just the `stub_status` numbers if you would
-rather.
+**Cost:** parsing logs takes some CPU.  On a busy box it would be worth
+watching, and there should be a way to keep the `stub_status` numbers and turn
+the log parsing off.
 
-**Setup:** on by default.  Settings, Monitoring to tune the window or turn off
-log parsing.
+**Setup:** nothing to set up, because none of it exists yet.  The log format the
+manager already writes has everything it would need, which is the one part of
+this that is done.
 
 ---
 

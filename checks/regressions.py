@@ -878,6 +878,58 @@ check("one we hold the material for knows it can rebuild itself",
       "back from the database instead of waiting for a person")
 
 print()
+print("  the paid feature stand ins")
+# Sticky sessions were shipped, documented, and had never worked.  The cookie
+# was written on every response and its value was the backend that had just
+# answered.  That is not merely "not sticky": the hash of an address lands on
+# some other backend, whose address then gets written into the cookie, so a
+# client walks round the pool one request at a time.  Found by following the
+# cookie the way a browser does rather than by sending a fixed one.
+
+_sticky_pool = Pool(name="sticky_check", lb_method="round_robin", zone_size="64k",
+                    settings=json_set({"sticky_enabled": True,
+                                       "sticky_cookie_name": "nfm_route",
+                                       "sticky_consistent": True}))
+_sticky_pool.id = 951
+_sticky_pool.members = [
+    PoolMember(address="192.0.2.51", port=80, enabled=True, admin_state="up", weight=1),
+    PoolMember(address="192.0.2.52", port=80, enabled=True, admin_state="up", weight=1),
+]
+_sticky_site = VirtualHost(name="stickycheck", enabled=True,
+                           server_names=json_set(["sticky.invalid"]),
+                           listen_http=True, listen_https=False, force_https=False,
+                           http_port=80, mode="proxy", settings="{}")
+_sticky_site.id = 951
+_sticky_site.pool_id = 951
+_sticky_site.pool = _sticky_pool
+
+_sticky_files = Renderer().render_all([_sticky_site], [_sticky_pool], [], [], [],
+                                      [], [], [], [])
+_sticky_map = _sticky_files.get("maps/sticky-sticky_check.conf", "")
+_sticky_conf = _sticky_files.get("sites/stickycheck.conf", "")
+
+check("the sticky cookie is not the backend address",
+      "$upstream_addr" not in _sticky_map and "$upstream_addr" not in _sticky_conf,
+      "writing the address that just served means the next hash lands "
+      "somewhere else and the client walks round the pool")
+
+check("the cookie value is something stable instead",
+      "$request_id" in _sticky_map,
+      "what makes a client stick is the same string coming back every time, "
+      "not what the string says")
+
+check("the cookie is only handed out when there is not one already",
+      'default "";' in _sticky_map and "$sticky_set_sticky_check" in _sticky_conf,
+      "an empty value writes no header at all, which is how this is done "
+      "without an if block.  Setting it every time overwrites the route the "
+      "client was given and undoes the whole feature")
+
+check("the upstream still hashes on the cookie",
+      "hash $sticky_sticky_check consistent;" in
+      _sticky_files.get("upstreams/sticky_check.conf", ""),
+      "the hash is the half that does the routing")
+
+print()
 print("  the www case")
 # A wildcard covers exactly one label.  Getting that wrong in either direction
 # is a site that looks right everywhere in the manager and warns in a browser,

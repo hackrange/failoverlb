@@ -472,16 +472,37 @@ server {
                 continue
 
             cookie = cfg.get("sticky_cookie_name", "nfm_route")
+            max_age = int(cfg.get("sticky_cookie_max_age", 3600))
+            var = _safe_var(pool.name)
             lines = [HEADER.format(detail=f"Sticky session routing for pool {pool.name}")]
             lines.append(f'''
 # Stand in for the paid sticky cookie feature.  We hash on the route cookie so
 # a client keeps landing on the same backend.  When they have no cookie yet the
 # fallback is their address, which keeps them steady for that first request
 # until the cookie is set.
-map $cookie_{cookie} $sticky_{_safe_var(pool.name)} {{
+map $cookie_{cookie} $sticky_{var} {{
     default $remote_addr;
     "" $remote_addr;
     ~. $cookie_{cookie};
+}}
+
+# Whether to hand this client a cookie, and what to put in it.
+#
+# Only when they do not already have one.  Setting it on every response is
+# what this used to do, and it does not merely fail to be sticky, it actively
+# rotates: the value written was the backend that just answered, the hash of
+# that address lands on some other backend, and the next response writes that
+# one instead.  A client walks round the pool one request at a time.
+#
+# The value has to be stable and does not have to mean anything, which is why
+# it is a request id rather than an address.  What makes a client stick is the
+# same string coming back every time, not what the string says.
+#
+# An empty value here writes no header at all, which is how the "only when they
+# do not have one" half is done without an if block.
+map $cookie_{cookie} $sticky_set_{var} {{
+    ""      "{cookie}=$request_id; Path=/; Max-Age={max_age}; HttpOnly; SameSite=Lax";
+    default "";
 }}
 ''')
             self.files[f"maps/sticky-{_safe_name(pool.name)}.conf"] = "\n".join(lines)
@@ -1911,14 +1932,12 @@ map $cookie_{cookie} $sticky_{_safe_var(pool.name)} {{
         # reading the cookie, this sets it when the client does not have one.
         pool_cfg = pool.setting_map()
         if pool_cfg.get("sticky_enabled"):
-            cookie = pool_cfg.get("sticky_cookie_name", "nfm_route")
-            max_age = int(pool_cfg.get("sticky_cookie_max_age", 3600))
             lines.append("")
-            lines.append(f"{pad}# Sticky sessions.  Give the client a route cookie if they do not")
-            lines.append(f"{pad}# have one, and the upstream hash above keeps them on that box.")
+            lines.append(f"{pad}# Sticky sessions.  The map decides whether this client needs a")
+            lines.append(f"{pad}# cookie, and hands back nothing when they already have one, so")
+            lines.append(f"{pad}# no header is written and their existing route survives.")
             lines.append(
-                f'{pad}add_header Set-Cookie '
-                f'"{cookie}=$upstream_addr; Path=/; Max-Age={max_age}; HttpOnly; SameSite=Lax" always;'
+                f"{pad}add_header Set-Cookie $sticky_set_{_safe_var(pool.name)} always;"
             )
 
         return lines

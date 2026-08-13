@@ -34,6 +34,7 @@ from app.core.agent_client import AgentError, get_agent
 from app.core.capabilities import set_local_capabilities
 from app.core.cluster import get_cluster
 from app.core.crypto import ClusterCA
+from app.core.metrics import get_collector
 from app.db import init_db, session_scope
 from app.models import Node, NodeRole, NodeState, utcnow
 
@@ -377,6 +378,20 @@ def start_scheduler():
         "interval",
         seconds=settings.cert_check_interval,
         id="certs",
+        max_instances=1,
+        coalesce=True,
+    )
+
+    # Connection numbers, so the dashboard has something moving on it.
+    #
+    # Fifteen seconds because these are counters and the useful thing is the
+    # rate between two readings.  Too far apart and a spike is averaged away,
+    # too close and it is all noise from the manager's own health checks.
+    scheduler.add_job(
+        get_collector().collect,
+        "interval",
+        seconds=15,
+        id="nginx_metrics",
         max_instances=1,
         coalesce=True,
     )

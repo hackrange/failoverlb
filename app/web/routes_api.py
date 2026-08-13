@@ -2613,6 +2613,24 @@ async def delete_error_image(template_id: str, image_id: str,
     return _error_template_detail(g.session, template)
 
 
+@router.get("/metrics")
+async def nginx_metrics(g: ObjectGuard = Depends(guard)):
+    """
+    Connection and request numbers for every node, with rates.
+
+    stub_status is what free nginx gives, and four of its seven numbers are
+    counters, so the useful part is the difference between two readings rather
+    than the readings themselves.  See app/core/metrics.py.
+
+    Deliberately not per site or per backend.  Those need the access log read,
+    which is a real piece of work and is written up in docs/plus-parity.md as a
+    plan rather than pretended to be here.
+    """
+    g.require("view")
+    from app.core.metrics import get_collector
+    return {"nodes": get_collector().snapshot()}
+
+
 # ==============================================================================
 # Map blocks, which is nginx's lookup table
 # ==============================================================================
