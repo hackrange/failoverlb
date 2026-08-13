@@ -2782,6 +2782,24 @@ async def list_gslb_zones(g: ObjectGuard = Depends(guard)):
         },
         # Which nodes would be handed out right now.
         "healthy_nodes": sorted(gslb.healthy_node_ids(g.session)),
+        # The nodes an answer can be tied to, with the address each one would
+        # hand out.  The cluster page does not publish node ids and there is no
+        # reason it should, but an answer is stored against one, so the picker
+        # has to get them from somewhere.
+        #
+        # public_ip first, because the address a node uses to reach its peers is
+        # often a private one, and putting a private address in public DNS is a
+        # mistake nobody notices until somebody outside cannot reach the site.
+        "nodes": [
+            {
+                "id": n.id,
+                "name": n.name,
+                "address": n.public_ip or n.address,
+                "peer_address": n.address,
+                "public_ip": n.public_ip,
+            }
+            for n in g.session.query(Node).order_by(Node.name).all()
+        ],
     }
 
 

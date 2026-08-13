@@ -680,6 +680,15 @@ async def utilization_page(request: Request, db: DBSession = Depends(get_db)):
     return response
 
 
+@router.get("/gslb", response_class=HTMLResponse)
+async def gslb_page(request: Request, db: DBSession = Depends(get_db)):
+    user = require_page_user(request, db)
+    token = ensure_csrf_token(request)
+    response = render(request, "gslb.html", user, csrf_token=token)
+    issue_csrf_token(response, token)
+    return response
+
+
 @router.get("/maps", response_class=HTMLResponse)
 async def maps_page(request: Request, db: DBSession = Depends(get_db)):
     user = require_page_user(request, db)
