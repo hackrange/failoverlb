@@ -140,6 +140,32 @@ with session_scope() as s:
     check("the certs folder survived the last apply", bool(entries),
           "an apply used to swap the managed folder and take certs with it")
 
+
+# A site with a path on it must still answer for everything else.
+#
+# Adding one path used to throw the site's own behaviour away, so a site set to
+# redirect rendered no redirect and nothing for the root.  nginx fell back to
+# its own default root and served its welcome page.  Valid config, successful
+# apply, wrong page.
+if not have_sites:
+    skip("a site with a path still answers for the root",
+         "no sites on this node")
+else:
+    def add_a_path(session):
+        host = session.query(VirtualHost).first()
+        host.mode = "redirect"
+        host.redirect_target = "/somewhere"
+        session.add(Location(host_id=host.id, path="/api", match_type="prefix",
+                             mode="redirect", redirect_target="/api-v2",
+                             enabled=True, sort_order=10))
+
+    files = rendered_with(add_a_path)
+    site_files = [c for p, c in files.items() if p.startswith("sites/")]
+    root_covered = any("location / {" in c for c in site_files)
+    check("a site with a path still answers for the root", root_covered,
+          "no location / was written, so anything outside the path falls "
+          "through to whatever nginx serves by default")
+
 print()
 print("  the renderer, against bugs that blocked every apply")
 

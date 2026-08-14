@@ -1421,16 +1421,33 @@ map $cookie_{cookie} $sticky_set_{var} {{
             lines.append("")
 
         # ---- the locations ----
-        if host.locations:
-            for loc in sorted(host.locations, key=lambda x: x.sort_order):
-                if loc.enabled:
-                    lines.extend(self._render_location(
-                        loc, cfg, host,
-                        error_choice=(loc_errors or {}).get(loc.id),
-                        site_error=site_error))
-                    lines.append("")
-        else:
-            # No explicit locations, so the whole site is one behavior.
+        enabled_locations = [loc for loc in sorted(host.locations,
+                                                   key=lambda x: x.sort_order)
+                             if loc.enabled]
+        for loc in enabled_locations:
+            lines.extend(self._render_location(
+                loc, cfg, host,
+                error_choice=(loc_errors or {}).get(loc.id),
+                site_error=site_error))
+            lines.append("")
+
+        # The site's own mode covers whatever the paths above do not.
+        #
+        # This used to be an else, so adding a single path to a site threw the
+        # site's own behaviour away.  A site set to redirect, with one path on
+        # it, rendered no redirect at all and nothing that answered for the
+        # root.  nginx then fell back to its own compiled in root and served
+        # the "Welcome to nginx" page.
+        #
+        # Everything about that looks fine on the way past.  The site page says
+        # redirect, the config is valid, nginx accepts it and reloads, and the
+        # only sign is a visitor getting a page nobody wrote.
+        #
+        # A prefix location of / already answers for everything, so in that
+        # case the site's mode genuinely has nothing left to cover.
+        covers_root = any(loc.path == "/" and loc.match_type == "prefix"
+                          for loc in enabled_locations)
+        if not covers_root:
             lines.extend(self._render_root_behavior(host, cfg))
 
         # ---- anything hand written ----
