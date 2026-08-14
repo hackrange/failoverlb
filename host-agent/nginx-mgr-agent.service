@@ -114,6 +114,11 @@ ReadWritePaths=/run
 #   --pid-path=/run/nginx.pid, --lock-path=/run/nginx.lock  (covered by /run)
 #
 # If you build nginx with different paths, add them here.
+# The tunnel's own config and key.  Dashed, so a box without wireguard
+# installed still starts the agent: the tunnel verbs already report that it is
+# unavailable rather than failing at start.
+ReadWritePaths=-/etc/wireguard
+
 ReadWritePaths=-/var/log/nginx
 ReadWritePaths=-/var/cache/nginx
 

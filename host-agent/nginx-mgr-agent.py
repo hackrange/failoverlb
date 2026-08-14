@@ -2124,7 +2124,14 @@ def v_acme_register_test(req):
 #     become part of somebody's network.
 
 TUNNEL_IF = "nfm0"
-TUNNEL_DIR = Path("/etc/nginx/nginxmgr/tunnel")
+# /etc/wireguard, because that is where the tools expect it.
+#
+# Not a style choice.  Ubuntu ships enforcing AppArmor profiles for wg and
+# wg-quick that only permit reading configs from this directory.  Keeping the
+# config under /etc/nginx meant wg-quick was refused with "Permission denied"
+# on a file root owned and could read perfectly well by hand, which reads like
+# a file permission problem and is not one.
+TUNNEL_DIR = Path("/etc/wireguard")
 
 
 def _wg_available():
