@@ -207,7 +207,8 @@ async def apply_to_fleet(session=None):
                            "error": "this node has no tunnel address yet"})
             continue
         try:
-            await client.call("/peer/agent", {"verb": "tunnel_apply", **payload})
+            await client.call("/peer/agent",
+                              {"verb": "tunnel_apply", "payload": payload})
             done.append(node_name)
         except Exception as exc:
             log.error("could not update the tunnel on %s: %s", node_name, exc)
@@ -250,7 +251,8 @@ async def ensure_node_keys():
 
     for node_name, client in peer_nodes:
         try:
-            answer = await client.call("/peer/agent", {"verb": "tunnel_key"})
+            answer = await client.call("/peer/agent",
+                                       {"verb": "tunnel_key", "payload": {}})
             data = answer.get("data") or answer
             results[node_name] = data.get("public_key")
         except Exception as exc:
@@ -269,7 +271,12 @@ async def ensure_node_keys():
                 session.add(row)
             row.public_key = public_key
             row.address = str(hosts[i])
-            row.endpoint = f"{endpoints.get(node_name)}:{network.listen_port}"
+            host = endpoints.get(node_name) or ""
+            # Brackets around IPv6, or the colon before the port is just
+            # another colon in the address and wg refuses the whole endpoint.
+            if ":" in host:
+                host = f"[{host}]"
+            row.endpoint = f"{host}:{network.listen_port}"
         session.commit()
 
     return {"ok": True, "nodes": sorted(results)}
