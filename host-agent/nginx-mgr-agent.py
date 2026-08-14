@@ -2094,11 +2094,11 @@ def v_acme_register_test(req):
             cmd += ["--eab-kid", str(eab_kid), "--eab-hmac-key", str(eab_hmac)]
 
         result = run(cmd, timeout=90)
-        if result.returncode == 0:
+        if result["rc"] == 0:
             return {"ok": True}
         # certbot puts the useful sentence at the end, and the rest is noise
         # nobody can act on.
-        output = ((result.stderr or "") + (result.stdout or "")).strip()
+        output = ((result["stderr"] or "") + (result["stdout"] or "")).strip()
         tail = [ln for ln in output.splitlines() if ln.strip()][-4:]
         return {"ok": False, "error": "\n".join(tail) or "registration was refused"}
     finally:
@@ -2148,15 +2148,15 @@ def v_tunnel_key(req):
 
     if not private.exists():
         made = run(["wg", "genkey"], timeout=10)
-        if made.returncode != 0:
+        if made["rc"] != 0:
             raise AgentError("could not make a tunnel key", "failed")
-        private.write_text(made.stdout.strip() + "\n")
+        private.write_text(made["stdout"].strip() + "\n")
         os.chmod(private, 0o600)
 
     public = run(["wg", "pubkey"], input_text=private.read_text(), timeout=10)
-    if public.returncode != 0:
+    if public["rc"] != 0:
         raise AgentError("could not read the tunnel key", "failed")
-    return {"public_key": public.stdout.strip()}
+    return {"public_key": public["stdout"].strip()}
 
 
 def v_tunnel_apply(req):
@@ -2217,18 +2217,18 @@ def v_tunnel_apply(req):
 
     # syncconf rather than down and up, so existing tunnels are not dropped
     # every time somebody enrols a new one.
-    if run(["ip", "link", "show", TUNNEL_IF], timeout=10).returncode == 0:
+    if run(["ip", "link", "show", TUNNEL_IF], timeout=10)["rc"] == 0:
         stripped = run(["wg-quick", "strip", str(conf)], timeout=15)
-        if stripped.returncode != 0:
+        if stripped["rc"] != 0:
             raise AgentError("could not read the tunnel config", "failed")
         applied = run(["wg", "syncconf", TUNNEL_IF, "/dev/stdin"],
-                      input_text=stripped.stdout, timeout=15)
-        if applied.returncode != 0:
-            raise AgentError(f"could not update the tunnel: {applied.stderr[:200]}", "failed")
+                      input_text=stripped["stdout"], timeout=15)
+        if applied["rc"] != 0:
+            raise AgentError(f"could not update the tunnel: {applied["stderr"][:200]}", "failed")
     else:
         up = run(["wg-quick", "up", str(conf)], timeout=30)
-        if up.returncode != 0:
-            raise AgentError(f"could not bring the tunnel up: {up.stderr[:200]}", "failed")
+        if up["rc"] != 0:
+            raise AgentError(f"could not bring the tunnel up: {up["stderr"][:200]}", "failed")
 
     return {"ok": True, "interface": TUNNEL_IF, "peers": len(peers)}
 
@@ -2238,11 +2238,11 @@ def v_tunnel_status(req):
     if not _wg_available():
         return {"installed": False, "up": False, "peers": []}
 
-    up = run(["ip", "link", "show", TUNNEL_IF], timeout=10).returncode == 0
+    up = run(["ip", "link", "show", TUNNEL_IF], timeout=10)["rc"] == 0
     peers = []
     if up:
         dump = run(["wg", "show", TUNNEL_IF, "dump"], timeout=10)
-        for line in (dump.stdout or "").splitlines()[1:]:
+        for line in (dump["stdout"] or "").splitlines()[1:]:
             parts = line.split("\t")
             if len(parts) < 5:
                 continue
@@ -2259,7 +2259,7 @@ def v_tunnel_down(req):
     if not _wg_available():
         return {"ok": True, "note": "wireguard is not installed here"}
     conf = TUNNEL_DIR / f"{TUNNEL_IF}.conf"
-    if run(["ip", "link", "show", TUNNEL_IF], timeout=10).returncode == 0:
+    if run(["ip", "link", "show", TUNNEL_IF], timeout=10)["rc"] == 0:
         run(["wg-quick", "down", str(conf)], timeout=30)
     return {"ok": True}
 
