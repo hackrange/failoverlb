@@ -64,6 +64,9 @@
          border: 1px solid var(--line); resize: vertical;
          white-space: pre-wrap; word-break: break-all; }
   .node-line { margin-top: .3rem; }
+  .ep-row { display: flex; align-items: center; gap: .5rem; margin-top: .4rem; }
+  .ep-name { min-width: 5rem; font-weight: 600; font-size: .85rem; }
+  .ep-input { flex: 1; }
 </style>
 
 <script nonce="{{ csp_nonce }}">
@@ -165,14 +168,34 @@ document.addEventListener("DOMContentLoaded", function () {
         <input type="checkbox" id="t-on" ${n.enabled ? "checked" : ""}>
         <label for="t-on">Turn the tunnel on</label>
       </div>
+      ${(n.nodes || []).length ? `
+      <div class="field mt">
+        <label>How workloads reach each load balancer</label>
+        <div class="hint">Worked out from what each box says about itself,
+          which is usually right.  Put a name here when it is not.  A workload
+          resolves it when its tunnel comes up, so a name with both an A and an
+          AAAA record lets each one use whichever of IPv4 or IPv6 it has, which
+          a single address can never do.  No port.</div>
+        ${(n.nodes || []).map(function (node) {
+          return '<div class="ep-row"><span class="ep-name">' + esc(node.node) +
+            '</span><input type="text" class="mono ep-input" data-node="' +
+            esc(node.node) + '" value="' + esc(node.endpoint_override) +
+            '" placeholder="' + esc(node.endpoint || "") + '"></div>';
+        }).join("")}
+      </div>` : ""}
       <div class="mt"><button class="btn primary" id="t-save">Save</button></div>`,
       true);
 
     el("t-save").addEventListener("click", async function () {
+      const endpoints = {};
+      document.querySelectorAll(".ep-input").forEach(function (box) {
+        endpoints[box.dataset.node] = box.value.trim();
+      });
       const body = {
         cidr: el("t-cidr").value.trim(),
         listen_port: parseInt(el("t-port").value, 10) || 51820,
-        enabled: el("t-on").checked
+        enabled: el("t-on").checked,
+        endpoints: endpoints
       };
       try { await NFM.api("/tunnel", { method: "PUT", body: body }); }
       catch (err) { NFM.toast(err.message, "bad"); return; }

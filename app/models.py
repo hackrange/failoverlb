@@ -1334,7 +1334,13 @@ class TunnelNodeKey(Base):
     node_name = Column(String(64), unique=True, nullable=False, index=True)
     public_key = Column(String(64), nullable=False)
     address = Column(String(64), nullable=False)     # this node's tunnel address
-    endpoint = Column(String(255))                   # what a workload dials
+    endpoint = Column(String(255))
+    # What an operator says workloads should dial, when the address we worked
+    # out is not the one that works.  A name belongs here more often than an
+    # address: wg resolves it when the interface comes up, so a dual stack
+    # name lets each workload pick the family it actually has, which one
+    # address never can.
+    endpoint_override = Column(String(255))                   # what a workload dials
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
 
 

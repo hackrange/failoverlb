@@ -107,6 +107,38 @@ def next_free_address(session, network):
     raise ValueError(f"there is no room left in {network.cidr}")
 
 
+def endpoint_host(node) -> str:
+    """
+    Pick the address a workload should dial to reach this node.
+
+    A peer gets exactly one endpoint, so this is a choice and not a list, and
+    it has to be the one the most machines can actually reach.
+
+    public_ip is whatever the box goes out as, and a dual stack box goes out
+    over IPv6.  That is the right answer for almost everything else we use it
+    for and the wrong one here, because a workload on an IPv4 only network has
+    no way to reach it at all.  It cost a full afternoon of a tunnel that was
+    correct at both ends and carried nothing: one load balancer was published
+    as IPv6 only, so the workload silently never had a route to it.
+
+    So: a public IPv4 first, then the joining address if that is a public IPv4,
+    then whatever is left.  IPv6 is a last resort rather than a preference.
+    """
+    candidates = [c for c in (node.public_ip, node.address) if c]
+
+    def is_public_v4(value):
+        try:
+            addr = ipaddress.ip_address(value)
+        except ValueError:
+            return False        # a name, which resolves to whatever it resolves to
+        return addr.version == 4 and addr.is_global
+
+    for c in candidates:
+        if is_public_v4(c):
+            return c
+    return candidates[0] if candidates else ""
+
+
 def new_enrol_token(peer) -> str:
     """
     A ticket that lets one machine onto the tunnel, once.
@@ -235,7 +267,7 @@ async def ensure_node_keys():
             return {"ok": False, "error": "no tunnel network is set up"}
         peer_nodes = [(p.name, PeerClient(p, cluster.ca))
                       for p in cluster.peers(session)]
-        endpoints = {n.name: (n.public_ip or n.address)
+        endpoints = {n.name: endpoint_host(n)
                      for n in session.query(Node).all()}
 
     results = {}
@@ -267,10 +299,13 @@ async def ensure_node_keys():
                 session.add(row)
             row.public_key = public_key
             row.address = str(hosts[i])
-            host = endpoints.get(node_name) or ""
+            # An operator's answer beats ours.  Ours is worked out from what
+            # the box says about itself, which is right until it is not.
+            host = (row.endpoint_override or "").strip() or \
+                endpoints.get(node_name) or ""
             # Brackets around IPv6, or the colon before the port is just
             # another colon in the address and wg refuses the whole endpoint.
-            if ":" in host:
+            if ":" in host and not host.startswith("["):
                 host = f"[{host}]"
             row.endpoint = f"{host}:{network.listen_port}"
         session.commit()

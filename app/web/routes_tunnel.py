@@ -67,7 +67,8 @@ def _network_json(network, session):
         "listen_port": network.listen_port if network else 51820,
         "enabled": bool(network.enabled) if network else False,
         "nodes": [{"node": k.node_name, "address": k.address,
-                   "endpoint": k.endpoint, "public_key": k.public_key}
+                   "endpoint": k.endpoint, "public_key": k.public_key,
+                   "endpoint_override": k.endpoint_override or ""}
                   for k in keys],
     }
 
@@ -124,6 +125,22 @@ async def set_tunnel(request: Request, g: ObjectGuard = Depends(changing)):
 
     if "enabled" in payload:
         network.enabled = bool(payload["enabled"])
+
+    # Per node, what workloads should dial.  Blank means go back to working it
+    # out ourselves rather than storing an empty string that overrides with
+    # nothing and leaves the tunnel unreachable.
+    for node_name, value in (payload.get("endpoints") or {}).items():
+        row = g.session.query(TunnelNodeKey).filter(
+            TunnelNodeKey.node_name == str(node_name)).first()
+        if row is None:
+            continue
+        host = str(value or "").strip()
+        if host and any(c in host for c in " \t/"):
+            raise HTTPException(
+                status_code=400,
+                detail=(f"{host} is not a name or an address.  Give the name or "
+                        f"address workloads should dial, with no port."))
+        row.endpoint_override = host or None
 
     g.session.commit()
 
