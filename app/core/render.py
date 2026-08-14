@@ -1269,7 +1269,19 @@ map $cookie_{cookie} $sticky_set_{var} {{
                 f"    ssl_conf_command Groups {PQ_GROUP}:{':'.join(CLASSIC_GROUPS)};"
             )
 
-        if cfg.get("ssl_stapling", True) and cert.source == "letsencrypt":
+        # Staple only when the certificate names a responder to staple from.
+        #
+        # This used to key off the certificate having come from Lets Encrypt,
+        # which was right when they ran an OCSP responder and is now exactly
+        # backwards: they have moved to published revocation lists and their
+        # certificates name no responder at all.  nginx does not treat that as
+        # an error, it just ignores the setting and says so on every reload:
+        #
+        #   "ssl_stapling" ignored, no OCSP responder URL in the certificate
+        #
+        # Reading what the certificate actually says keeps this right whoever
+        # issued it, and whatever they decide to do next.
+        if cfg.get("ssl_stapling", True) and getattr(cert, "ocsp_url", None):
             lines.append("")
             lines.append("    ssl_stapling on;")
             lines.append("    ssl_stapling_verify on;")

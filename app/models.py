@@ -1324,6 +1324,15 @@ class Certificate(Base):
     serial = Column(String(128))
     fingerprint = Column(String(128))
 
+    # The OCSP responder named in the certificate, or empty when it names
+    # none.  Read at issue time so the renderer does not have to open the file.
+    #
+    # This decides whether stapling is worth configuring.  Authorities have
+    # started dropping OCSP for published revocation lists, and Lets Encrypt
+    # has, so their certificates carry no responder and nginx warns once per
+    # reload that it is ignoring the setting.
+    ocsp_url = Column(String(255))
+
     # Which node got the cert last time, and what DNS said at that moment.
     # Keeping both means you can look back and see why it picked that box.
     issued_by_node = Column(String(64))

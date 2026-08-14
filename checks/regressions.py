@@ -166,6 +166,37 @@ else:
           "no location / was written, so anything outside the path falls "
           "through to whatever nginx serves by default")
 
+
+# Stapling is only written for a certificate that names a responder.
+#
+# It used to be written for anything from Lets Encrypt, which was right when
+# they ran a responder and is now backwards: they publish revocation lists
+# instead and their certificates name none.  nginx ignores the setting and
+# warns once per reload, which is noise that trains people to skip the log.
+with session_scope() as s:
+    have_https_cert = s.query(VirtualHost).filter(
+        VirtualHost.listen_https.is_(True),
+        VirtualHost.cert_id.isnot(None)).count()
+
+if not have_https_cert:
+    skip("stapling is only set when the certificate has a responder",
+         "no https site with a certificate on this node")
+else:
+    with session_scope() as s:
+        files, _c, _s = render_current(s)
+        certs_by_dir = {c.name: c for c in s.query(Certificate).all()}
+        wrong = []
+        for path, body in files.items():
+            if not path.startswith("sites/") or "ssl_stapling on;" not in body:
+                continue
+            for name, cert in certs_by_dir.items():
+                if f"/certs/{name}/" in body and not getattr(cert, "ocsp_url", None):
+                    wrong.append(name)
+    check("stapling is only set when the certificate has a responder",
+          not wrong,
+          f"stapling written for {sorted(set(wrong))}, which name no OCSP "
+          f"responder, so nginx ignores it and warns on every reload")
+
 print()
 print("  the renderer, against bugs that blocked every apply")
 

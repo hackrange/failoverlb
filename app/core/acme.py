@@ -593,6 +593,9 @@ class CertificateManager:
                 cert.issuer = info["issuer"][:255]
                 cert.serial = info["serial"][:128]
                 cert.fingerprint = info["fingerprint"]
+                # Empty when the authority publishes no responder, which is
+                # now the normal case rather than the exception.
+                cert.ocsp_url = (info.get("ocsp_url") or "")[:255] or None
                 if info.get("domains"):
                     cert.domains = json.dumps(info["domains"])
                 session.commit()

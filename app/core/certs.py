@@ -33,7 +33,8 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from cryptography.hazmat.primitives.serialization import pkcs12
-from cryptography.x509.oid import ExtensionOID, NameOID
+from cryptography.x509.oid import (AuthorityInformationAccessOID,
+                                   ExtensionOID, NameOID)
 
 log = logging.getLogger("nfm.certs")
 
@@ -316,6 +317,33 @@ def _now():
     return datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
 
 
+def ocsp_url(cert):
+    """
+    The OCSP responder this certificate names, if it names one.
+
+    Worth reading rather than assuming, because certificate authorities have
+    started dropping OCSP in favour of published revocation lists.  Lets
+    Encrypt did, so their certificates carry no responder at all now.
+
+    Asking nginx to staple a response for a certificate with no responder is
+    not an error, it just does nothing, and nginx says so once per reload:
+
+        "ssl_stapling" ignored, no OCSP responder URL in the certificate
+
+    So this is read at issue time and the stapling directives are only written
+    for a certificate that can actually use them.
+    """
+    try:
+        aia = cert.extensions.get_extension_for_class(
+            x509.AuthorityInformationAccess).value
+    except x509.ExtensionNotFound:
+        return None
+    for description in aia:
+        if description.access_method == AuthorityInformationAccessOID.OCSP:
+            return str(description.access_location.value)
+    return None
+
+
 def describe(cert) -> dict:
     return {
         "subject": _name_text(cert.subject),
@@ -327,6 +355,7 @@ def describe(cert) -> dict:
         "fingerprint": cert.fingerprint(hashes.SHA256()).hex(),
         "key": _key_kind(cert),
         "self_signed": cert.issuer == cert.subject,
+        "ocsp_url": ocsp_url(cert),
     }
 
 
