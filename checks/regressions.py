@@ -123,6 +123,18 @@ try:
 except Exception as exc:
     check("container reaches the agent over the socket", False, str(exc))
 
+# What this node actually holds, worked out once before anything asks.
+#
+# These used to be computed part way down, which was fine until a check was
+# added above that line and failed with a NameError instead of a result.  A
+# suite that dies half way through reports the checks it never reached as
+# nothing at all, which is worse than a failure because it looks like silence.
+with session_scope() as s:
+    have_sites = s.query(VirtualHost).count()
+    have_https = s.query(VirtualHost).filter(VirtualHost.listen_https.is_(True)).count()
+    have_443 = [p for p in s.query(Pool).all()
+                if any(m.enabled and m.port == 443 for m in p.members)]
+
 print()
 print("  certificates")
 with session_scope() as s:
@@ -247,12 +259,6 @@ def set_csp(session):
     cfg = host.setting_map()
     cfg["content_security_policy"] = "default-src 'self'; img-src 'self' data:"
     host.settings = json_set(cfg)
-
-with session_scope() as s:
-    have_sites = s.query(VirtualHost).count()
-    have_https = s.query(VirtualHost).filter(VirtualHost.listen_https.is_(True)).count()
-    have_443 = [p for p in s.query(Pool).all()
-                if any(m.enabled and m.port == 443 for m in p.members)]
 
 if not have_sites:
     skip("a content security policy renders and loads",
