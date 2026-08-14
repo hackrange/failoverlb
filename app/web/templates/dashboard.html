@@ -1,5 +1,8 @@
 {% extends "base.html" %}
-{% block title %}Dashboard &middot; NGINX Management<script nonce="{{ csp_nonce }}">
+{% block title %}Dashboard &middot; NGINX Management{% endblock %}
+
+{% block scripts %}
+<script nonce="{{ csp_nonce }}">
 // Waits for app.js, which the layout loads after this block.
 document.addEventListener("DOMContentLoaded", function () {
   function cell(v) {
