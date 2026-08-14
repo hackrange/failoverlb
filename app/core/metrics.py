@@ -427,6 +427,24 @@ class MetricsCollector:
         except Exception:
             return
 
+        # Forget nodes that are no longer in the cluster.
+        #
+        # This only ever added to the history, so a node that was removed kept
+        # its last readings for as long as the process ran and went on being
+        # drawn on the dashboard.  Somebody who has just taken a node out is
+        # then looking at a page that says it is still there, which is the one
+        # moment they need the page to be right.
+        #
+        # The readings are worth nothing once the node is gone: they are a
+        # snapshot of a machine this cluster no longer talks to and cannot
+        # refresh.
+        known = {self.node_name} | {name for _id, name in peers}
+        for gone in [name for name in self.history if name not in known]:
+            self.history.pop(gone, None)
+            self.last_error.pop(gone, None)
+            log.info("%s is no longer in the cluster, so its numbers are "
+                     "dropped from the dashboard", gone)
+
         for peer_id, peer_name in peers:
             try:
                 with session_scope() as session:
