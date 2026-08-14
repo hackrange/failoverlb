@@ -134,5 +134,3 @@ tools/manual/
 # out of it defeats the point.
 .githooks/forbidden.txt
 
-# Working notes for any assistant that helps here.  Never shipped.
-.claude/
