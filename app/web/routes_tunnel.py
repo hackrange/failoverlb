@@ -32,6 +32,28 @@ log = logging.getLogger("nfm.tunnel.web")
 
 router = APIRouter()
 
+# The interface and helper the enrolment script lays down.  These were literals
+# at the one call site that formats the script, which meant the removal command
+# shown in the GUI could quietly stop matching what was actually installed.
+IFACE = "nfm0"
+BINARY = "/usr/local/bin/nfm-tunnel"
+
+# What to run on the workload to undo the enrolment.
+#
+# Deliberately not "nfm-tunnel unenrol", even though that helper exists.  If
+# enrolment stopped half way the helper is the part that never got written, and
+# an undo command that depends on the thing you are undoing is no use exactly
+# when it is needed.  This touches only the interface, config and key this
+# fleet wrote.
+#
+# It leaves the wireguard package installed on purpose.  Removing a package the
+# machine may be using for something else is not ours to do from a copied line.
+UNENROL_COMMAND = (
+    f"sudo bash -c 'systemctl disable --now wg-quick@{IFACE} 2>/dev/null || "
+    f"wg-quick down {IFACE} 2>/dev/null; "
+    f"rm -f /etc/wireguard/{IFACE}.conf /etc/wireguard/{IFACE}.key {BINARY}'"
+)
+
 
 # ==============================================================================
 # The managed half
@@ -60,6 +82,7 @@ def _peer_json(p):
         "enrolled_at": p.enrolled_at.isoformat() if p.enrolled_at else None,
         "enabled": p.enabled,
         "waiting_for_enrolment": bool(p.enrol_token_hash and not p.public_key),
+        "unenrol_command": UNENROL_COMMAND,
     }
 
 
@@ -160,6 +183,51 @@ async def add_peer(request: Request, g: ObjectGuard = Depends(changing)):
     }
 
 
+@router.post("/api/tunnel/peers/{peer_id}/enrol")
+async def new_enrol_link(peer_id: str, request: Request,
+                         g: ObjectGuard = Depends(changing)):
+    """
+    Mint a fresh enrolment command for a workload that has not joined yet.
+
+    The old ticket cannot be shown again, because only its hash is kept, which
+    is the right way to store it and the wrong reason to strand somebody.  The
+    first version of this page showed the command once and left anybody who
+    navigated away with a workload they could not enrol and no way back.
+
+    Minting a new one replaces the old, so a link that went astray stops
+    working the moment somebody asks for another.
+    """
+    g.require("manage_cluster")
+    peer = g.get(TunnelPeer, peer_id)
+
+    if peer.is_enrolled():
+        raise HTTPException(
+            status_code=409,
+            detail=(f"{peer.name} is already on the tunnel.  Remove it first if "
+                    f"you need to enrol that machine again."))
+
+    token = tunnel.new_enrol_token(peer)
+    g.session.commit()
+
+    audit.record("tunnel.peer.relink", user=g.user, object_type="tunnel_peer",
+                 object_name=peer.name)
+
+    payload = {}
+    try:
+        payload = await request.json()
+    except Exception:
+        pass
+    base = str(payload.get("base_url") or "").rstrip("/")
+    if not base:
+        base = f"https://{get_settings().node_address}"
+
+    return {
+        **_peer_json(peer),
+        "enrol_command": f"curl -sSL {base}/tunnel/enrol/{token} | sudo bash",
+        "expires_in_minutes": tunnel.ENROL_MINUTES,
+    }
+
+
 @router.delete("/api/tunnel/peers/{peer_id}")
 async def remove_peer(peer_id: str, g: ObjectGuard = Depends(changing)):
     """
@@ -230,11 +298,6 @@ fi
 PRIVATE=$(cat $DIR/$IFACE.key)
 PUBLIC=$(echo "$PRIVATE" | wg pubkey)
 
-echo "telling the load balancers who we are"
-curl -sSf -X POST "{callback}" \\
-     -H "Content-Type: application/json" \\
-     -d "{{\\"public_key\\": \\"$PUBLIC\\"}}" >/dev/null
-
 cat > $CONF <<EOF
 # Written by the {fleet} enrolment script.  Safe to remove with:
 #   sudo {binary} unenrol
@@ -245,10 +308,76 @@ PrivateKey = $PRIVATE
 EOF
 chmod 600 $CONF
 
-systemctl enable --now wg-quick@$IFACE >/dev/null 2>&1 || {{
+# Bring it up, and prove it came up.
+#
+# This used to hide every error from systemctl and assume the interface
+# appeared.  A container whose kernel has no wireguard would print "done", and
+# the only sign anything was wrong was a backend marked down later, with
+# nothing anywhere connecting the two.  So each step now says what happened.
+
+start_tunnel() {{
+  systemctl enable --now wg-quick@$IFACE 2>/dev/null && return 0
   wg-quick down $IFACE >/dev/null 2>&1 || true
   wg-quick up $IFACE
 }}
+
+have_iface() {{ ip link show $IFACE >/dev/null 2>&1; }}
+
+echo "starting the tunnel"
+if ! start_tunnel >/dev/null 2>&1 || ! have_iface; then
+  # Almost always the kernel, and almost always a container.  wireguard is in
+  # the kernel from 5.6 on, but an unprivileged container gets whatever the
+  # host loaded, and a host that never uses wireguard never loaded it.
+  modprobe wireguard >/dev/null 2>&1 || true
+  if [ ! -d /sys/module/wireguard ]; then
+    echo "this kernel has no wireguard, trying the userspace one instead"
+    if ! command -v wireguard-go >/dev/null 2>&1; then
+      apt-get install -y -qq wireguard-go >/dev/null 2>&1 || true
+    fi
+    if command -v wireguard-go >/dev/null 2>&1 && [ -c /dev/net/tun ]; then
+      # wg-quick will use this instead of asking the kernel for the interface.
+      export WG_QUICK_USERSPACE_IMPLEMENTATION=wireguard-go
+      mkdir -p /etc/systemd/system/wg-quick@$IFACE.service.d
+      cat > /etc/systemd/system/wg-quick@$IFACE.service.d/userspace.conf <<EOF
+[Service]
+Environment=WG_QUICK_USERSPACE_IMPLEMENTATION=wireguard-go
+EOF
+      systemctl daemon-reload >/dev/null 2>&1 || true
+      start_tunnel >/dev/null 2>&1 || true
+    fi
+  fi
+fi
+
+if ! have_iface; then
+  echo >&2
+  echo "could not create the $IFACE interface on this machine." >&2
+  echo >&2
+  if [ ! -d /sys/module/wireguard ] && ! command -v wireguard-go >/dev/null 2>&1; then
+    echo "  This kernel has no wireguard and the userspace version is not" >&2
+    echo "  available here.  Install it with:  apt-get install wireguard-go" >&2
+  elif [ ! -c /dev/net/tun ]; then
+    echo "  There is no /dev/net/tun, which a container normally has to be" >&2
+    echo "  given.  For LXC, add this to the container config and restart it:" >&2
+    echo "    lxc.cgroup2.devices.allow = c 10:200 rwm" >&2
+    echo "    lxc.mount.entry = /dev/net dev/net none bind,create=dir" >&2
+  else
+    echo "  What it said:" >&2
+    start_tunnel 2>&1 | sed "s/^/    /" >&2 || true
+  fi
+  echo >&2
+  echo "Nothing was told to the load balancers, so remove the workload there" >&2
+  echo "and add it again once this is sorted." >&2
+  rm -f $CONF $DIR/$IFACE.key
+  exit 1
+fi
+
+# Only now is it worth telling them who we are.  Sending the key before the
+# interface exists is what made a machine show as enrolled in the GUI while it
+# had no way to carry a packet.
+echo "telling the load balancers who we are"
+curl -sSf -X POST "{callback}" \\
+     -H "Content-Type: application/json" \\
+     -d "{{\\"public_key\\": \\"$PUBLIC\\"}}" >/dev/null
 
 cat > {binary} <<'HELPER'
 #!/usr/bin/env bash
@@ -266,10 +395,34 @@ esac
 HELPER
 chmod 755 {binary}
 
+# The interface existing is not the same as the tunnel working, and the gap
+# between the two is a firewall that allows nothing outbound on the tunnel
+# port.  Better to find that out here than from a backend marked down.
+echo "waiting for the first handshake"
+HANDSHAKE=0
+for _ in $(seq 1 15); do
+  if wg show $IFACE latest-handshakes 2>/dev/null \\
+     | awk '{{ if ($2 != 0) found = 1 }} END {{ exit !found }}'; then
+    HANDSHAKE=1
+    break
+  fi
+  sleep 1
+done
+
 echo
-echo "done.  This machine is {address} on the tunnel."
+if [ "$HANDSHAKE" = "1" ]; then
+  echo "done.  This machine is {address} on the tunnel."
+else
+  echo "The tunnel is set up here, but nothing has answered yet."
+  echo
+  echo "  The interface is up and the load balancers have been told about it,"
+  echo "  so the usual reason is that this machine cannot reach them on the"
+  echo "  tunnel port outbound.  It is UDP, which some firewalls drop while"
+  echo "  allowing everything else."
+  echo
+  echo "  It may still come up on its own.  Check with: {binary} status"
+fi
 echo "Nothing else about this machine's networking has been changed."
-echo "Check it with: {binary} status"
 """
 
 PEER_BLOCK = """
@@ -317,8 +470,8 @@ async def enrol_script(token: str, request: Request):
         base = str(request.base_url).rstrip("/")
         return SCRIPT.format(
             fleet=get_settings().node_name,
-            iface="nfm0",
-            binary="/usr/local/bin/nfm-tunnel",
+            iface=IFACE,
+            binary=BINARY,
             address=peer.address,
             routes=allowed,
             peers=peers,

@@ -59,8 +59,10 @@
   .dot.wait { background: var(--warn, #d0900a); }
   .dot.off { background: var(--muted, #999); }
   .cmd { background: var(--code-bg, #f6f7f9); border-radius: 4px;
-         padding: .6rem .75rem; margin-top: .5rem; overflow-x: auto;
-         font-size: .82rem; }
+         padding: .6rem .75rem; margin-top: .5rem;
+         font-size: .82rem; width: 100%; box-sizing: border-box;
+         border: 1px solid var(--line); resize: vertical;
+         white-space: pre-wrap; word-break: break-all; }
   .node-line { margin-top: .3rem; }
 </style>
 
@@ -199,6 +201,10 @@ document.addEventListener("DOMContentLoaded", function () {
         '<div class="small faint">' + words + "</div>" +
         (p.description ? "<div class='small faint'>" + esc(p.description) + "</div>" : "") +
         "</div><div>" +
+        (CAN_EDIT && !p.enrolled
+          ? '<button class="btn small" data-relink="' + p.id + '">' +
+            "Show the command</button> "
+          : "") +
         (CAN_EDIT
           ? '<button class="btn small danger" data-del="' + p.id +
             '" data-name="' + esc(p.name) + '">Remove</button>'
@@ -206,6 +212,34 @@ document.addEventListener("DOMContentLoaded", function () {
         "</div></div></div>";
     }).join("");
   }
+
+  // A command with a copy button.  These are one liners meant to be run on
+  // another machine, and a command you cannot copy is one somebody retypes
+  // wrongly, so every command on this page gets one of these.
+  function cmdBlock(id) {
+    return '<textarea id="' + id + '" class="cmd mono" rows="3" readonly ' +
+      'spellcheck="false"></textarea>' +
+      '<div class="mt"><button class="btn small" data-copy="' + id +
+      '">Copy it</button></div>';
+  }
+
+  function fillCmd(id, text) {
+    const box = el(id);
+    if (box) { box.value = text; }
+  }
+
+  document.addEventListener("click", function (ev) {
+    const btn = ev.target.closest("[data-copy]");
+    if (!btn) { return; }
+    const box = el(btn.getAttribute("data-copy"));
+    if (!box) { return; }
+    box.select();
+    // execCommand, not the clipboard API, which needs a secure context the
+    // browser agrees about.  Behind a proxy on a name somebody has not set up
+    // yet, the newer one silently does nothing.
+    try { document.execCommand("copy"); NFM.toast("Copied", "ok"); }
+    catch (e) { NFM.toast("Select it and copy by hand", "bad"); }
+  });
 
   function showCommand(result) {
     // Shown once, on screen, because this is the only moment it exists.  The
@@ -215,12 +249,12 @@ document.addEventListener("DOMContentLoaded", function () {
     NFM.openModal("Run this on " + esc(result.name), "", `
       <p>On the machine you want to reach, run this.  Nothing needs to be
       opened for it inbound.</p>
-      <div class="cmd mono">${esc(result.enrol_command)}</div>
+      ${cmdBlock("enrol-cmd")}
       <div class="hint mt">
         It works once and expires in ${esc(result.expires_in_minutes)} minutes.
         Treat it like a password: anybody who has it can put a machine on your
-        tunnel.  This is the only time it is shown, so copy it now.  If it
-        expires, remove the workload and add it again.
+        tunnel.  Only its hash is kept here, so this exact command cannot be
+        shown again, but you can get a fresh one from the workload list.
       </div>
       <div class="hint">
         That machine becomes <span class="mono">${esc(result.address)}</span>.
@@ -228,6 +262,7 @@ document.addEventListener("DOMContentLoaded", function () {
       </div>
       <div class="mt"><button class="btn primary" id="cmd-done">Done</button></div>`,
       true);
+    fillCmd("enrol-cmd", result.enrol_command);
     el("cmd-done").addEventListener("click", function () {
       NFM.closeModal();
       load();
@@ -265,17 +300,73 @@ document.addEventListener("DOMContentLoaded", function () {
     });
   }
 
+  // Removing has two halves and only one of them happens here.  Taking the
+  // workload out stops the load balancers talking to it, but the machine keeps
+  // the interface, the config and the key until somebody clears them, so the
+  // command to do that is on screen and copyable rather than buried in a
+  // confirm box nobody can select text out of.
+  function confirmRemove(peer) {
+    NFM.openModal("Remove " + esc(peer.name) + " from the tunnel", "", `
+      <p>It stops being reachable through the tunnel straight away.  Anything
+      in a pool pointing at <span class="mono">${esc(peer.address)}</span> will
+      start failing, so take it out of the pool first if it is still in one.</p>
+      <p class="mt">The machine keeps its end until you clear it.  Run this
+      there:</p>
+      ${cmdBlock("unenrol-cmd")}
+      <div class="hint mt">
+        This removes the tunnel interface, its config and its key.  It leaves
+        the wireguard package alone, since that machine may be using it for
+        something else, and it changes nothing else about its networking.
+      </div>
+      <div class="mt">
+        <button class="btn danger" id="rm-go">Remove it here</button>
+        <button class="btn" id="rm-cancel">Cancel</button>
+      </div>`, true);
+
+    fillCmd("unenrol-cmd", peer.unenrol_command);
+    el("rm-cancel").addEventListener("click", function () { NFM.closeModal(); });
+
+    el("rm-go").addEventListener("click", async function () {
+      el("rm-go").disabled = true;
+      try { await NFM.api("/tunnel/peers/" + peer.id, { method: "DELETE" }); }
+      catch (err) { NFM.toast(err.message, "bad"); el("rm-go").disabled = false; return; }
+      NFM.toast("Removed", "ok");
+      // The command stays up afterwards.  Closing on success would take away
+      // the one thing they still need, at the exact moment the row it came
+      // from has just disappeared from the list behind the modal.
+      el("rm-go").outerHTML =
+        '<button class="btn primary" id="rm-done">Done</button>';
+      el("rm-cancel").remove();
+      el("rm-done").addEventListener("click", function () {
+        NFM.closeModal(); load();
+      });
+    });
+  }
+
   el("workload-list").addEventListener("click", async function (ev) {
     const del = ev.target.closest("[data-del]");
-    if (!del) { return; }
-    if (!confirm("Remove " + del.dataset.name + " from the tunnel?\n\n" +
-                 "It stops being reachable straight away.  If the machine is " +
-                 "still running, unenrol it there too with:\n" +
-                 "  sudo nfm-tunnel unenrol")) { return; }
-    try { await NFM.api("/tunnel/peers/" + del.dataset.del, { method: "DELETE" }); }
-    catch (err) { NFM.toast(err.message, "bad"); return; }
-    NFM.toast("Removed", "ok");
-    load();
+    if (del) {
+      const peer = (STATE.peers || []).find(function (p) {
+        return p.id === del.dataset.del;
+      });
+      if (peer) { confirmRemove(peer); }
+      return;
+    }
+
+    // A fresh enrolment link for a workload that never ran the command.  The
+    // old ticket is only kept as a hash, so this mints a new one and the old
+    // stops working.
+    const relink = ev.target.closest("[data-relink]");
+    if (!relink) { return; }
+    relink.disabled = true;
+    let result;
+    try {
+      result = await NFM.api("/tunnel/peers/" + relink.dataset.relink + "/enrol", {
+        method: "POST",
+        body: { base_url: window.location.origin + "{{ base }}" }
+      });
+    } catch (err) { NFM.toast(err.message, "bad"); relink.disabled = false; return; }
+    showCommand(result);
   });
 
   load();
