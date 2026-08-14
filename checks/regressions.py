@@ -197,6 +197,36 @@ else:
           f"stapling written for {sorted(set(wrong))}, which name no OCSP "
           f"responder, so nginx ignores it and warns on every reload")
 
+
+# Every node has to hold every certificate a site refers to.
+#
+# Joining brings the config but not the certificate files, so a node that
+# joined after a certificate was issued renders a config naming a file it does
+# not have, and nginx on that node alone refuses it.  The apply is rolled back
+# everywhere and stays broken until somebody presses Sync now.
+with session_scope() as s:
+    in_use = {h.cert.name for h in s.query(VirtualHost).all()
+              if h.listen_https and h.cert}
+
+if not in_use:
+    skip("this node holds every certificate its sites use",
+         "no https site with a certificate on this node")
+else:
+    present = set()
+    try:
+        listing = agent({"verb": "list_dir",
+                         "path": "/etc/nginx/nginxmgr/certs"}).get("data") or {}
+        present = {e.get("name") for e in listing.get("entries", [])}
+    except Exception as exc:
+        skip("this node holds every certificate its sites use",
+             f"could not read the certs folder: {exc}")
+    else:
+        missing = sorted(in_use - present)
+        check("this node holds every certificate its sites use", not missing,
+              f"{missing} are named by a site here and not on this box, so an "
+              f"apply will fail on this node.  Press Sync now on the Cluster "
+              f"page.")
+
 print()
 print("  the renderer, against bugs that blocked every apply")
 

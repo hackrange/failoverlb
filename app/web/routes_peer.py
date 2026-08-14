@@ -10,6 +10,7 @@ certificate proves the caller is a cluster member.  The signature proves which
 member, and that this exact body is what they sent.
 """
 
+import asyncio
 import json
 import logging
 
@@ -693,6 +694,20 @@ async def join(request: Request):
 
     log.warning("%s joined the cluster from %s", node_name, address)
 
+    # Send the site certificates after it has settled.
+    #
+    # Joining brings the config across, so the new node knows a site uses a
+    # certificate called something.  It does not bring the certificate itself,
+    # which lives as files rather than as rows, so the next apply renders a
+    # config naming a file that is not there and nginx refuses it on that node
+    # alone.  The apply is correctly rolled back everywhere and stays broken
+    # until somebody presses Sync now, which only helps if they know to.
+    #
+    # Not sent inline, because the node restarts the moment this response is
+    # read, to bring up its peer listener.  Anything pushed now arrives at a
+    # container that is on its way down.
+    asyncio.create_task(_send_certificates_after_join(node_name))
+
     return {
         "ok": True,
         "certificate": signed,
@@ -703,6 +718,59 @@ async def join(request: Request):
             "peers": peers,
         },
     }
+
+
+
+async def _send_certificates_after_join(node_name: str, tries: int = 10,
+                                        gap: int = 15):
+    """
+    Copy every usable certificate to a node that has just joined.
+
+    Retried rather than attempted once, because the node is restarting when
+    this starts and there is no moment we can name in advance when it will be
+    listening again.  Ten tries fifteen seconds apart covers a slow container
+    start without holding anything open.
+
+    A failure here does not undo the join.  The node is a member either way,
+    and a member missing a certificate is a thing to say loudly rather than a
+    reason to throw away a join that worked.
+    """
+    from app.core.acme import AcmeError, get_cert_manager
+    from app.models import Certificate
+
+    await asyncio.sleep(gap)
+
+    with session_scope() as session:
+        cert_ids = [c.id for c in session.query(Certificate).all() if c.usable]
+    if not cert_ids:
+        return
+
+    manager = get_cert_manager()
+    for attempt in range(1, tries + 1):
+        missing = []
+        for cid in cert_ids:
+            try:
+                result = await manager.replicate(cid)
+            except AcmeError as exc:
+                log.warning("could not copy a certificate to %s: %s",
+                            node_name, exc)
+                missing.append(cid)
+                continue
+            if node_name not in (result.get("ok") or []):
+                missing.append(cid)
+
+        if not missing:
+            log.info("%s has every certificate, so its first apply will not "
+                     "fail on a missing file", node_name)
+            return
+
+        cert_ids = missing
+        if attempt < tries:
+            await asyncio.sleep(gap)
+
+    log.error("%s is in the cluster but is missing %s certificate(s).  Its "
+              "next apply will fail until they are copied.  Press Sync now on "
+              "the Cluster page.", node_name, len(cert_ids))
 
 
 @router.post("/peer/roster")
