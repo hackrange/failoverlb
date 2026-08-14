@@ -1372,6 +1372,23 @@ class TunnelPeer(Base):
     def is_enrolled(self):
         return bool(self.public_key and self.enrolled_at)
 
+    @property
+    def enrol_is_valid(self):
+        """
+        Whether the enrolment ticket is still good.
+
+        The tzinfo dance is not decoration.  utcnow() is timezone aware and
+        sqlite hands the column back naive, so comparing them raises rather
+        than returning False, and the caller sees a 500 instead of an expired
+        link.  The join token has the same property for the same reason.
+        """
+        if not self.enrol_token_hash:
+            return False
+        exp = self.enrol_expires_at
+        if exp and exp.tzinfo is None:
+            exp = exp.replace(tzinfo=timezone.utc)
+        return exp is None or exp > utcnow()
+
 
 class CertificateAuthority(Base):
     """

@@ -126,15 +126,11 @@ def new_enrol_token(peer) -> str:
 
 def peer_for_token(session, token: str):
     """The peer this ticket belongs to, if it is still good."""
-    from app.models import utcnow
-
     if not token:
         return None
     peer = session.query(TunnelPeer).filter(
         TunnelPeer.enrol_token_hash == hash_token(token)).first()
-    if not peer:
-        return None
-    if peer.enrol_expires_at and peer.enrol_expires_at < utcnow():
+    if not peer or not peer.enrol_is_valid:
         return None
     return peer
 
