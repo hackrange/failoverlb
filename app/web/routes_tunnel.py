@@ -478,10 +478,26 @@ async def enrol_script(token: str, request: Request):
             raise HTTPException(status_code=503,
                                 detail="the load balancers have no tunnel keys yet")
 
-        allowed = ", ".join(f"{k.address}/32" for k in keys)
+        # Every load balancer the workload will route down the tunnel.  Used
+        # for the comment at the top of the script, which is a list, and never
+        # as one peer's AllowedIPs, which is not.
+        routes = ", ".join(f"{k.address}/32" for k in keys)
+
+        # Each peer is allowed its own address and nothing else.
+        #
+        # AllowedIPs reads like a filter and is also a routing table: an
+        # address belongs to exactly one peer, and when two peers claim the
+        # same one the last one written wins.  Giving every peer the whole
+        # list therefore pointed all of them at whichever load balancer came
+        # last alphabetically.  Traffic to the other one was encrypted for the
+        # wrong node and dropped where it arrived.
+        #
+        # It fails in a way that looks like a network problem on one node
+        # only: the last load balancer works perfectly, the rest handshake,
+        # count bytes out and receive almost nothing back.
         peers = "".join(
             PEER_BLOCK.format(node=k.node_name, public_key=k.public_key,
-                              endpoint=k.endpoint, allowed=allowed)
+                              endpoint=k.endpoint, allowed=f"{k.address}/32")
             for k in keys)
 
         base = str(request.base_url).rstrip("/")
@@ -490,7 +506,7 @@ async def enrol_script(token: str, request: Request):
             iface=IFACE,
             binary=BINARY,
             address=peer.address,
-            routes=allowed,
+            routes=routes,
             peers=peers,
             callback=f"{base}/tunnel/enrol/{token}",
         )
