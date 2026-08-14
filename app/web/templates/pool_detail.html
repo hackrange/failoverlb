@@ -947,6 +947,50 @@ Same result, put together from parts that are in the free build.</p>
 
 {% block scripts %}
 <script nonce="{{ csp_nonce }}">
+// nginx will not accept a backup server in a pool that balances by hashing,
+// and its own complaint arrives only after an apply has been refused.  The
+// boxes are turned off here instead, with the reason next to them, so the
+// restriction is visible before anybody spends a change on finding out.
+document.addEventListener("DOMContentLoaded", function () {
+  var NO_BACKUP = {
+    ip_hash: "pinning by client address",
+    hash:    "hashing a value you choose",
+    random:  "picking at random"
+  };
+  var sel = document.getElementById("p-lb");
+  if (!sel) { return; }
+
+  function sync() {
+    var why = NO_BACKUP[sel.value];
+    var boxes = document.querySelectorAll(
+      '[data-field="backup"], #nm-backup');
+    boxes.forEach(function (box) {
+      box.disabled = !!why;
+      if (why) { box.checked = false; }
+      box.title = why
+        ? "Not available while this pool balances by " + why +
+          ".  nginx has no way to express a backup with that method."
+        : "";
+      var note = box.parentElement.querySelector(".backup-note");
+      if (why && !note) {
+        note = document.createElement("div");
+        note.className = "hint backup-note";
+        note.textContent = "Backup needs round robin or least connections.";
+        box.parentElement.appendChild(note);
+      } else if (!why && note) {
+        note.remove();
+      }
+    });
+  }
+  sel.addEventListener("change", sync);
+  sync();
+  // The member rows are drawn from the api after load, so run it again once
+  // they exist rather than only against the markup that shipped with the page.
+  new MutationObserver(sync).observe(document.body, {childList: true, subtree: true});
+});
+</script>
+
+<script nonce="{{ csp_nonce }}">
 document.addEventListener("DOMContentLoaded", function () {
   const POOL_ID = {{ pool.id }};
   const BASE = document.querySelector('meta[name=nfm-base]').content;

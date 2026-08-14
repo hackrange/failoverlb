@@ -1693,7 +1693,40 @@ async def delete_member(member_id: str, g: ObjectGuard = Depends(changing)):
     return {"ok": True, "deleted": label}
 
 
+# nginx refuses "backup" on a server in a pool that balances by hashing.  Its
+# own message is "balancing method does not support parameter backup", which
+# is true and tells somebody looking at a screen nothing about what to do.
+#
+# Caught here so it is said in words, before the change is saved, rather than
+# surfacing out of a failed apply.
+NO_BACKUP_METHODS = {
+    "ip_hash": "sending each visitor to the same backend by their address",
+    "hash": "sending each request to a backend chosen by a value you set",
+    "random": "picking a backend at random",
+}
+
+
+def _check_backup_allowed(member, payload):
+    if not payload.get("backup"):
+        return
+    pool = getattr(member, "pool", None)
+    method = getattr(pool, "lb_method", "") or ""
+    why = NO_BACKUP_METHODS.get(method)
+    if not why:
+        return
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            f"This pool balances by {why}, and nginx does not allow a backup "
+            f"server with that method.  A backup is only used when every other "
+            f"server is down, and a method that always sends the same visitor "
+            f"to the same backend has no way to express that.\n\n"
+            f"Either switch the pool to round robin or least connections, or "
+            f"leave this server as a normal member."))
+
+
 def _apply_member_fields(member, payload):
+    _check_backup_allowed(member, payload)
     for field, low, high in (("weight", 1, 1000), ("max_fails", 0, 100),
                              ("max_conns", 0, 100000)):
         if field in payload:
