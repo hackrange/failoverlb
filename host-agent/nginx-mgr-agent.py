@@ -2222,20 +2222,41 @@ def v_tunnel_apply(req):
     conf.write_text("\n".join(lines))
     os.chmod(conf, 0o600)
 
-    # syncconf rather than down and up, so existing tunnels are not dropped
-    # every time somebody enrols a new one.
-    if run(["ip", "link", "show", TUNNEL_IF], timeout=10)["rc"] == 0:
-        stripped = run(["wg-quick", "strip", str(conf)], timeout=15)
-        if stripped["rc"] != 0:
-            raise AgentError("could not read the tunnel config", "failed")
-        applied = run(["wg", "syncconf", TUNNEL_IF, "/dev/stdin"],
-                      input_text=stripped["stdout"], timeout=15)
-        if applied["rc"] != 0:
-            raise AgentError(f"could not update the tunnel: {applied["stderr"][:200]}", "failed")
+    # Hand the interface to systemd rather than bringing it up from here.
+    #
+    # wireguard-tools ships wg-quick@.service, so the OS already knows how to
+    # own this.  Driving wg-quick as a child of the agent does not work and
+    # cannot be made to: the agent runs with NoNewPrivileges, and under that
+    # flag the kernel refuses AppArmor profile transitions, so a confined
+    # wg-quick cannot exec ip or wg at all.  It fails with "Operation not
+    # permitted" on running a binary, which reads like a missing capability and
+    # is not one.
+    #
+    # Asking systemd to start the unit sidesteps all of it.  The unit runs in
+    # its own context, unconfined by this service's sandbox, which is the same
+    # reason the nginx build runs from its own unit rather than from here.
+    #
+    # reload rather than restart when it is already up: wg-quick's reload does
+    # a syncconf, so adding one workload does not drop every tunnel that was
+    # already working.
+    unit = f"wg-quick@{TUNNEL_IF}.service"
+    active = run(["systemctl", "is-active", "--quiet", unit], timeout=15)["rc"] == 0
+
+    if active:
+        result = run(["systemctl", "reload", unit], timeout=30)
+        action = "reloaded"
     else:
-        up = run(["wg-quick", "up", str(conf)], timeout=30)
-        if up["rc"] != 0:
-            raise AgentError(f"could not bring the tunnel up: {up["stderr"][:200]}", "failed")
+        run(["systemctl", "enable", unit], timeout=30)
+        result = run(["systemctl", "restart", unit], timeout=45)
+        action = "started"
+
+    if result["rc"] != 0:
+        detail = (result["stderr"] or result["stdout"] or "").strip()[:300]
+        status = run(["systemctl", "status", unit, "--no-pager", "-n", "10"],
+                     timeout=15)
+        raise AgentError(
+            f"systemd could not bring the tunnel up: {detail or 'no detail'} "
+            f"{(status['stdout'] or '').strip()[-300:]}", "failed")
 
     return {"ok": True, "interface": TUNNEL_IF, "peers": len(peers)}
 
@@ -2265,9 +2286,8 @@ def v_tunnel_down(req):
     """Take the interface down, for turning the whole thing off."""
     if not _wg_available():
         return {"ok": True, "note": "wireguard is not installed here"}
-    conf = TUNNEL_DIR / f"{TUNNEL_IF}.conf"
-    if run(["ip", "link", "show", TUNNEL_IF], timeout=10)["rc"] == 0:
-        run(["wg-quick", "down", str(conf)], timeout=30)
+    unit = f"wg-quick@{TUNNEL_IF}.service"
+    run(["systemctl", "disable", "--now", unit], timeout=45)
     return {"ok": True}
 
 
