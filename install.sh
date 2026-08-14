@@ -282,6 +282,27 @@ fi
 # It is not marked optional in the unit, because an agent that starts happily
 # and then cannot write any config is worse than one that refuses to start.
 # Making the folder here is what keeps both of those true.
+# WireGuard, for the tunnel.
+#
+# Installed here rather than when somebody first turns the tunnel on, because
+# the agent cannot do it: it runs under a read only filesystem with holes for
+# the few folders it writes, and a package manager needs far more than that.
+# Loosening the agent's sandbox so it could install software would be a much
+# worse trade than a small package nobody has to use.
+#
+# wireguard-tools is a few hundred kilobytes and the kernel side has been in
+# the mainline kernel for years, so this costs nothing on a box that never
+# enables the tunnel.
+if ! command -v wg >/dev/null 2>&1; then
+    if command -v apt-get >/dev/null 2>&1; then
+        log "installing wireguard-tools, for the tunnel"
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq wireguard-tools >/dev/null 2>&1 \
+            || warn "could not install wireguard-tools, so the tunnel will be unavailable"
+    else
+        warn "wireguard-tools is not here and this is not apt based, so the tunnel will be unavailable"
+    fi
+fi
+
 mkdir -p /var/backups/nginx-fleet-manager /var/lib/nginx-fleet-manager \
          /usr/local/lib/nginx-fleet-manager /var/www/certbot \
          /etc/letsencrypt /var/log/letsencrypt /var/lib/letsencrypt \
