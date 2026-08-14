@@ -346,10 +346,19 @@ document.addEventListener("DOMContentLoaded", function () {
   el("workload-list").addEventListener("click", async function (ev) {
     const del = ev.target.closest("[data-del]");
     if (del) {
+      // String on both sides.  A dataset attribute is always a string and
+      // these ids are numbers, so a strict compare never matched and the
+      // button did nothing at all, without even an error to go on.
       const peer = (STATE.peers || []).find(function (p) {
-        return p.id === del.dataset.del;
+        return String(p.id) === String(del.dataset.del);
       });
-      if (peer) { confirmRemove(peer); }
+      if (peer) {
+        confirmRemove(peer);
+      } else {
+        // Whatever is on screen no longer matches what the server has.
+        NFM.toast("That workload is no longer here, reloading the list", "bad");
+        load();
+      }
       return;
     }
 

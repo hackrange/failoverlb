@@ -98,6 +98,28 @@ for p in files:
 check("no page touches NFM before the helpers are loaded",
       not impatient, "; ".join(impatient))
 
+# 5. An id compared against something read off the DOM has to be compared as
+#    a string.  Every dataset value and every getAttribute result is a string,
+#    and most of these ids are integers from the database, so a strict compare
+#    is false every time.  Nothing throws.  The button simply does nothing,
+#    which is the hardest kind of broken to find, because there is no error
+#    anywhere and the page looks fine.
+#
+#    This cost an afternoon on the tunnel page, where Remove silently did
+#    nothing, and site_detail.html already had the String() wrapper because
+#    somebody had hit it there first.
+LOOSE_ID = re.compile(
+    r"(?<!String\()\b[a-zA-Z_$][\w$]*\.id\s*===\s*"
+    r"(?!String\()[a-zA-Z_$][\w$]*\.(?:dataset\.\w+|getAttribute\()")
+
+loose = []
+for p in files:
+    for n, line in enumerate(p.read_text().split("\n"), 1):
+        if LOOSE_ID.search(line):
+            loose.append(f"{p.name}:{n} {line.strip()[:60]}")
+check("ids compared against the DOM are compared as strings",
+      not loose, "; ".join(loose))
+
 print()
 print(f"  {len(problems)} problem(s)")
 sys.exit(1 if problems else 0)
