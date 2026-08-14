@@ -78,6 +78,57 @@
       </div>
     </div>
 
+      <h3>Buying from a named authority</h3>
+      <p class="hint">
+        Leave these empty to use Lets Encrypt.  Fill them in only if your
+        certificates come from an authority you pay, such as DigiCert,
+        GlobalSign, SSL.com or Google Trust Services.  They all speak the same
+        protocol, so nothing else here changes.
+      </p>
+
+      <div class="field">
+        <label for="acme_directory_url">Authority address</label>
+        <input type="text" id="acme_directory_url" name="acme_directory_url"
+               value="{{ values.acme_directory_url.value or '' }}"
+               placeholder="https://acme.example-ca.com/v2/DV">
+        <div class="hint">
+          The ACME directory address your authority gives you.  Empty means
+          Lets Encrypt.
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="acme_eab_kid">Account key id</label>
+        <input type="text" id="acme_eab_kid" name="acme_eab_kid"
+               value="{{ values.acme_eab_kid.value or '' }}">
+        <div class="hint">
+          Given to you with the key below when you buy.  A paid authority will
+          not let this software register an account without them, because the
+          account has to be tied to what was paid for.
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="acme_eab_hmac_key">Account key</label>
+        <input type="password" id="acme_eab_hmac_key" name="acme_eab_hmac_key"
+               autocomplete="new-password">
+        <div class="hint">
+          Stored encrypted and never shown again.  Leave blank to keep the one
+          already saved.
+        </div>
+      </div>
+
+      <div class="notice info">
+        <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 3a.9.9 0 1 1 0 1.8A.9.9 0 0 1 8 4zm1.2 8H6.8v-.9h.7V7.9h-.7V7h2.1v4.1h.3V12z"/></svg>
+        <div>
+          <strong>Certificates that name your company.</strong>  OV and EV
+          certificates only issue straight away once your authority has checked
+          your organisation.  Ask them to do that before you rely on renewal
+          here: the check is done by a person at their end, and no amount of
+          retrying will finish it.
+        </div>
+      </div>
+
   </div>
 </div>
 

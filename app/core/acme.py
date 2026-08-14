@@ -377,6 +377,10 @@ class CertificateManager:
         # ---- run it ----------------------------------------------------------
         directory = (settings_store.get("acme_directory_url") or "").strip()
         ca_bundle = settings_store.get("acme_ca_bundle")
+        # A paid authority does not let you register an account out of thin
+        # air.  These tie the registration to the entitlement that was bought.
+        eab_kid = (settings_store.get("acme_eab_kid") or "").strip()
+        eab_hmac = (settings_store.get("acme_eab_hmac_key") or "").strip()
 
         request = {
             "domains": domains,
@@ -387,6 +391,8 @@ class CertificateManager:
             "staging": staging,
             "acme_server": directory or None,
             "ca_bundle": ca_bundle or None,
+            "eab_kid": eab_kid or None,
+            "eab_hmac_key": eab_hmac or None,
             "challenge": challenge_type,
             "key_type": key_type,
             "force_renewal": force,

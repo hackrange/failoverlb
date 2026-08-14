@@ -263,6 +263,31 @@ def check_read_path(path_str):
 # Running things
 # ==============================================================================
 
+# Flags whose value must never reach a log.  The command line is only logged at
+# debug level, which nobody runs by default, and "nobody runs it by default" is
+# exactly the assumption that fails: somebody turns debug on to work out why a
+# certificate will not issue, and the credential for the account lands in the
+# journal where it stays.
+SECRET_FLAGS = {
+    "--eab-hmac-key",
+    "--eab-kid",
+}
+
+
+def _safe_for_log(cmd):
+    """The command with any credential replaced, for logging only."""
+    out, hide_next = [], False
+    for part in cmd:
+        if hide_next:
+            out.append("[hidden]")
+            hide_next = False
+            continue
+        out.append(part)
+        if part in SECRET_FLAGS:
+            hide_next = True
+    return out
+
+
 def run(cmd, timeout=DEFAULT_TIMEOUT, input_text=None, env_extra=None):
     """
     Run a command and hand back what happened.
@@ -271,7 +296,7 @@ def run(cmd, timeout=DEFAULT_TIMEOUT, input_text=None, env_extra=None):
     ever becomes part of a shell line, so there is no quoting bug waiting to
     turn into command injection.
     """
-    log.debug("running: %s", " ".join(cmd))
+    log.debug("running: %s", " ".join(_safe_for_log(cmd)))
 
     env = None
     if env_extra:
@@ -1098,8 +1123,15 @@ def v_certbot(req):
         "--agree-tos",
         "--cert-name", cert_name,
         "--key-type", key_type,
-        "--preferred-chain", "ISRG Root X1",
     ]
+
+    # Ask for the ISRG root only from the authority that has one.
+    #
+    # This used to be unconditional, which is fine while Lets Encrypt is the
+    # only authority in play and wrong the moment it is not: every other
+    # authority chains to its own root and has never heard of this one.
+    if not acme_server:
+        cmd += ["--preferred-chain", "ISRG Root X1"]
 
     if email:
         cmd += ["-m", email]
@@ -1116,6 +1148,26 @@ def v_certbot(req):
         # A custom directory and --staging together makes no sense, since
         # staging is just Lets Encrypt's own other directory.
         staging = False
+
+    # External account binding.  A paid authority hands these out with the
+    # entitlement rather than letting anybody register, so without them
+    # registration is refused and the error talks about the account rather
+    # than about the credentials being missing.
+    eab_kid = req.get("eab_kid")
+    eab_hmac = req.get("eab_hmac_key")
+    if eab_kid or eab_hmac:
+        if not (eab_kid and eab_hmac):
+            raise AgentError(
+                "external account binding needs both the key id and the hmac "
+                "key.  One without the other is refused at registration.",
+                "bad_request")
+        if not re.fullmatch(r"[A-Za-z0-9._~+/=-]{1,512}", str(eab_kid)):
+            raise AgentError("that external account key id is not valid",
+                             "bad_request")
+        if not re.fullmatch(r"[A-Za-z0-9._~+/=-]{1,1024}", str(eab_hmac)):
+            raise AgentError("that external account hmac key is not valid",
+                             "bad_request")
+        cmd += ["--eab-kid", str(eab_kid), "--eab-hmac-key", str(eab_hmac)]
 
     if staging:
         cmd.append("--staging")

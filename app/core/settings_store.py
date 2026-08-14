@@ -64,6 +64,21 @@ EDITABLE = {
         "env": None,
         "label": "ACME directory URL",
     },
+    # What a paid authority hands you instead of open registration.  Lets
+    # Encrypt lets anybody register an account; a commercial authority ties the
+    # account to something you bought, and these two values are how the client
+    # proves that at registration time.  Certbot calls them --eab-kid and
+    # --eab-hmac-key.
+    "acme_eab_kid": {
+        "type": "string",
+        "env": None,
+        "label": "ACME external account key id",
+    },
+    "acme_eab_hmac_key": {
+        "type": "secret",
+        "env": None,
+        "label": "ACME external account HMAC key",
+    },
     "acme_ca_bundle": {
         "type": "string",
         "env": None,
