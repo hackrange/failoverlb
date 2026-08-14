@@ -375,12 +375,32 @@ class CertificateManager:
         )
 
         # ---- run it ----------------------------------------------------------
-        directory = (settings_store.get("acme_directory_url") or "").strip()
         ca_bundle = settings_store.get("acme_ca_bundle")
-        # A paid authority does not let you register an account out of thin
-        # air.  These tie the registration to the entitlement that was bought.
-        eab_kid = (settings_store.get("acme_eab_kid") or "").strip()
-        eab_hmac = (settings_store.get("acme_eab_hmac_key") or "").strip()
+
+        # Which authority, read off the certificate rather than off a setting.
+        #
+        # This is what makes a renewal go back to whoever issued it.  A
+        # certificate bought from one authority that quietly renews from
+        # another is a change nobody asked for, and the first sign of it is a
+        # browser complaining about an issuer somebody did not choose.
+        authority = cert.authority
+        if authority is not None:
+            directory = (authority.directory_url or "").strip()
+            eab_kid = (authority.eab_kid or "").strip()
+            eab_hmac = decrypt(authority.eab_hmac_key_encrypted) or "" \
+                if authority.eab_hmac_key_encrypted else ""
+            preferred_chain = (authority.preferred_chain or "").strip()
+            if not authority.enabled:
+                raise AcmeError(
+                    f"the authority {authority.name} is turned off, so this "
+                    f"certificate cannot be renewed from it.  Turn it back on, "
+                    f"or point the certificate at another one.")
+        else:
+            # Lets Encrypt, which needs no credentials and is the default.
+            directory = (settings_store.get("acme_directory_url") or "").strip()
+            eab_kid = ""
+            eab_hmac = ""
+            preferred_chain = ""
 
         request = {
             "domains": domains,
@@ -393,6 +413,7 @@ class CertificateManager:
             "ca_bundle": ca_bundle or None,
             "eab_kid": eab_kid or None,
             "eab_hmac_key": eab_hmac or None,
+            "preferred_chain": preferred_chain or None,
             "challenge": challenge_type,
             "key_type": key_type,
             "force_renewal": force,
@@ -1111,3 +1132,49 @@ async def _reload_for_new_cert(name: str):
             "copied %s but could not reload nginx, so it is still serving the old "
             "certificate on this node: %s", name, exc,
         )
+
+
+async def test_authority_credentials(authority) -> dict:
+    """
+    Prove an authority's credentials work, without issuing anything.
+
+    Registers an account against the directory with the external account
+    binding it was given, and throws the account away.  No certificate is asked
+    for, so nothing is spent and no rate limit is touched that matters.
+
+    This exists because these credentials fail in a particular way.  A key id
+    with a character missing is accepted by every box on the screen and refused
+    by the authority at registration, and registration happens at issue time.
+    For a renewal that is months later, unattended, at whatever hour the timer
+    runs.  Somebody finds out when a browser complains.
+    """
+    from app.core.agent_client import get_agent
+    from app.core.crypto import decrypt
+
+    if not authority.directory_url:
+        return {"ok": False, "error": "this authority has no directory address"}
+
+    hmac_key = ""
+    if authority.eab_hmac_key_encrypted:
+        hmac_key = decrypt(authority.eab_hmac_key_encrypted) or ""
+
+    if bool(authority.eab_kid) != bool(hmac_key):
+        return {"ok": False,
+                "error": ("external account binding needs both the key id and "
+                          "the key.  One without the other is refused at "
+                          "registration.")}
+
+    try:
+        result = await get_agent().call(
+            "acme_register_test", timeout=120,
+            acme_server=authority.directory_url,
+            eab_kid=authority.eab_kid or None,
+            eab_hmac_key=hmac_key or None,
+        )
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)[:2000]}
+
+    data = result.get("data") if isinstance(result, dict) else None
+    if isinstance(data, dict):
+        return {"ok": bool(data.get("ok")), "error": data.get("error")}
+    return {"ok": bool(result.get("ok")), "error": result.get("error")}

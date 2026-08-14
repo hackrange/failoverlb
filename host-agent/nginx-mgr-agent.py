@@ -1125,12 +1125,18 @@ def v_certbot(req):
         "--key-type", key_type,
     ]
 
-    # Ask for the ISRG root only from the authority that has one.
+    # Which chain to ask for.
     #
-    # This used to be unconditional, which is fine while Lets Encrypt is the
-    # only authority in play and wrong the moment it is not: every other
-    # authority chains to its own root and has never heard of this one.
-    if not acme_server:
+    # The ISRG root is Lets Encrypt's own, so it is only asked for when no
+    # other directory is in play.  Any authority that needs a particular chain
+    # names it on its own profile, because that is a fact about the authority
+    # rather than about this installation.
+    chain = req.get("preferred_chain")
+    if chain:
+        if not re.fullmatch(r"[A-Za-z0-9 ._()-]{1,128}", str(chain)):
+            raise AgentError("that preferred chain name is not valid", "bad_request")
+        cmd += ["--preferred-chain", str(chain)]
+    elif not acme_server:
         cmd += ["--preferred-chain", "ISRG Root X1"]
 
     if email:
@@ -2039,6 +2045,66 @@ def v_nginx_revert(req):
     }
 
 
+
+
+def v_acme_register_test(req):
+    """
+    Register an account against an ACME directory, and keep nothing.
+
+    Asks for no certificate, so nothing is issued and nothing is spent.  All
+    this proves is that the directory answers and that the external account
+    credentials are accepted, which is the half that fails quietly months later
+    if it is wrong.
+
+    Uses its own config directory so a failed attempt cannot disturb the
+    accounts certbot is already using for real certificates.
+    """
+    import shutil
+    import tempfile
+
+    acme_server = req.get("acme_server")
+    if not acme_server or not re.fullmatch(
+            r"https://[A-Za-z0-9._:-]{1,253}(/[A-Za-z0-9._~/-]*)?", str(acme_server)):
+        raise AgentError("that acme server url is not valid", "bad_request")
+
+    eab_kid = req.get("eab_kid")
+    eab_hmac = req.get("eab_hmac_key")
+    if bool(eab_kid) != bool(eab_hmac):
+        raise AgentError("external account binding needs both halves", "bad_request")
+
+    workdir = tempfile.mkdtemp(prefix="nfm-acme-test-")
+    try:
+        cmd = [
+            "certbot", "register",
+            "--non-interactive",
+            "--agree-tos",
+            "--register-unsafely-without-email",
+            "--server", str(acme_server),
+            "--config-dir", workdir,
+            "--work-dir", workdir,
+            "--logs-dir", workdir,
+        ]
+        if eab_kid:
+            if not re.fullmatch(r"[A-Za-z0-9._~+/=-]{1,512}", str(eab_kid)):
+                raise AgentError("that external account key id is not valid",
+                                 "bad_request")
+            if not re.fullmatch(r"[A-Za-z0-9._~+/=-]{1,1024}", str(eab_hmac)):
+                raise AgentError("that external account hmac key is not valid",
+                                 "bad_request")
+            cmd += ["--eab-kid", str(eab_kid), "--eab-hmac-key", str(eab_hmac)]
+
+        result = run(cmd, timeout=90)
+        if result.returncode == 0:
+            return {"ok": True}
+        # certbot puts the useful sentence at the end, and the rest is noise
+        # nobody can act on.
+        output = ((result.stderr or "") + (result.stdout or "")).strip()
+        tail = [ln for ln in output.splitlines() if ln.strip()][-4:]
+        return {"ok": False, "error": "\n".join(tail) or "registration was refused"}
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
 VERBS = {
     "ping": v_ping,
     "nginx_upgrade": v_nginx_upgrade,
@@ -2056,6 +2122,7 @@ VERBS = {
     "acme_token_write": v_acme_token_write,
     "acme_token_delete": v_acme_token_delete,
     "certbot": v_certbot,
+    "acme_register_test": v_acme_register_test,
     "cert_list": v_cert_list,
     "cert_export": v_cert_export,
     "cert_import": v_cert_import,

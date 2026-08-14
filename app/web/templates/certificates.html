@@ -14,6 +14,10 @@
   <div class="page-actions">
     {% if can('edit_certs') %}
       <button class="btn" id="new-cert">Get one from Lets Encrypt</button>
+      {# Only rendered when an authority is set up, because a button that
+         always exists and always says "set one up first" is a button that
+         teaches people to ignore buttons. #}
+      <button class="btn" id="paid-cert" hidden>Get one from a paid authority</button>
       <button class="btn" id="upload-cert">Upload one</button>
       <button class="btn" id="self-signed-cert">Make a self signed one</button>
       <button class="btn" id="csr-cert">Make a signing request</button>
@@ -257,6 +261,110 @@ today.</p>
 {% endblock %}
 
 {% block scripts %}
+<script nonce="{{ csp_nonce }}">
+// The paid authority button, and the little wizard behind it.
+//
+// Kept beside the Lets Encrypt button rather than replacing it.  Most people
+// want both: something free for the internal names and a bought one for the
+// name that matters.
+document.addEventListener("DOMContentLoaded", function () {
+  const button = document.getElementById("paid-cert");
+  if (!button) { return; }
+
+  let AUTHORITIES = [];
+
+  function esc(s) { return NFM.escapeHtml(s == null ? "" : String(s)); }
+
+  async function findAuthorities() {
+    try {
+      const data = await NFM.api("/authorities");
+      AUTHORITIES = (data.authorities || []).filter(function (a) {
+        return a.enabled && a.eab_hmac_key_set;
+      });
+    } catch (err) {
+      AUTHORITIES = [];
+    }
+    button.hidden = AUTHORITIES.length === 0;
+  }
+
+  function form() {
+    const options = AUTHORITIES.map(function (a) {
+      return '<option value="' + esc(a.id) + '">' + esc(a.name) + "</option>";
+    }).join("");
+    return `
+      <div class="field">
+        <label for="pc-authority">Which authority</label>
+        <select id="pc-authority">${options}</select>
+        <div class="hint">Only the ones you have set up and turned on appear
+          here.  Manage them on the Paid Authorities page.</div>
+      </div>
+
+      <div class="field">
+        <label for="pc-name">Name</label>
+        <input type="text" id="pc-name" placeholder="shop.domain.com">
+        <div class="hint">What you will recognise this certificate by.</div>
+      </div>
+
+      <div class="field">
+        <label for="pc-domains">Domains</label>
+        <textarea id="pc-domains" rows="3"
+                  placeholder="shop.domain.com&#10;www.shop.domain.com"></textarea>
+        <div class="hint">One per line.  Every one of them has to already point
+          at these load balancers, and port 80 has to be reachable, the same as
+          for a free certificate.</div>
+      </div>
+
+      <div class="notice info">
+        <div>
+          <strong>Certificates that name your company.</strong>  If you are
+          buying an OV or EV certificate, your authority has to have checked
+          your organisation before this will issue.  That check is done by a
+          person at their end, so if it has not happened this will sit waiting
+          rather than fail with something you can act on.
+        </div>
+      </div>
+
+      <div class="mt"><button class="btn primary" id="pc-go">Request it</button></div>`;
+  }
+
+  button.addEventListener("click", async function () {
+    await findAuthorities();
+    if (!AUTHORITIES.length) {
+      NFM.toast("No authority is set up and turned on yet", "warn");
+      return;
+    }
+    NFM.openModal("Get a certificate from a paid authority", "", form(), true);
+
+    document.getElementById("pc-go").addEventListener("click", async function () {
+      const domains = document.getElementById("pc-domains").value
+        .split("\n").map(function (s) { return s.trim(); })
+        .filter(Boolean);
+      const body = {
+        name: document.getElementById("pc-name").value.trim() || domains[0],
+        domains: domains,
+        authority_id: parseInt(document.getElementById("pc-authority").value, 10),
+        source: "letsencrypt",
+        challenge_type: "http-01"
+      };
+      if (!body.domains.length) { NFM.toast("Give it at least one domain", "bad"); return; }
+      try {
+        const cert = await NFM.api("/certs", { method: "POST", body: body });
+        NFM.closeModal();
+        NFM.toast("Asking the authority now, this can take a moment.", "ok");
+        await NFM.api("/certs/" + cert.id + "/issue", { method: "POST" });
+        NFM.toast("Issued.", "ok");
+      } catch (err) {
+        NFM.toast(err.message, "bad");
+        return;
+      }
+      window.location.reload();
+    });
+  });
+
+  findAuthorities();
+});
+</script>
+
 <script nonce="{{ csp_nonce }}">
 document.addEventListener("DOMContentLoaded", function () {
 

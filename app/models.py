@@ -1291,6 +1291,58 @@ class MapBlock(Base):
 # Certificates
 # ==============================================================================
 
+class CertificateAuthority(Base):
+    """
+    One authority you buy certificates from, and how to talk to it.
+
+    A profile rather than a global setting, because a company can buy from more
+    than one, and because a setting that silently changes where every
+    certificate comes from is the wrong shape.  Lets Encrypt is not in here: it
+    needs no credentials and it is the default when a certificate names no
+    authority.
+
+    One row per directory rather than per company.  Several authorities publish
+    separate addresses for domain validated and organisation validated
+    certificates, so "DigiCert OV" is a sensible name for one of these and
+    "DigiCert" is not.
+    """
+    __tablename__ = "certificate_authorities"
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String(128), unique=True, nullable=False, index=True)
+    description = Column(String(500))
+
+    # The ACME directory the authority gave you.
+    directory_url = Column(String(500), nullable=False)
+
+    # External account binding.  A paid authority does not let anybody register
+    # an account, so it hands out these two with the entitlement and the client
+    # presents them at registration.  Without them the registration is refused
+    # and the error talks about the account rather than about these being
+    # missing.
+    eab_kid = Column(String(512))
+    eab_hmac_key_encrypted = Column(Text)
+
+    # A chain this authority needs asked for by name, if it needs one.  Empty
+    # for almost everybody.
+    preferred_chain = Column(String(128))
+
+    enabled = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=utcnow)
+
+    # When somebody last proved the credentials work, and what happened.  Paid
+    # credentials are wrong in a way that only shows at first use, which is at
+    # renewal, months later, at whatever hour the timer runs.
+    last_tested_at = Column(DateTime)
+    last_test_ok = Column(Boolean)
+    last_test_error = Column(Text)
+
+    certificates = relationship("Certificate", back_populates="authority")
+
+    def has_credentials(self):
+        return bool(self.eab_kid and self.eab_hmac_key_encrypted)
+
+
 class Certificate(Base):
     """
     A TLS cert the fleet serves.
@@ -1314,6 +1366,15 @@ class Certificate(Base):
     challenge_type = Column(String(20), default="http-01")
     dns_plugin = Column(String(40))
     dns_credentials_encrypted = Column(Text)
+
+    # Which paid authority issued this, or empty for Lets Encrypt.
+    #
+    # Renewal reads this.  A certificate bought from one authority that quietly
+    # renews from another is a change nobody asked for and nobody sees until a
+    # browser complains about the issuer.
+    authority_id = Column(Integer, ForeignKey("certificate_authorities.id",
+                                              ondelete="RESTRICT"))
+    authority = relationship("CertificateAuthority", back_populates="certificates")
     dns_propagation_seconds = Column(Integer, default=60)
 
     key_type = Column(String(10), default="ecdsa")

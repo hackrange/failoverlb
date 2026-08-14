@@ -76,6 +76,7 @@ from app.models import (
     AccessList,
     CacheZone,
     Certificate,
+    CertificateAuthority,
     ConnLimitZone,
     ErrorPageImage,
     ErrorPageTemplate,
@@ -103,6 +104,7 @@ TABLES = [
     ("conn_zones", ConnLimitZone),
     ("cache_zones", CacheZone),
     ("maps", MapBlock),
+    ("certificate_authorities", CertificateAuthority),
     ("certificates", Certificate),
     ("error_page_templates", ErrorPageTemplate),
     ("error_page_images", ErrorPageImage),
@@ -125,6 +127,7 @@ SECRET_COLUMNS = {
     "token_next_encrypted",
     "token_previous_encrypted",
     "dns_credentials_encrypted",
+    "eab_hmac_key_encrypted",
     "uploaded_privkey_encrypted",
     "totp_secret_encrypted",
 }

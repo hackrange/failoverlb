@@ -42,6 +42,7 @@ from app.models import (
     AccessList,
     CacheZone,
     Certificate,
+    CertificateAuthority,
     ConfigVersion,
     ConnLimitZone,
     ErrorPageImage,
@@ -3221,6 +3222,157 @@ def _publish_gslb():
         log.debug("no event loop, so the dns zones were not pushed from here")
 
 
+
+# ==============================================================================
+# Paid certificate authorities
+# ==============================================================================
+
+AUTHORITY_FIELDS = {"name", "description", "directory_url", "eab_kid",
+                    "eab_hmac_key", "preferred_chain", "enabled"}
+
+
+def _authority_json(a):
+    return {
+        "id": a.id,
+        "name": a.name,
+        "description": a.description,
+        "directory_url": a.directory_url,
+        "eab_kid": a.eab_kid,
+        # Never the key itself, only whether one is stored.  The same rule the
+        # dns credentials already follow.
+        "eab_hmac_key_set": bool(a.eab_hmac_key_encrypted),
+        "preferred_chain": a.preferred_chain,
+        "enabled": a.enabled,
+        "in_use_by": [c.name for c in a.certificates],
+        "last_tested_at": a.last_tested_at.isoformat() if a.last_tested_at else None,
+        "last_test_ok": a.last_test_ok,
+        "last_test_error": a.last_test_error,
+    }
+
+
+@router.get("/authorities")
+async def list_authorities(g: ObjectGuard = Depends(guard)):
+    return {"authorities": [_authority_json(a)
+                            for a in g.list(CertificateAuthority)]}
+
+
+@router.post("/authorities")
+async def create_authority(request: Request, g: ObjectGuard = Depends(changing)):
+    g.require("edit_certs")
+    payload = pick_fields(await request.json(), AUTHORITY_FIELDS)
+    authority = CertificateAuthority()
+    _apply_authority(g, authority, payload, creating=True)
+    g.session.add(authority)
+    g.session.commit()
+    audit.record("authority.create", user=g.user, object_type="authority",
+                 object_name=authority.name)
+    return _authority_json(authority)
+
+
+@router.put("/authorities/{authority_id}")
+async def update_authority(authority_id: str, request: Request,
+                           g: ObjectGuard = Depends(changing)):
+    g.require("edit_certs")
+    authority = g.get(CertificateAuthority, authority_id)
+    payload = pick_fields(await request.json(), AUTHORITY_FIELDS)
+    _apply_authority(g, authority, payload)
+    g.session.commit()
+    audit.record("authority.update", user=g.user, object_type="authority",
+                 object_name=authority.name, changes=list(payload))
+    return _authority_json(authority)
+
+
+@router.delete("/authorities/{authority_id}")
+async def delete_authority(authority_id: str, g: ObjectGuard = Depends(changing)):
+    g.require("edit_certs")
+    authority = g.get(CertificateAuthority, authority_id)
+    # Refused rather than cascaded, the same as a pool a site is using.  A
+    # certificate whose authority has gone cannot be renewed, and it would not
+    # say so until the renewal.
+    if authority.certificates:
+        names = ", ".join(c.name for c in authority.certificates)
+        raise HTTPException(
+            status_code=409,
+            detail=(f"{authority.name} issued {names}, so it cannot be removed "
+                    f"while those exist.  Renewal needs the authority that "
+                    f"issued them."))
+    name = authority.name
+    g.session.delete(authority)
+    g.session.commit()
+    audit.record("authority.delete", user=g.user, object_type="authority",
+                 object_name=name)
+    return {"ok": True, "deleted": name}
+
+
+@router.post("/authorities/{authority_id}/test")
+async def test_authority(authority_id: str, g: ObjectGuard = Depends(changing)):
+    """
+    Register an account against this authority, and keep nothing but the answer.
+
+    Worth its own button because these credentials are wrong in a particular
+    way: they look fine when they are typed and they fail at first use, which
+    is at a renewal months later at whatever hour the timer runs.  Trying it
+    now turns that into a red message while somebody is still looking at it.
+    """
+    g.require("edit_certs")
+    authority = g.get(CertificateAuthority, authority_id)
+
+    from app.core.acme import test_authority_credentials
+
+    result = await test_authority_credentials(authority)
+    authority.last_tested_at = utcnow()
+    authority.last_test_ok = bool(result.get("ok"))
+    authority.last_test_error = (result.get("error") or "")[:2000] or None
+    g.session.commit()
+
+    audit.record("authority.test", user=g.user, object_type="authority",
+                 object_name=authority.name,
+                 changes={"ok": authority.last_test_ok})
+    return _authority_json(authority)
+
+
+def _apply_authority(g, authority, payload, creating=False):
+    from app.core.crypto import encrypt
+
+    if "name" in payload or creating:
+        name = str(payload.get("name") or "").strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="give the authority a name")
+        clash = g.session.query(CertificateAuthority).filter(
+            CertificateAuthority.name == name).first()
+        if clash and clash.id != authority.id:
+            raise HTTPException(status_code=409,
+                                detail=f"there is already an authority called {name}")
+        authority.name = name
+
+    if "directory_url" in payload or creating:
+        url = str(payload.get("directory_url") or "").strip()
+        if not url.startswith("https://"):
+            raise HTTPException(
+                status_code=400,
+                detail="the directory address has to start with https://")
+        authority.directory_url = url
+
+    if "eab_kid" in payload:
+        authority.eab_kid = str(payload["eab_kid"] or "").strip() or None
+
+    if "eab_hmac_key" in payload:
+        value = str(payload["eab_hmac_key"] or "").strip()
+        # Blank means leave the stored one alone, so somebody editing the name
+        # does not have to paste the key again.
+        if value:
+            authority.eab_hmac_key_encrypted = encrypt(value)
+
+    if "preferred_chain" in payload:
+        authority.preferred_chain = str(payload["preferred_chain"] or "").strip() or None
+
+    if "description" in payload:
+        authority.description = (payload.get("description") or "")[:500] or None
+
+    if "enabled" in payload:
+        authority.enabled = bool(payload["enabled"])
+
+
 # ==============================================================================
 # Map blocks, which is nginx's lookup table
 # ==============================================================================
@@ -4058,6 +4210,22 @@ async def create_cert(request: Request, g: ObjectGuard = Depends(changing)):
         key_type=payload.get("key_type", "ecdsa"),
         auto_renew=bool(payload.get("auto_renew", True)),
     )
+
+    # Which authority to buy it from, and to renew it from later.  Empty is
+    # Lets Encrypt, which is what every existing certificate is.
+    if payload.get("authority_id"):
+        authority = g.get(CertificateAuthority, payload["authority_id"])
+        if not authority.enabled:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{authority.name} is turned off, so it cannot issue.")
+        if not authority.has_credentials():
+            raise HTTPException(
+                status_code=400,
+                detail=(f"{authority.name} has no account credentials saved, so "
+                        f"registration would be refused.  Add them on the Paid "
+                        f"Authorities page and press Test."))
+        cert.authority_id = authority.id
 
     if challenge == "dns-01":
         from app.core.crypto import encrypt
