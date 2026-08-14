@@ -483,6 +483,12 @@ async def cert_import(request: Request):
 #
 # These four are what a fleet wide rebuild needs and nothing more.
 PEER_AGENT_VERBS = {
+    # The tunnel.  Read only or write only to the tunnel's own files, and the
+    # private key never comes back out of any of them.
+    "tunnel_key",
+    "tunnel_apply",
+    "tunnel_status",
+    "tunnel_down",
     "nginx_upgrade",
     "nginx_upgrade_status",
     "nginx_revert",

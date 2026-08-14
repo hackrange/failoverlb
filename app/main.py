@@ -591,6 +591,7 @@ async def lifespan(app: FastAPI):
 
 def create_gui_app() -> FastAPI:
     from app.web.routes_account import router as account_router
+    from app.web.routes_tunnel import router as tunnel_router
     from app.web.routes_api import router as api_router
     from app.web.routes_pages import router as pages_router
     from app.web.security import (
@@ -629,6 +630,11 @@ def create_gui_app() -> FastAPI:
     app.include_router(pages_router)
     app.include_router(account_router)
     app.include_router(api_router, prefix="/api")
+    # The tunnel carries its own full paths: the managed half under /api and
+    # the enrolment half at /tunnel, which has to be reachable by a workload
+    # that is not on the management allow list.  On the GUI listener, never the
+    # peer one, which demands a client certificate no workload will ever have.
+    app.include_router(tunnel_router)
 
     @app.get("/healthz", include_in_schema=False)
     async def healthz():

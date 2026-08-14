@@ -273,6 +273,24 @@ class AdminAllowlistMiddleware(BaseHTTPMiddleware):
         if request.url.path == "/healthz":
             return await call_next(request)
 
+        # Tunnel enrolment is open too, and this one is a deliberate trade
+        # rather than an oversight.
+        #
+        # The whole point of the tunnel is that a workload on somebody else's
+        # network, with no inbound access and no public address, can run one
+        # command and join.  That machine is not on the management allow list
+        # and never will be: if it were, it would not need a tunnel.
+        #
+        # What stands in for the allow list is the ticket in the path.  It is
+        # single use, it expires in two hours, only its hash is stored, and it
+        # is spent the moment a key comes back.  Without a valid one this
+        # answers exactly what it answers anybody else, which is nothing.
+        #
+        # Narrow on purpose.  Only this path, only the enrolment, and nothing
+        # else about the tunnel is reachable without a session.
+        if request.url.path.startswith("/tunnel/enrol/"):
+            return await call_next(request)
+
         ip = client_ip(request)
 
         # Loopback always gets through, whatever the allow list says.

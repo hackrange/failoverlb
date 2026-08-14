@@ -89,6 +89,8 @@ from app.models import (
     PoolMember,
     RateLimitZone,
     StreamServer,
+    TunnelNetwork,
+    TunnelPeer,
     User,
     UserRole,
     VirtualHost,
@@ -118,6 +120,9 @@ TABLES = [
     ("gslb_zones", GslbZone),
     ("gslb_records", GslbRecord),
     ("gslb_answers", GslbAnswer),
+    # The network before its peers, same reason as the zones above.
+    ("tunnel_networks", TunnelNetwork),
+    ("tunnel_peers", TunnelPeer),
 ]
 
 # Encrypted at rest with a key that belongs to one node, so they have to be

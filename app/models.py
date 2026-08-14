@@ -1291,6 +1291,88 @@ class MapBlock(Base):
 # Certificates
 # ==============================================================================
 
+class TunnelNetwork(Base):
+    """
+    The one WireGuard network this fleet offers, and the range it lives in.
+
+    One per fleet rather than one per workload.  Every node holds an address in
+    it and every enrolled workload holds one, so a pool member reached through
+    the tunnel is reachable from whichever node is serving.  A tunnel that only
+    the active node could use would go dark at the first failover and look like
+    the backend had died.
+
+    The range is chosen by whoever runs this, because they are the only ones who
+    know what is already in use on their network.  A range that collides with
+    something they already run is the failure they cannot debug from here.
+    """
+    __tablename__ = "tunnel_networks"
+
+    id = Column(Integer, primary_key=True)
+    # RFC1918, and refused otherwise.  A tunnel handing out public addresses is
+    # a routing accident waiting to happen.
+    cidr = Column(String(64), nullable=False, default="10.77.0.0/24")
+    listen_port = Column(Integer, default=51820)
+    enabled = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=utcnow)
+
+    peers = relationship("TunnelPeer", back_populates="network",
+                         cascade="all, delete-orphan")
+
+
+class TunnelNodeKey(Base):
+    """
+    One node's own key pair for the tunnel.
+
+    Per node, never replicated.  The private half is generated on the box by the
+    agent and never leaves it, which is the same rule the cluster's own keys
+    follow.  Only the public half is shared, and only so a workload can be told
+    who it is talking to.
+    """
+    __tablename__ = "tunnel_node_keys"
+
+    id = Column(Integer, primary_key=True)
+    node_name = Column(String(64), unique=True, nullable=False, index=True)
+    public_key = Column(String(64), nullable=False)
+    address = Column(String(64), nullable=False)     # this node's tunnel address
+    endpoint = Column(String(255))                   # what a workload dials
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class TunnelPeer(Base):
+    """
+    One enrolled workload.
+
+    It holds an address in the tunnel range and a public key it generated
+    itself.  The private half never leaves the workload, which is why the script
+    generates it there rather than this end handing one out.
+    """
+    __tablename__ = "tunnel_peers"
+
+    id = Column(Integer, primary_key=True)
+    network_id = Column(Integer, ForeignKey("tunnel_networks.id", ondelete="CASCADE"),
+                        nullable=False)
+    network = relationship("TunnelNetwork", back_populates="peers")
+
+    name = Column(String(128), unique=True, nullable=False, index=True)
+    description = Column(String(500))
+
+    address = Column(String(64), nullable=False, index=True)
+    public_key = Column(String(64))
+
+    # The enrolment ticket.  Only the hash is kept, it works once, and it is
+    # short lived, exactly like the cluster join token.  Anybody holding one can
+    # put a machine on the tunnel.
+    enrol_token_hash = Column(String(128), index=True)
+    enrol_expires_at = Column(DateTime)
+    enrolled_at = Column(DateTime)
+
+    enabled = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=utcnow)
+
+    def is_enrolled(self):
+        return bool(self.public_key and self.enrolled_at)
+
+
 class CertificateAuthority(Base):
     """
     One authority you buy certificates from, and how to talk to it.

@@ -387,6 +387,9 @@ NOT_REPLICATED = {
     "AuditLog", "HealthEvent", "Session",
     # Per box on purpose: ports, addresses, and the rest of the local install.
     "SystemSetting",
+    # This node's own tunnel key pair.  The private half never leaves
+    # the box, so the row that names it must not travel either.
+    "TunnelNodeKey",
     # Users do travel, through their own path, so that the per box columns like
     # lockout state stay on the box that saw the failed logins.
     "User",
