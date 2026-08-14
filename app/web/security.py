@@ -288,7 +288,15 @@ class AdminAllowlistMiddleware(BaseHTTPMiddleware):
         #
         # Narrow on purpose.  Only this path, only the enrolment, and nothing
         # else about the tunnel is reachable without a session.
-        if request.url.path.startswith("/tunnel/enrol/"):
+        # The root path is taken off first, because this fleet may be served
+        # under a prefix.  Matching the raw path would work at the root and
+        # silently block every enrolment on an install behind /lb, which is
+        # the sort of thing that only shows up at a customer.
+        _root = get_settings().root_path.rstrip("/")
+        _path = request.url.path
+        if _root and _path.startswith(_root):
+            _path = _path[len(_root):] or "/"
+        if _path.startswith("/tunnel/enrol/"):
             return await call_next(request)
 
         ip = client_ip(request)

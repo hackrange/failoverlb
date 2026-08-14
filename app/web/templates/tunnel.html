@@ -1,0 +1,285 @@
+{% extends "base.html" %}
+{% block title %}Tunnel &middot; NGINX Management{% endblock %}
+
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <h1>Tunnel</h1>
+    <div class="sub">
+      Reach a backend that has no public address.  The machine dials out to
+      these load balancers, and your pools reach it back down the same tunnel.
+    </div>
+  </div>
+  <div class="page-actions">
+    {% if can('manage_cluster') %}
+      <button class="btn primary" id="add-workload" hidden>Add a workload</button>
+    {% endif %}
+  </div>
+</div>
+
+<div class="notice info">
+  <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 3a.9.9 0 1 1 0 1.8A.9.9 0 0 1 8 4zm1.2 8H6.8v-.9h.7V7.9h-.7V7h2.1v4.1h.3V12z"/></svg>
+  <div>
+    To put a server in a pool it has to be reachable from these load balancers,
+    which normally means a public address and a hole in a firewall.  A tunnel
+    avoids both.  The machine opens the connection outward, so nothing inbound
+    has to be allowed, and it stays reachable from whichever load balancer is
+    serving.
+    <br><br>
+    <strong>It is not a VPN.</strong>  The machine gets a route to these load
+    balancers and nothing else.  It does not change where that machine's own
+    traffic goes and it gives it no way out to the internet.
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head"><h2>Setup</h2></div>
+  <div class="card-body" id="setup-body">
+    <div class="faint">Loading...</div>
+  </div>
+</div>
+
+<div class="card" id="workload-card" hidden>
+  <div class="card-head"><h2>Workloads</h2></div>
+  <div class="card-body no-pad">
+    <div id="workload-list"><div class="pad faint">Loading...</div></div>
+  </div>
+</div>
+
+<style>
+  .pad { padding: 1rem; }
+  .wl-row { border-bottom: 1px solid var(--line); padding: 1rem; }
+  .wl-row:last-child { border-bottom: 0; }
+  .wl-head { display: flex; justify-content: space-between;
+             align-items: flex-start; gap: 1rem; }
+  .dot { width: .55rem; height: .55rem; border-radius: 50%;
+         display: inline-block; margin-right: .35rem; }
+  .dot.ok { background: var(--ok, #2e9e4f); }
+  .dot.wait { background: var(--warn, #d0900a); }
+  .dot.off { background: var(--muted, #999); }
+  .cmd { background: var(--code-bg, #f6f7f9); border-radius: 4px;
+         padding: .6rem .75rem; margin-top: .5rem; overflow-x: auto;
+         font-size: .82rem; }
+  .node-line { margin-top: .3rem; }
+</style>
+
+<script nonce="{{ csp_nonce }}">
+document.addEventListener("DOMContentLoaded", function () {
+  const CAN_EDIT = {{ 'true' if can('manage_cluster') else 'false' }};
+  let STATE = null;
+
+  function el(id) { return document.getElementById(id); }
+  function esc(s) { return NFM.escapeHtml(s == null ? "" : String(s)); }
+
+  async function load() {
+    try {
+      STATE = await NFM.api("/tunnel");
+    } catch (err) {
+      el("setup-body").textContent = "Could not load: " + (err.message || err);
+      return;
+    }
+    drawSetup();
+    drawWorkloads();
+  }
+
+  function drawSetup() {
+    const n = STATE.network;
+    const on = n.enabled;
+
+    let html = '<div><span class="dot ' + (on ? "ok" : "off") + '"></span>' +
+      "<strong>" + (on ? "The tunnel is on" : "The tunnel is off") + "</strong></div>";
+
+    if (on) {
+      html += '<div class="small faint" style="margin-left:1rem">' +
+        "Range " + esc(n.cidr) + ", listening on port " + esc(n.listen_port) +
+        "</div>";
+      // What each load balancer holds, because a workload peers with all of
+      // them and a node missing from here is one it cannot reach.
+      html += '<div style="margin-top:.75rem"><strong class="small">' +
+        "These load balancers:</strong>";
+      (n.nodes || []).forEach(function (node) {
+        html += '<div class="small node-line">' +
+          '<span class="dot ' + (node.public_key ? "ok" : "wait") + '"></span>' +
+          "<strong>" + esc(node.node) + "</strong> " +
+          '<span class="mono faint">' + esc(node.address || "no address yet") +
+          "</span>" +
+          (node.endpoint ? ' <span class="faint">reached at ' +
+            esc(node.endpoint) + "</span>" : "") + "</div>";
+      });
+      html += "</div>";
+    } else {
+      html += '<div class="small faint" style="margin-left:1rem">' +
+        "Turn it on to give workloads a way in without a public address.</div>";
+    }
+
+    if (CAN_EDIT) {
+      html += '<div class="mt"><button class="btn" id="setup-edit">' +
+        (on ? "Change the setup" : "Turn the tunnel on") + "</button>" +
+        (on ? ' <button class="btn danger" id="setup-off">Turn it off</button>' : "") +
+        "</div>";
+    }
+
+    el("setup-body").innerHTML = html;
+    el("workload-card").hidden = !on;
+    const add = el("add-workload");
+    if (add) { add.hidden = !on; }
+
+    const edit = el("setup-edit");
+    if (edit) { edit.addEventListener("click", openSetup); }
+    const off = el("setup-off");
+    if (off) {
+      off.addEventListener("click", async function () {
+        if (!confirm("Turn the tunnel off?\n\nAnything reached through it stops " +
+                     "being reachable.")) { return; }
+        try { await NFM.api("/tunnel", { method: "PUT", body: { enabled: false } }); }
+        catch (err) { NFM.toast(err.message, "bad"); return; }
+        NFM.toast("Turned off", "ok");
+        load();
+      });
+    }
+  }
+
+  function openSetup() {
+    const n = STATE.network;
+    NFM.openModal("Tunnel setup", "", `
+      <div class="field">
+        <label for="t-cidr">Address range</label>
+        <input type="text" id="t-cidr" class="mono" value="${esc(n.cidr)}"
+               placeholder="10.77.0.0/24">
+        <div class="hint">A private range that nothing else on your network
+          uses.  Each load balancer takes one address from it and each workload
+          takes one.  You choose it because you are the only one who knows what
+          is already in use.</div>
+      </div>
+      <div class="field" style="max-width:220px">
+        <label for="t-port">Listening port</label>
+        <input type="number" id="t-port" value="${esc(n.listen_port)}"
+               min="1" max="65535">
+        <div class="hint">Workloads connect out to this port on the load
+          balancers.  It has to be reachable from wherever they are.</div>
+      </div>
+      <div class="checkline">
+        <input type="checkbox" id="t-on" ${n.enabled ? "checked" : ""}>
+        <label for="t-on">Turn the tunnel on</label>
+      </div>
+      <div class="mt"><button class="btn primary" id="t-save">Save</button></div>`,
+      true);
+
+    el("t-save").addEventListener("click", async function () {
+      const body = {
+        cidr: el("t-cidr").value.trim(),
+        listen_port: parseInt(el("t-port").value, 10) || 51820,
+        enabled: el("t-on").checked
+      };
+      try { await NFM.api("/tunnel", { method: "PUT", body: body }); }
+      catch (err) { NFM.toast(err.message, "bad"); return; }
+      NFM.closeModal();
+      NFM.toast("Saved.  The load balancers are setting it up now.", "ok");
+      load();
+    });
+  }
+
+  function drawWorkloads() {
+    const rows = STATE.peers || [];
+    if (!rows.length) {
+      el("workload-list").innerHTML = '<div class="pad faint">' +
+        "No workloads yet.  Add one and you get a single command to run on that " +
+        "machine.</div>";
+      return;
+    }
+    el("workload-list").innerHTML = rows.map(function (p) {
+      const state = p.enrolled ? "ok" : (p.waiting_for_enrolment ? "wait" : "off");
+      const words = p.enrolled ? "on the tunnel"
+        : (p.waiting_for_enrolment ? "waiting for the command to be run"
+                                   : "not enrolled, and the link has expired");
+      return '<div class="wl-row"><div class="wl-head"><div>' +
+        '<span class="dot ' + state + '"></span><strong>' + esc(p.name) + "</strong> " +
+        '<span class="mono small faint">' + esc(p.address) + "</span>" +
+        '<div class="small faint">' + words + "</div>" +
+        (p.description ? "<div class='small faint'>" + esc(p.description) + "</div>" : "") +
+        "</div><div>" +
+        (CAN_EDIT
+          ? '<button class="btn small danger" data-del="' + p.id +
+            '" data-name="' + esc(p.name) + '">Remove</button>'
+          : "") +
+        "</div></div></div>";
+    }).join("");
+  }
+
+  function showCommand(result) {
+    // Shown once, on screen, because this is the only moment it exists.  The
+    // ticket is single use and its hash is all that is stored, so there is no
+    // way to show it again later and it is better to say so than to let
+    // somebody go looking.
+    NFM.openModal("Run this on " + esc(result.name), "", `
+      <p>On the machine you want to reach, run this.  Nothing needs to be
+      opened for it inbound.</p>
+      <div class="cmd mono">${esc(result.enrol_command)}</div>
+      <div class="hint mt">
+        It works once and expires in ${esc(result.expires_in_minutes)} minutes.
+        Treat it like a password: anybody who has it can put a machine on your
+        tunnel.  This is the only time it is shown, so copy it now.  If it
+        expires, remove the workload and add it again.
+      </div>
+      <div class="hint">
+        That machine becomes <span class="mono">${esc(result.address)}</span>.
+        Use that address when you add it to a pool.
+      </div>
+      <div class="mt"><button class="btn primary" id="cmd-done">Done</button></div>`,
+      true);
+    el("cmd-done").addEventListener("click", function () {
+      NFM.closeModal();
+      load();
+    });
+  }
+
+  const add = el("add-workload");
+  if (add) {
+    add.addEventListener("click", function () {
+      NFM.openModal("Add a workload", "", `
+        <div class="field">
+          <label for="w-name">Name</label>
+          <input type="text" id="w-name" placeholder="app01">
+          <div class="hint">Whatever you call that machine.  It only appears
+            here.</div>
+        </div>
+        <div class="field">
+          <label for="w-desc">Note</label>
+          <input type="text" id="w-desc" placeholder="what it runs, who owns it">
+        </div>
+        <div class="mt"><button class="btn primary" id="w-save">Add it</button></div>`,
+        true);
+      el("w-save").addEventListener("click", async function () {
+        const body = {
+          name: el("w-name").value.trim(),
+          description: el("w-desc").value.trim(),
+          base_url: window.location.origin + "{{ base }}"
+        };
+        if (!body.name) { NFM.toast("Give it a name", "bad"); return; }
+        let result;
+        try { result = await NFM.api("/tunnel/peers", { method: "POST", body: body }); }
+        catch (err) { NFM.toast(err.message, "bad"); return; }
+        showCommand(result);
+      });
+    });
+  }
+
+  el("workload-list").addEventListener("click", async function (ev) {
+    const del = ev.target.closest("[data-del]");
+    if (!del) { return; }
+    if (!confirm("Remove " + del.dataset.name + " from the tunnel?\n\n" +
+                 "It stops being reachable straight away.  If the machine is " +
+                 "still running, unenrol it there too with:\n" +
+                 "  sudo nfm-tunnel unenrol")) { return; }
+    try { await NFM.api("/tunnel/peers/" + del.dataset.del, { method: "DELETE" }); }
+    catch (err) { NFM.toast(err.message, "bad"); return; }
+    NFM.toast("Removed", "ok");
+    load();
+  });
+
+  load();
+});
+</script>
+
+{% endblock %}
