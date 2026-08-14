@@ -282,25 +282,54 @@ fi
 # It is not marked optional in the unit, because an agent that starts happily
 # and then cannot write any config is worse than one that refuses to start.
 # Making the folder here is what keeps both of those true.
-# WireGuard, for the tunnel.
+# WireGuard, for the tunnel, and only if the tunnel is switched on.
 #
-# Installed here rather than when somebody first turns the tunnel on, because
-# the agent cannot do it: it runs under a read only filesystem with holes for
-# the few folders it writes, and a package manager needs far more than that.
-# Loosening the agent's sandbox so it could install software would be a much
-# worse trade than a small package nobody has to use.
+# It used to go on every box.  The argument was that it is small and the
+# kernel side has been mainline for years, so it costs nothing on a box that
+# never uses it.  That is true about disk and false about everything else:
+# installing a network package nobody asked for is a decision to make on
+# somebody's server, not one to make for them.  The tunnel is off until it is
+# turned on, and so is this.
 #
-# wireguard-tools is a few hundred kilobytes and the kernel side has been in
-# the mainline kernel for years, so this costs nothing on a box that never
-# enables the tunnel.
-if ! command -v wg >/dev/null 2>&1; then
-    if command -v apt-get >/dev/null 2>&1; then
-        log "installing wireguard-tools, for the tunnel"
-        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq wireguard-tools >/dev/null 2>&1 \
-            || warn "could not install wireguard-tools, so the tunnel will be unavailable"
-    else
-        warn "wireguard-tools is not here and this is not apt based, so the tunnel will be unavailable"
-    fi
+# The database is the only thing that knows whether it is on, so that is what
+# gets asked.  Read only, and no answer means no.
+#
+# It still cannot be installed at the moment somebody turns the tunnel on, for
+# the reason it was put here in the first place: the agent runs under a read
+# only filesystem with holes for the few folders it writes, and a package
+# manager needs far more than that.  Loosening that sandbox so it could
+# install software would be a much worse trade.  So a box that has the tunnel
+# turned on after this ran needs this run again, and until then the tunnel
+# verbs say wireguard is not installed on that node rather than pretending.
+tunnel_is_on() {
+    command -v docker >/dev/null 2>&1 || return 1
+
+    local vol path
+    vol="$(docker volume ls -q --filter name=nfm-data 2>/dev/null | head -1)"
+    [[ -n "$vol" ]] || return 1
+    path="$(docker volume inspect "$vol" --format '{{ .Mountpoint }}' 2>/dev/null)" || return 1
+    [[ -f "$path/fleet.db" ]] || return 1
+
+    # python3 rather than sqlite3, which is not on every box.  The agent
+    # already needs python3, so it is always here.
+    python3 - "$path/fleet.db" >/dev/null 2>&1 <<'ASK'
+import sqlite3, sys
+con = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+row = con.execute("select enabled from tunnel_networks limit 1").fetchone()
+sys.exit(0 if row and row[0] else 1)
+ASK
+}
+
+if command -v wg >/dev/null 2>&1; then
+    :   # already here, whoever put it there
+elif ! tunnel_is_on; then
+    log "the tunnel is off, so wireguard is not being installed"
+elif command -v apt-get >/dev/null 2>&1; then
+    log "installing wireguard-tools, because the tunnel is on"
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq wireguard-tools >/dev/null 2>&1 \
+        || warn "could not install wireguard-tools, so the tunnel will be unavailable"
+else
+    warn "the tunnel is on, but this is not apt based and wireguard-tools is not here"
 fi
 
 mkdir -p /var/backups/nginx-fleet-manager /var/lib/nginx-fleet-manager \
