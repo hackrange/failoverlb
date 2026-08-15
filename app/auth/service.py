@@ -41,7 +41,7 @@ _hasher = PasswordHasher(
     salt_len=16,
 )
 
-TOTP_ISSUER = "NGINX Management"
+TOTP_ISSUER = "Failover LB"
 RECOVERY_CODE_COUNT = 10
 
 

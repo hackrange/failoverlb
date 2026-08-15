@@ -58,7 +58,7 @@ async def export_backup(request: Request, g: ObjectGuard = Depends(guard)):
                                            node_name=settings.node_name)
 
     stamp = utcnow().strftime("%Y-%m-%d-%H%M")
-    name = f"nginx-management-backup-{stamp}.zip"
+    name = f"failover-lb-backup-{stamp}.zip"
 
     audit.record("backup.export", user=g.user, object_type="backup",
                  object_name=name)

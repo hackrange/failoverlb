@@ -529,7 +529,7 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
 
     log.info("=" * 70)
-    log.info("NGINX Management %s", __version__)
+    log.info("Failover LB %s", __version__)
     log.info("  node:     %s (%s)", settings.node_name, settings.node_address)
     log.info("  gui:      https://%s:%s", settings.bind_address, settings.gui_port)
     log.info("  peers:    https://%s:%s (client cert required)",
@@ -604,7 +604,7 @@ def create_gui_app() -> FastAPI:
     settings = get_settings()
 
     app = FastAPI(
-        title="NGINX Management",
+        title="Failover LB",
         version=__version__,
         lifespan=lifespan,
         # Tells FastAPI it is being served under a prefix, so it does not get
@@ -658,7 +658,7 @@ def create_peer_app() -> FastAPI:
     from app.web.routes_peer import router as peer_router
 
     app = FastAPI(
-        title="NGINX Management peer API",
+        title="Failover LB peer API",
         version=__version__,
         docs_url=None,
         redoc_url=None,
@@ -751,7 +751,7 @@ def _make_gui_cert(settings, cert_path: Path, key_path: Path):
 
     subject = x509.Name([
         x509.NameAttribute(NameOID.COMMON_NAME, settings.node_name),
-        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "NGINX Management"),
+        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Failover LB"),
     ])
 
     cert = (

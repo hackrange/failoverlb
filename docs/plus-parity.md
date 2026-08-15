@@ -1,6 +1,6 @@
-# What the paid nginx gives you, and what we built instead
+# What the paid NGINX&reg; subscription gives you, and what we built instead
 
-NGINX comes in two versions.  The free one, which is what the installer builds,
+NGINX&reg; comes in two versions.  The free one, which is what the installer builds,
 and NGINX Plus, which is a paid subscription.  Plus adds a set of features that
 are genuinely useful for load balancing, and a lot of the reason people pay for
 it is that list.
@@ -302,3 +302,13 @@ Reload often enough with long connections and you can pile up old workers.
 
 The manager already handles the busy part: reloads are debounced, so twenty
 backends flapping at once turns into one reload rather than twenty.
+
+---
+
+## Trademarks
+
+NGINX&reg; is a registered trademark of F5, Inc.  NGINX Plus is a trademark of
+F5, Inc.  Failover LB is an independent project and is not affiliated with,
+endorsed by, or sponsored by F5, Inc.  This page compares the two products and
+names NGINX Plus only to say what it does; nothing here is an F5 statement
+about either product.

@@ -1,5 +1,5 @@
 /* =============================================================================
-   NGINX Management styles
+   Failover LB styles
 
    Neutral on purpose.  Black, white and grey, with colour saved for the one
    thing colour is actually good at here: telling you at a glance whether
@@ -529,6 +529,10 @@ input:disabled, select:disabled { background: var(--bg-sunk); color: var(--text-
 .login-wrap {
     min-height: 100vh;
     display: flex;
+    /* Column so the trademark line sits under the box rather than beside it.
+       With the direction turned, align-items is now the horizontal centre and
+       justify-content the vertical one, which is why both are still here. */
+    flex-direction: column;
     align-items: center;
     justify-content: center;
     background: var(--bg-soft);
@@ -566,6 +570,25 @@ input:disabled, select:disabled { background: var(--bg-sunk); color: var(--text-
     flex: 1;
     height: 1px;
     background: var(--border);
+}
+
+/* ------------------------------------------------------ trademark footer */
+/* Quiet on purpose.  It has to be legible and on every page, and it is not
+   something anybody came here to read. */
+.legal {
+    margin-top: 28px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+    color: var(--text-faint);
+    font-size: 0.75rem;
+    line-height: 1.5;
+    max-width: 70ch;
+}
+.login-wrap .legal {
+    border-top: none;
+    margin-top: 18px;
+    max-width: 380px;
+    text-align: center;
 }
 
 /* --------------------------------------------------------------- utilities */

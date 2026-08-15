@@ -1,4 +1,4 @@
-# The host agent for NGINX Fleet Manager.
+# The host agent for Failover LB.
 #
 # This is the only piece running as root.  The container talks to it over a
 # unix socket and it will only do the handful of things on its verb list.
@@ -9,7 +9,7 @@
 # and it cannot open a network socket at all.
 
 [Unit]
-Description=NGINX Fleet Manager host agent
+Description=Failover LB host agent
 Documentation=file:///opt/nginx-fleet-manager/README.md
 After=network.target
 # Not Requires=nginx.service on purpose.  If nginx is down because somebody

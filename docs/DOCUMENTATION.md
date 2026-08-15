@@ -2,14 +2,14 @@
 
 ## The user guide
 
-**[NGINX-Management-User-Guide.docx](NGINX-Management-User-Guide.docx)**
+**[Failover-LB-User-Guide.docx](Failover-LB-User-Guide.docx)**
 
-A complete guide to installing and running NGINX Management, written for
+A complete guide to installing and running Failover LB, written for
 somebody who has been handed a pair of servers and asked to put a load balancer
 on them.  You do not need to have run one before.
 
-Around 140 pages.  Open it in Word and the contents page fills itself in, so
-every heading becomes a link you can click.
+Forty one chapters and three appendices.  Open it in Word and the contents page
+fills itself in, so every heading becomes a link you can click.
 
 ### What is in it
 
@@ -23,8 +23,12 @@ every heading becomes a link you can click.
 | 6  | 29 to 30 | The site and pool screens, control by control |
 | 7  | 31       | Importing an existing nginx configuration |
 | 8  | 32 to 33 | Settings, and your own account |
-| 9  | 34 to 35 | The nginx build, and what the paid nginx has that this does not |
+| 9  | 34 to 35 | The nginx build screen, and what the paid nginx has that this does not |
 | 10 | 36       | Every dialog, field by field |
+| 11 | 37       | The tunnel, for a backend with no public address |
+| 12 | 38       | Certificates from a paid authority |
+| 13 | 39       | Backup and restore, in full |
+| 14 | 40 to 41 | How DNS failover works, and how big the servers need to be |
 |    | Appendices | Ports, files and folders, glossary |
 
 ### Where to start
@@ -55,6 +59,29 @@ and `lb-02`.  Substitute your own.
 **[plus-parity.md](plus-parity.md)** lists the features that exist only in the
 paid nginx subscription, and what this software does instead.  Chapter 35 of
 the guide covers the same ground in plainer language.
+
+## The rename
+
+The software was called NGINX Management until August 2026.  The file name and
+this page have been changed, but the guide inside has not been rebuilt yet, so
+until it is:
+
+- the chapter text still says NGINX Management throughout
+- every screenshot still shows the old name in the title bar and the sidebar,
+  and the old N mark in the corner
+- the sidebar shot shows `nginx Build` where the GUI now says `NGINX® Build`
+
+Rebuilding it means editing the chapter sources and recapturing the marked up
+screenshots against a node running the new build.  Anybody handing the guide to
+a customer before then should know it is a version behind on the name.
+
+## Trademarks
+
+NGINX® is a registered trademark of F5, Inc.  NGINX Plus is a trademark of
+F5, Inc.  Failover LB is an independent project and is not affiliated with,
+endorsed by, or sponsored by F5, Inc.
+
+The same notice belongs on the copyright page of the guide when it is rebuilt.
 
 ## Keeping it up to date
 

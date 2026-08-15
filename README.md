@@ -1,6 +1,6 @@
-# NGINX Management
+# Failover LB
 
-A web GUI for running two or more nginx boxes as one unit.  Sites, backend
+A web GUI for running two or more NGINX&reg; boxes as one unit.  Sites, backend
 pools with real health checks, and Lets Encrypt certificates that work properly
 in a cluster.
 
@@ -65,7 +65,7 @@ This is a work in progress.  Being straight about where it is:
 | nginx from source | `nginx-installer.sh` | Builds nginx with the modules, sets up certbot, keeps a rollback. |
 | Docker setup | `docker_setup.sh` | Docker CE on Ubuntu 22.04+, done properly. |
 | Per node install | `install.sh` | Agent, group, systemd unit, `.env`, container, cluster join. |
-| One shot setup | `nginx-gui-mgmt_setup.sh` | Clone from git into `/data/docker/nginx-gui-mgmt` and hand off. |
+| One shot setup | `failoverlb_setup.sh` | Clone from git into `/data/docker/failoverlb` and hand off. |
 | Plus parity notes | `docs/plus-parity.md` | Every paid feature, and what we built instead. |
 
 The config parser has been run against realistic nginx config and correctly
@@ -177,10 +177,10 @@ On a fresh box, all of it in one go:
 
 ```bash
 sudo ./nginx-installer.sh install      # build nginx from source
-sudo ./nginx-gui-mgmt_setup.sh         # docker, clone, install, start
+sudo ./failoverlb_setup.sh             # docker, clone, install, start
 ```
 
-The setup script clones into `/data/docker/nginx-gui-mgmt`, sets up docker if it
+The setup script clones into `/data/docker/failoverlb`, sets up docker if it
 is missing, and hands off to `install.sh`.  Run it again any time to pull the
 latest code and rebuild.  Your `.env` and your database are left alone.
 
@@ -194,7 +194,7 @@ To add a second node, log into the first one, go to Cluster, press Add a node,
 and copy the token it gives you:
 
 ```bash
-sudo ./nginx-gui-mgmt_setup.sh --join node-one:7444 --token <token>
+sudo ./failoverlb_setup.sh --join node-one:7444 --token <token>
 ```
 
 Set `NFM_ADMIN_ALLOWLIST` in `.env` to your management networks before you put
@@ -343,15 +343,15 @@ On the running node, go to **Cluster** and press **Add a node**.  You get a
 command to paste on the new box:
 
 ```bash
-sudo git clone https://git.hackrange.com/trice/nginx-gui-mgmt.git /data/docker/nginx-gui-mgmt \
-  && sudo /data/docker/nginx-gui-mgmt/nginx-gui-mgmt_setup.sh \
+sudo git clone https://git.hackrange.com/trice/failoverlb.git /data/docker/failoverlb \
+  && sudo /data/docker/failoverlb/failoverlb_setup.sh \
        --join 10.0.0.10:7444 --token <token>
 ```
 
 If the code is already on that box, cd into the folder and run:
 
 ```bash
-sudo ./nginx-gui-mgmt_setup.sh --join 10.0.0.10:7444 --token <token>
+sudo ./failoverlb_setup.sh --join 10.0.0.10:7444 --token <token>
 ```
 
 Build nginx on the new box first with `nginx-installer.sh install`.  The manager
@@ -434,7 +434,7 @@ is the same idea in reverse: apply the config first, then stop checking for it.
 ## Layout
 
 ```
-nginx_manage/
+failoverlb/
 ├── app/
 │   ├── catalog/          every setting, with its help text and rules
 │   ├── core/             the engine: cluster, health, certs, render, parse
@@ -463,3 +463,17 @@ Every node keeps its own full copy of the config and the nodes sync to each
 other.  Adding postgres would mean one more thing that has to be up before you
 can manage your load balancers, which is exactly backwards.  When something is
 broken at 3am you still need to get in and fix nginx.
+
+## Trademarks
+
+NGINX&reg; is a registered trademark of F5, Inc.  NGINX Plus is a trademark of
+F5, Inc.  Failover LB is an independent project and is not affiliated with,
+endorsed by, or sponsored by F5, Inc.
+
+NGINX is named here only to say what this software manages, which is what
+nominative use is for.  Lower case `nginx` in these pages and in the GUI means
+the binary, the config file or the command, not the mark: `nginx -t` is a
+command you type, NGINX is the product it belongs to.
+
+The software was called NGINX Management until August 2026 and was renamed for
+this reason.  Nothing in the product name refers to NGINX any more.

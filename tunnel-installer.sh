@@ -173,7 +173,7 @@ if [[ "$(datapath)" == "none" ]]; then
         say "telling wg-quick to use the userspace implementation"
         mkdir -p "/etc/systemd/system/wg-quick@${IFACE}.service.d"
         cat > "/etc/systemd/system/wg-quick@${IFACE}.service.d/userspace.conf" <<EOF
-# Written by NGINX Management.  This kernel has no wireguard, so the interface
+# Written by Failover LB.  This kernel has no wireguard, so the interface
 # is carried by wireguard-go in userspace instead.  Remove this file if the
 # kernel gains the module later.
 [Service]

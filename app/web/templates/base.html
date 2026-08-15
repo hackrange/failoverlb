@@ -4,14 +4,14 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{% block title %}NGINX Management{% endblock %}</title>
+<title>{% block title %}Failover LB{% endblock %}</title>
 {# The prefix we are served under, so the JavaScript builds API URLs that land
    in the right place when something proxies us at a sub path. #}
 <meta name="nfm-base" content="{{ base }}">
 <link rel="stylesheet" href="{{ base }}/static/app.css?v={{ asset_version }}">
 {# The favicon is drawn inline as an SVG so there is no image file to fetch.
    Keeps the content security policy tight and works with no network. #}
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' rx='3' fill='%23141414'/><path d='M4 11.5v-7h1.4l3.2 4.6V4.5H10v7H8.6L5.4 6.9v4.6z' fill='white'/></svg>">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' rx='3' fill='%23141414'/><path d='M4.6 1.8 7.4 5H5.3v9.2H3.9V5H1.8l2.8-3.2zm6.8 12.4L8.6 11h2.1V1.8h1.4V11h2.1l-2.8 3.2z' fill='white'/></svg>">
 </head>
 <body>
 
@@ -21,12 +21,15 @@
     <div class="flex">
       <button class="btn sm menu-toggle" aria-label="Menu">&#9776;</button>
       <a href="{{ base }}/" class="brand">
-        {# Hand drawn mark.  An N in a rounded square, nothing fetched. #}
+        {# Hand drawn mark.  Two arrows passing each other in a rounded square:
+           traffic moving one way and failing over the other.  Nothing fetched.
+           It was an N until the rename, which is a letter we no longer have
+           any business drawing. #}
         <svg viewBox="0 0 16 16" aria-hidden="true">
           <rect width="16" height="16" rx="3" fill="currentColor" opacity="0.18"/>
-          <path d="M4 11.5v-7h1.4l3.2 4.6V4.5H10v7H8.6L5.4 6.9v4.6z" fill="currentColor"/>
+          <path d="M4.6 1.8 7.4 5H5.3v9.2H3.9V5H1.8l2.8-3.2zm6.8 12.4L8.6 11h2.1V1.8h1.4V11h2.1l-2.8 3.2z" fill="currentColor"/>
         </svg>
-        NGINX Management
+        Failover LB
       </a>
     </div>
 
@@ -164,7 +167,7 @@
 
         <a href="{{ base }}/upgrade" class="{{ 'active' if active_page == 'upgrade' }}">
           <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 1.5 12 6H9.5v4.5h-3V6H4zM3 12.5h10V14H3z"/></svg>
-          nginx Build
+          NGINX&reg; Build
         </a>
 
         <a href="{{ base }}/parity" class="{{ 'active' if active_page == 'parity' }}">
@@ -312,6 +315,15 @@
       </div>
 
       {% block content %}{% endblock %}
+
+      {# Attribution for the mark, on every page rather than tucked away on an
+         about screen, because every page has nginx somewhere on it.  We manage
+         nginx, we are not nginx, and this is where that is said out loud. #}
+      <footer class="legal">
+        NGINX&reg; is a registered trademark of F5, Inc.  NGINX Plus is a
+        trademark of F5, Inc.  Failover LB is an independent project, not
+        affiliated with, endorsed by, or sponsored by F5, Inc.
+      </footer>
     </main>
 
   </div>

@@ -1,5 +1,5 @@
 /* =============================================================================
-   NGINX Management, front end.
+   Failover LB, front end.
 
    Plain JavaScript.  No framework, no build step, no packages.  For a tool that
    has to work on an isolated network while something is on fire, a page that

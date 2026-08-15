@@ -234,7 +234,7 @@ class ClusterCA:
 
         subject = x509.Name([
             x509.NameAttribute(NameOID.COMMON_NAME, f"{cluster_name} cluster CA"),
-            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "NGINX Fleet Manager"),
+            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Failover LB"),
         ])
 
         cert = (
@@ -328,7 +328,7 @@ class ClusterCA:
             x509.CertificateSigningRequestBuilder()
             .subject_name(x509.Name([
                 x509.NameAttribute(NameOID.COMMON_NAME, node_name),
-                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "NGINX Fleet Manager"),
+                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Failover LB"),
             ]))
             .add_extension(x509.SubjectAlternativeName(san), critical=False)
             .sign(key, hashes.SHA256())
@@ -368,7 +368,7 @@ class ClusterCA:
             x509.CertificateBuilder()
             .subject_name(x509.Name([
                 x509.NameAttribute(NameOID.COMMON_NAME, node_name),
-                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "NGINX Fleet Manager"),
+                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Failover LB"),
             ]))
             .issuer_name(ca_cert.subject)
             .public_key(csr.public_key())

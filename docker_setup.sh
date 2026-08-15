@@ -310,8 +310,8 @@ success "Docker is set up."
 echo
 info "Log:  ${LOG_FILE}"
 echo
-info "Next, to install the nginx GUI manager:"
-info "  sudo bash nginx-gui-mgmt_setup.sh"
+info "Next, to install Failover LB:"
+info "  sudo bash failoverlb_setup.sh"
 echo
 
 }

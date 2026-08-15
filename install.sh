@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# NGINX Management - per node installer
+# Failover LB - per node installer
 #
 # Author: Tim Rice
 #
@@ -86,7 +86,7 @@ problem() {
 
 usage() {
     cat <<USAGE
-NGINX Management installer
+Failover LB installer
 
 Usage: sudo ./install.sh [options]
 
@@ -760,7 +760,7 @@ PYEOF
     info "upgraded is a fleet where the two disagree about what they can do."
 else
 
-success "NGINX Management is running on ${NODE_NAME}."
+success "Failover LB is running on ${NODE_NAME}."
 echo
 info "GUI:   https://${NODE_ADDRESS}:7443"
 info "Peers: ${NODE_ADDRESS}:7444  (firewall this to your other nodes)"

@@ -1,4 +1,4 @@
-# NGINX Fleet Manager, the python packages we need.
+# Failover LB, the python packages we need.
 #
 # Every version is pinned on purpose.  This runs on production load balancers,
 # so a surprise version bump from a rebuild six months from now is not a thing

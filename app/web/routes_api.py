@@ -2060,10 +2060,10 @@ async def make_join_token(request: Request, g: ObjectGuard = Depends(changing)):
         "install_dir": target,
         "command": (
             f"sudo git clone {repo} {target} \\\n"
-            f"  && sudo {target}/nginx-gui-mgmt_setup.sh --join {sponsor} --token {token}"
+            f"  && sudo {target}/failoverlb_setup.sh --join {sponsor} --token {token}"
         ),
         "command_have_code": (
-            f"sudo ./nginx-gui-mgmt_setup.sh --join {sponsor} --token {token}"
+            f"sudo ./failoverlb_setup.sh --join {sponsor} --token {token}"
         ),
         "note": "single use, expires in 2 hours, treat it like a password",
     }

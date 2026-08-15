@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # =============================================================================
-# NGINX Management - one shot setup
+# Failover LB - one shot setup
 #
 # Author: Tim Rice
 #
 # Takes a bare Ubuntu box with nginx already built on it and gets the manager
-# running.  Pulls the code from git into /data/docker/nginx-gui-mgmt, sets up
+# running.  Pulls the code from git into /data/docker/failoverlb, sets up
 # docker if it is missing, then hands off to install.sh.
 #
-#   sudo ./nginx-gui-mgmt_setup.sh
-#   sudo ./nginx-gui-mgmt_setup.sh --join lb-01:7444 --token <token>
+#   sudo ./failoverlb_setup.sh
+#   sudo ./failoverlb_setup.sh --join lb-01:7444 --token <token>
 #
 # Run it again any time to pull the latest code and rebuild.  Your .env and
 # your database are left alone.
@@ -23,8 +23,8 @@
 {
 set -euo pipefail
 
-REPO_URL="${NFM_REPO_URL:-https://git.hackrange.com/trice/nginx-gui-mgmt.git}"
-INSTALL_DIR="${NFM_INSTALL_DIR:-/data/docker/nginx-gui-mgmt}"
+REPO_URL="${NFM_REPO_URL:-https://git.hackrange.com/trice/failoverlb.git}"
+INSTALL_DIR="${NFM_INSTALL_DIR:-/data/docker/failoverlb}"
 BRANCH="${NFM_BRANCH:-master}"
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || echo /nonexistent)"
@@ -64,9 +64,9 @@ header()  { echo; echo "${c_cyn}== $* ==${c_reset}"; }
 
 usage() {
     cat <<USAGE
-NGINX Management setup
+Failover LB setup
 
-Usage: sudo ./nginx-gui-mgmt_setup.sh [options]
+Usage: sudo ./failoverlb_setup.sh [options]
 
   -d, --dir <path>      Where to install.  Default ${INSTALL_DIR}.
   -b, --branch <name>   Branch to check out.  Default ${BRANCH}.

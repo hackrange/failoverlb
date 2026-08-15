@@ -72,7 +72,7 @@ SETTINGS_SKIP_PREFIXES = ("totp_pending",)
 SETTINGS_SKIP_KEYS = {"management_networks"}
 
 READ_ME = """\
-This is a configuration backup from NGINX Management.
+This is a configuration backup from Failover LB.
 
 It is encrypted with AES-256 and the password is the login password of whoever
 took it.  Any current zip tool will open it with that password.
