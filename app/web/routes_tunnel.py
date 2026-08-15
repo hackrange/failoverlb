@@ -73,6 +73,29 @@ def _network_json(network, session):
     }
 
 
+def _pools_pointing_at(p):
+    """
+    Which pools name this workload's address.
+
+    Said by name rather than as "if it is still in one", because the person
+    deciding whether to remove it is the one who cannot see the pool pages from
+    here, and because a member left behind is what turns a removed workload
+    into somebody else's traffic later.
+    """
+    from sqlalchemy.orm import object_session
+
+    from app.models import Pool, PoolMember
+
+    session = object_session(p)
+    if session is None or not p.address:
+        return []
+    rows = (session.query(Pool.name)
+            .join(PoolMember, PoolMember.pool_id == Pool.id)
+            .filter(PoolMember.address == p.address)
+            .distinct().all())
+    return sorted(name for (name,) in rows)
+
+
 def _peer_json(p):
     return {
         "id": p.id,
@@ -84,6 +107,7 @@ def _peer_json(p):
         "enabled": p.enabled,
         "waiting_for_enrolment": bool(p.enrol_token_hash and not p.public_key),
         "unenrol_command": UNENROL_COMMAND,
+        "used_by": _pools_pointing_at(p),
     }
 
 

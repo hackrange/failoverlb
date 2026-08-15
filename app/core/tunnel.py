@@ -85,13 +85,44 @@ def node_addresses(session, network):
     return out
 
 
+def addresses_pools_point_at(session, network):
+    """
+    Tunnel addresses that a backend pool still names.
+
+    A pool member is an address, not a machine.  Remove a workload and the
+    member pointing at it is left behind, and the moment that address is given
+    to a different workload the pool starts sending production traffic there,
+    silently.  The Tunnel page tells people to put the address in a pool, so
+    this is the normal case rather than a corner of one.
+    """
+    from app.models import PoolMember
+
+    net = ipaddress.ip_network(network.cidr)
+    out = set()
+    for member in session.query(PoolMember).all():
+        address = (member.address or "").strip()
+        try:
+            if ipaddress.ip_address(address) in net:
+                out.add(address)
+        except ValueError:
+            continue        # a hostname, so not one of ours
+    return out
+
+
 def next_free_address(session, network):
     """
     The next address a workload can have.
 
-    Nodes sit at the bottom of the range, so workloads start after them.  A
-    gap left by a removed workload is reused, because a long lived deployment
-    that only ever counts upward runs out of a /24 while mostly empty.
+    Counts upward and does not go back for gaps, until the top of the range is
+    reached.  Reuse was the old rule, on the grounds that a deployment which
+    only counts upward runs out of a /24 while mostly empty.  True, and 250
+    workloads away; what reuse costs is immediate.  An address that belonged to
+    a workload last week means something different this week, to a pool that
+    still points at it, to a firewall rule somebody wrote, and to whoever
+    remembers what used to be there.  None of that announces itself.
+
+    Two things are never handed out, whichever way we are looking: an address
+    in use, and one a pool still names even though the workload has gone.
     """
     net = ipaddress.ip_network(network.cidr)
     hosts = list(net.hosts())
@@ -100,10 +131,26 @@ def next_free_address(session, network):
     taken = {p.address for p in session.query(TunnelPeer)
              .filter(TunnelPeer.network_id == network.id).all()}
     taken |= set(node_addresses(session, network).values())
+    taken |= addresses_pools_point_at(session, network)
 
-    for host in hosts[node_count:]:
-        if str(host) not in taken:
-            return str(host)
+    # Where the counting is up to.  Zero on a fleet that predates this, which
+    # reads as "start after the nodes" and is right: everything below is either
+    # in use or was never used at all.
+    mark = max(int(network.address_high_water or 0), node_count)
+
+    for index in range(mark, len(hosts)):
+        if str(hosts[index]) not in taken:
+            network.address_high_water = index + 1
+            return str(hosts[index])
+
+    # The top of the range is used up, so gaps are all there is.  Say so,
+    # because from here on an address may have belonged to something else.
+    for index in range(node_count, mark):
+        if str(hosts[index]) not in taken:
+            log.warning("tunnel range %s is full above %s, reusing the gap at %s",
+                        network.cidr, hosts[mark - 1], hosts[index])
+            return str(hosts[index])
+
     raise ValueError(f"there is no room left in {network.cidr}")
 
 

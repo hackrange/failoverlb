@@ -446,9 +446,18 @@ document.addEventListener("DOMContentLoaded", function () {
   // confirm box nobody can select text out of.
   function confirmRemove(peer) {
     NFM.openModal("Remove " + esc(peer.name) + " from the tunnel", "", `
-      <p>It stops being reachable through the tunnel straight away.  Anything
-      in a pool pointing at <span class="mono">${esc(peer.address)}</span> will
-      start failing, so take it out of the pool first if it is still in one.</p>
+      <p>It stops being reachable through the tunnel straight away.</p>
+      ${(peer.used_by && peer.used_by.length) ? `
+      <div class="notice warn">
+        <div><strong>${esc(peer.used_by.join(", "))}</strong>
+        ${peer.used_by.length > 1 ? "point" : "points"} at
+        <span class="mono">${esc(peer.address)}</span>.  Those backends start
+        failing the moment this goes, and the address stays reserved rather
+        than being handed to the next workload, so take the member out of the
+        pool when you are done here.</div>
+      </div>` : `
+      <p>Nothing in a pool points at
+      <span class="mono">${esc(peer.address)}</span> today.</p>`}
       <p class="mt">The machine keeps its end until you clear it.  Run this
       there:</p>
       ${cmdBlock("unenrol-cmd")}

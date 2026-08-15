@@ -1315,6 +1315,16 @@ class TunnelNetwork(Base):
     enabled = Column(Boolean, default=False)
     created_at = Column(DateTime, default=utcnow)
 
+    # How far up the range addresses have been handed out.
+    #
+    # Kept so an address is not given to a second workload the moment the first
+    # one is removed.  A pool member still pointing at it would then send
+    # production traffic to a different machine, silently, and the only sign is
+    # somebody remembering which workload used to be there.  Counting upward
+    # costs a /24 nothing: 250 workloads before it matters, and the gaps are
+    # still available once the top is reached.
+    address_high_water = Column(Integer, default=0)
+
     peers = relationship("TunnelPeer", back_populates="network",
                          cascade="all, delete-orphan")
 
