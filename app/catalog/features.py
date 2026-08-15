@@ -2828,6 +2828,7 @@ register(
         directive="rewrite",
         contexts=("server", "location"),
         type="list",
+        regex_values=True,
         default=[],
         advanced=True,
         help=HelpText(
@@ -2859,6 +2860,7 @@ register(
         directive="sub_filter",
         contexts=("server", "location"),
         type="list",
+        regex_values=True,
         default=[],
         module="http_sub_module",
         advanced=True,

@@ -95,6 +95,16 @@ class Feature:
     default: Any = None
     options: list = field(default_factory=list)   # for select, list of (value, label)
 
+    # The value is the rest of a directive, not a value in one.
+    #
+    # A rewrite rule is a regular expression and a replacement, and nearly every
+    # regular expression worth writing has a backslash in it.  The blanket rule
+    # below refuses backslashes everywhere, which is right for a value going
+    # into a directive and stops these settings being usable at all.  Set this
+    # and the entries are checked against what actually breaks out of a
+    # directive instead, the same list the renderer enforces.
+    regex_values: bool = False
+
     # Which module has to be compiled in.  "core" means it is always there.
     module: str = "core"
 
@@ -283,6 +293,32 @@ SAFE_TEXT_RE = re.compile(r"^[A-Za-z0-9 _.:/@$~^|=+*?()\[\]{}<>,'\"%!&#-]*$")
 NO_BREAKOUT_RE = re.compile(r"[;{}\n\r\\]")
 
 
+def _rule_problem(text: str) -> Optional[str]:
+    r"""
+    What is wrong with one line that becomes the tail of a directive.
+
+    Backslashes are the point of these, so what is refused is only what ends
+    the directive and starts writing config of somebody else's choosing, plus a
+    `#`, which comments away the rest of the rule and would silently drop half
+    of it.  A trailing single backslash escapes whatever nginx reads next.
+
+    The same list the renderer enforces before writing, on purpose: a rule that
+    saves and then cannot be rendered is a setting that looks accepted and does
+    nothing, which is the whole reason these two were rewritten.
+    """
+    if not text.strip():
+        return "an empty entry is not a rule"
+    if re.search(r"[;{}\n\r]", text):
+        return "entries cannot contain ; { } or line breaks"
+    if "#" in text:
+        return ("entries cannot contain #, which nginx reads as the start of a "
+                "comment and would drop the rest of the rule")
+    trailing = len(text) - len(text.rstrip("\\"))
+    if trailing % 2:
+        return "an entry cannot end in a single backslash"
+    return None
+
+
 def validate_value(feature: Feature, value) -> Optional[str]:
     """
     Check one value.  Gives back an error message, or None when it is fine.
@@ -348,7 +384,11 @@ def validate_value(feature: Feature, value) -> Optional[str]:
         for v in value:
             if not isinstance(v, str):
                 return "every entry has to be text"
-            if NO_BREAKOUT_RE.search(v):
+            if feature.regex_values:
+                problem = _rule_problem(v)
+                if problem:
+                    return problem
+            elif NO_BREAKOUT_RE.search(v):
                 return "entries cannot contain ; { } backslashes or line breaks"
         return None
 
