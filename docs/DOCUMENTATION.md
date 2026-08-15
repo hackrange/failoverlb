@@ -51,8 +51,8 @@ look like, and what to do, in rough order of how often they happen.
 Every screenshot is of the software actually running.  Anything drawn on top in
 red was added for the guide and is not on your screen.
 
-The example domain throughout is `domain.com` and the two servers are `lb-01`
-and `lb-02`.  Substitute your own.
+The example domain throughout is `example.net` and the two servers are
+`lb-01` and `lb-02`.  Substitute your own.
 
 ## Other documents
 
@@ -62,18 +62,12 @@ the guide covers the same ground in plainer language.
 
 ## The rename
 
-The software was called NGINX Management until August 2026.  The file name and
-this page have been changed, but the guide inside has not been rebuilt yet, so
-until it is:
-
-- the chapter text still says NGINX Management throughout
-- every screenshot still shows the old name in the title bar and the sidebar,
-  and the old N mark in the corner
-- the sidebar shot shows `nginx Build` where the GUI now says `NGINX® Build`
-
-Rebuilding it means editing the chapter sources and recapturing the marked up
-screenshots against a node running the new build.  Anybody handing the guide to
-a customer before then should know it is a version behind on the name.
+The software was called NGINX Management until August 2026.  The guide has been
+rebuilt since: the text says Failover LB throughout, and every screenshot was
+taken again against a node running the new build, so the name and the new look
+are what you see in the pictures.  The one place the old name survives on
+purpose is the nginx build screen, which is called NGINX® Build because that is
+what the software it builds is called.
 
 ## Trademarks
 
@@ -81,7 +75,7 @@ NGINX® is a registered trademark of F5, Inc.  NGINX Plus is a trademark of
 F5, Inc.  Failover LB is an independent project and is not affiliated with,
 endorsed by, or sponsored by F5, Inc.
 
-The same notice belongs on the copyright page of the guide when it is rebuilt.
+The same notice is on the guide's own cover and in Chapter 1.
 
 ## Keeping it up to date
 
