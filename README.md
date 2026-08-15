@@ -343,7 +343,7 @@ On the running node, go to **Cluster** and press **Add a node**.  You get a
 command to paste on the new box:
 
 ```bash
-sudo git clone https://git.hackrange.com/trice/failoverlb.git /data/docker/failoverlb \
+sudo git clone https://git.failoverlb.net/trice/failoverlb.git /data/docker/failoverlb \
   && sudo /data/docker/failoverlb/failoverlb_setup.sh \
        --join 10.0.0.10:7444 --token <token>
 ```
