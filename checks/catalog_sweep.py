@@ -19,13 +19,14 @@ Run it inside the container:
     docker exec -i nginx-fleet-manager python < test/catalog_sweep.py
 """
 import json
+import pathlib
 import socket
 import sys
 
 from app.catalog import all_features
 from app.core.capabilities import fleet_capabilities
 from app.db import session_scope
-from app.models import VirtualHost, json_set
+from app.models import Certificate, Location, Pool, VirtualHost, json_set
 from app.web.routes_api import render_current
 
 SOCKET = "/run/nginxmgr/agent.sock"
@@ -77,6 +78,11 @@ def sample_value(feature):
         return "16k"
     if kind == "time":
         return "30s"
+    # No inventing a value from the help text.  It was tried: the examples are
+    # written for a person reading them, so error_pages' example is a sentence
+    # describing two rules, and feeding it back in renders a directive nginx
+    # refuses.  The settings that would need it are caught by the source pass
+    # at the end instead, which needs no value at all.
     if kind in ("select", "multiselect", "list"):
         if feature.options:
             first = feature.options[0][0]
@@ -91,20 +97,91 @@ def sample_value(feature):
     return None
 
 
+def renderer_knows(key, _cache={}):
+    """
+    Does the renderer mention this setting at all.
+
+    The difference between a setting that cannot work and one this check did
+    not build the right site for.  A cache directive is only written when a
+    cache zone is attached, and TLS ones only on a site with a certificate, so
+    their absence here means the scratch site had no cache zone, not that the
+    setting is dead.  A key the renderer never names in its source cannot be
+    written under any shape, and that is the real finding.
+    """
+    if not _cache:
+        from app.core import render
+        _cache["source"] = pathlib.Path(render.__file__).read_text()
+    source = _cache["source"]
+    return f'"{key}"' in source or f"'{key}'" in source
+
+
+def directive_written(files, feature):
+    """
+    Did setting this actually put its directive in the config.
+
+    nginx being happy is not the same as the setting having done anything.  A
+    setting the renderer ignores produces a config with the directive simply
+    absent, which nginx accepts without a word, so every check here passed on
+    settings that could not work: fifteen of them, found only when somebody
+    went looking for one of them by name and it did nothing.
+
+    Returns None when the catalog entry names no directive, which is the case
+    for the few that stand for a whole block rather than one line.
+
+    The limit worth knowing: a directive the base config always writes, like
+    sendfile, will be found whether or not this setting is what wrote it.  So
+    this catches a setting that writes nothing at all, not one that writes the
+    wrong thing.
+    """
+    directive = (getattr(feature, "directive", "") or "").strip()
+    if not directive:
+        return None
+    needle = directive.split()[0]
+    return any(needle in text for text in files.values()
+               if isinstance(text, str))
+
+
 def render_with(settings):
-    """Render the whole config with a scratch site carrying these settings."""
+    """
+    Render the whole config with a scratch site carrying these settings.
+
+    The site proxies, over https, with a path on it, because the shape of the
+    site decides which directives can appear at all.  A static http site with
+    no locations was rendering none of the proxy settings, none of the TLS
+    ones and none of the per location ones, which made every one of them look
+    like a setting the renderer ignores.  The shape has to be able to carry
+    the directive before its absence means anything.
+
+    Falls back a step at a time when the fleet has nothing to build it from: no
+    pool means static, no certificate means http.
+    """
     with session_scope() as session:
+        pool = session.query(Pool).first()
+        cert = session.query(Certificate).filter(
+            Certificate.not_after.isnot(None)).first()
+
         site = VirtualHost(
             name=SCRATCH,
             server_names=json.dumps([SCRATCH]),
             enabled=True,
             listen_http=True,
-            listen_https=False,
-            mode="static",
-            document_root="/var/www/site1",
+            listen_https=bool(cert),
+            cert_id=cert.id if cert else None,
+            mode="proxy" if pool else "static",
+            pool_id=pool.id if pool else None,
+            document_root=None if pool else "/var/www/site1",
             settings=json_set(settings),
         )
         session.add(site)
+        session.flush()
+        # A path as well, since a good few settings are only ever written
+        # inside a location and a site with none has nowhere to put them.
+        session.add(Location(host_id=site.id, path="/", match_type="prefix",
+                             mode="proxy" if pool else "static",
+                             pool_id=pool.id if pool else None,
+                             document_root=None if pool else "/var/www/site1",
+                             enabled=True, sort_order=10,
+                             settings=json_set(settings)))
         session.flush()
         try:
             files, _checksum, _snapshot = render_current(session)
@@ -128,6 +205,9 @@ def main():
 
     failures = []
     skipped = []
+    inert = []
+    unexercised = []
+    nameless = []
     together = {}
 
     print("  one at a time")
@@ -145,6 +225,23 @@ def main():
             print(f"    FAIL {feature.key}: render blew up: {exc}")
             continue
 
+        # Did it write anything at all.  Asked before nginx is, because a
+        # setting that writes nothing passes every test nginx can do.
+        wrote = directive_written(files, feature)
+        if wrote is None:
+            nameless.append(feature.key)
+        elif not wrote:
+            if renderer_knows(feature.key):
+                # The renderer knows about it, so this site is the wrong shape
+                # to carry it: no cache zone, no limit zone, that sort of
+                # thing.  Worth listing, not worth failing over.
+                unexercised.append((feature.key, feature.directive))
+            else:
+                inert.append((feature.key, feature.directive))
+                print(f"    INERT {feature.key} = {value!r}")
+                print(f"          the renderer never names this setting, so "
+                      f"no {feature.directive} can ever come out of it")
+
         ok, output = nginx_accepts(files)
         if not ok:
             reason = next(
@@ -155,8 +252,9 @@ def main():
             print(f"    FAIL {feature.key} = {value!r}")
             print(f"         {reason[:150]}")
 
-    print(f"    {len(features) - len(failures) - len(skipped)} passed, "
-          f"{len(failures)} failed, {len(skipped)} skipped")
+    print(f"    {len(features) - len(failures) - len(inert) - len(skipped)} passed, "
+          f"{len(failures)} failed, {len(inert)} wrote nothing, "
+          f"{len(skipped)} skipped")
     print()
 
     print("  all of them together")
@@ -181,9 +279,47 @@ def main():
             print(f"    {key}: {why}")
         print()
 
-    print("  RESULT:", "every setting nginx was asked about loaded"
-          if not failures else f"{len(failures)} PROBLEMS, listed above")
-    return 1 if failures else 0
+    if inert:
+        print(f"  {len(inert)} settings the renderer never writes.  These save, "
+              f"apply and do nothing,")
+        print("  which is worse than not offering them:")
+        for key, directive in inert:
+            print(f"    {key:26} {directive}")
+        print()
+
+    if unexercised:
+        print(f"  {len(unexercised)} the renderer does know about, but which "
+              f"need a site this check did not")
+        print("  build: a cache zone, a limit zone, that kind of thing.  Not a "
+              "fault, but not covered:")
+        for key, directive in unexercised:
+            print(f"    {key:26} {directive}")
+        print()
+
+    if nameless:
+        print(f"  {len(nameless)} settings name no directive, so whether they "
+              f"were written cannot be")
+        print(f"  checked this way: {', '.join(nameless)}")
+        print()
+
+    # The last word, and the only one that needs no site: does the renderer
+    # name this setting anywhere in its source.  A key it never names cannot be
+    # written under any shape, whatever value we try, so this catches the ones
+    # skipped above for want of a test value and the ones whose catalog entry
+    # names no single directive.
+    never = [f.key for f in features if not renderer_knows(f.key)]
+    if never:
+        print(f"  {len(never)} settings the renderer's source never mentions.  "
+              f"No value and no shape")
+        print("  can make these do anything:")
+        for key in never:
+            print(f"    {key}")
+        print()
+
+    problems = len(failures) + len(set(k for k, _ in inert) | set(never))
+    print("  RESULT:", "every setting reached the config and nginx took it"
+          if not problems else f"{problems} PROBLEMS, listed above")
+    return 1 if problems else 0
 
 
 if __name__ == "__main__":
