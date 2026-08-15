@@ -76,6 +76,34 @@ document.addEventListener("DOMContentLoaded", function () {
   function el(id) { return document.getElementById(id); }
   function esc(s) { return NFM.escapeHtml(s == null ? "" : String(s)); }
 
+  // These three calls use fetch rather than NFM.api, because one sends a file
+  // and another gets one back, and NFM.api speaks json both ways.  What that
+  // skips is the CSRF header NFM.api adds for you, and without it the change
+  // making calls are rejected before they reach the route.  The rejection is
+  // an HTML error page, so the only symptom was the json parser complaining
+  // about a doctype, which says nothing about what actually happened.
+  function csrfToken() {
+    const match = document.cookie.match(/(?:^|;\s*)nfm_csrf=([^;]+)/);
+    return match ? decodeURIComponent(match[1]) : "";
+  }
+
+  // Anything that is not json here is a page, and a page means the request
+  // never got where it was going.  Saying so beats handing back a parser error
+  // about a character somebody never typed.
+  async function asJson(res) {
+    const text = await res.text();
+    try {
+      return JSON.parse(text);
+    } catch (e) {
+      if (res.status === 403) {
+        throw new Error("that was refused.  Reload the page and try again, " +
+                        "your session may have expired.");
+      }
+      throw new Error("the server answered with a page rather than an answer (" +
+                      res.status + " " + res.statusText + ")");
+    }
+  }
+
   function counts(obj) {
     return '<div class="kv">' + Object.keys(obj || {}).sort().map(function (k) {
       return "<span><strong>" + esc(obj[k]) + "</strong> " + esc(k) + "</span>";
@@ -94,13 +122,15 @@ document.addEventListener("DOMContentLoaded", function () {
       // download has to be handed to the browser rather than parsed.
       const res = await fetch("{{ base }}/api/backup/export", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "X-CSRF-Token": csrfToken()
+        },
         body: JSON.stringify({ password: password })
       });
       if (!res.ok) {
-        let detail = "could not take a backup";
-        try { detail = (await res.json()).detail || detail; } catch (e) {}
-        throw new Error(detail);
+        const err = await asJson(res);
+        throw new Error(err.detail || "could not take a backup");
       }
 
       const blob = await res.blob();
@@ -146,8 +176,10 @@ document.addEventListener("DOMContentLoaded", function () {
 
     let info;
     try {
-      const res = await fetch("{{ base }}/api/backup/inspect", { method: "POST", body: fd });
-      info = await res.json();
+      const res = await fetch("{{ base }}/api/backup/inspect", {
+        method: "POST", body: fd, headers: { "X-CSRF-Token": csrfToken() }
+      });
+      info = await asJson(res);
       if (!res.ok) { throw new Error(info.detail || "could not open it"); }
     } catch (err) {
       el("i-out").innerHTML = "";
@@ -207,8 +239,10 @@ document.addEventListener("DOMContentLoaded", function () {
 
       let result;
       try {
-        const res = await fetch("{{ base }}/api/backup/import", { method: "POST", body: fd2 });
-        result = await res.json();
+        const res = await fetch("{{ base }}/api/backup/import", {
+          method: "POST", body: fd2, headers: { "X-CSRF-Token": csrfToken() }
+        });
+        result = await asJson(res);
         if (!res.ok) { throw new Error(result.detail || "the restore failed"); }
       } catch (err) {
         note.remove();
