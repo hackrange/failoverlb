@@ -23,7 +23,7 @@
 {
 set -euo pipefail
 
-REPO_URL="${NFM_REPO_URL:-https://git.failoverlb.net/trice/failoverlb.git}"
+REPO_URL="${NFM_REPO_URL:-https://git.failoverlb.net/failoverlb.git}"
 INSTALL_DIR="${NFM_INSTALL_DIR:-/data/docker/failoverlb}"
 BRANCH="${NFM_BRANCH:-master}"
 

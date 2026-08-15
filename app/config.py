@@ -33,7 +33,7 @@ class Settings(BaseSettings):
     # Only used to build the copy and paste command on the Cluster page when you
     # add a node.  Change these if you run your own fork or install somewhere
     # other than the default, so the command the GUI hands out actually works.
-    repo_url: str = Field(default="https://git.failoverlb.net/trice/failoverlb.git")
+    repo_url: str = Field(default="https://git.failoverlb.net/failoverlb.git")
     install_dir: str = Field(default="/data/docker/failoverlb")
 
     # ---- listeners ----------------------------------------------------------
