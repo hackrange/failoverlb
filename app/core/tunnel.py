@@ -116,6 +116,14 @@ async def install_on_fleet():
     cannot carry the tunnel is a failover that does not work, discovered at
     the worst moment.
     """
+    # Imported here rather than at the top, like every other function that
+    # reaches the cluster.  These pull in the manager and the manager pulls in
+    # this, so a top level import is a circular one.
+    from app.config import get_settings
+    from app.core.agent_client import get_agent
+    from app.core.cluster import PeerClient, get_cluster
+    from app.db import session_scope
+
     me = get_settings().node_name
     cluster = get_cluster()
     started, failed = {}, {}
@@ -142,6 +150,14 @@ async def install_on_fleet():
 
 async def install_status():
     """What each node has, and how any install in flight is going."""
+    # Imported here rather than at the top, like every other function that
+    # reaches the cluster.  These pull in the manager and the manager pulls in
+    # this, so a top level import is a circular one.
+    from app.config import get_settings
+    from app.core.agent_client import get_agent
+    from app.core.cluster import PeerClient, get_cluster
+    from app.db import session_scope
+
     me = get_settings().node_name
     cluster = get_cluster()
     nodes = {}
