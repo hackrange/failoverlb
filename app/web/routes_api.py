@@ -873,18 +873,18 @@ def _host_detail(h):
         "settings": h.setting_map(),
         "custom_config": h.custom_config,
         "notes": h.notes,
+        # The same shape the locations endpoint returns, from the same
+        # function, rather than a second list written out here.
+        #
+        # The copy that used to live here left out custom_config, among other
+        # fields, so a caller reading a site's paths from this endpoint was
+        # told every one of them had no hand written config.  Anything acting
+        # on that then skips the path that does have some, or writes it back
+        # empty.  Both happened.  Two serialisers for one object drift the
+        # moment somebody adds a field to whichever they were looking at.
         "locations": [
-            {
-                "id": loc.id,
-                "path": loc.path,
-                "match_type": loc.match_type,
-                "mode": loc.mode,
-                "pool_id": loc.pool_id,
-                "sort_order": loc.sort_order,
-                "enabled": loc.enabled,
-                "settings": loc.setting_map(),
-            }
-            for loc in sorted(h.locations, key=lambda x: x.sort_order)
+            _location_json(loc)
+            for loc in sorted(h.locations, key=lambda x: x.sort_order or 0)
         ],
     }
 
