@@ -2843,6 +2843,8 @@ register(
                 "Moving an old URL scheme to a new one after a redesign",
                 "Stripping a path prefix before it reaches the backend",
             ],
+            # What to type, exactly: everything nginx wants after the word
+            # rewrite.  One rule per line.
             example="^/old/(.*)$ /new/$1 permanent",
             example_config="rewrite ^/old/(.*)$ /new/$1 permanent;",
             docs_url=f"{D}/http/ngx_http_rewrite_module.html#rewrite",
@@ -2873,7 +2875,11 @@ register(
                 "Fixing absolute http:// links from a legacy app that does not know it is behind TLS",
                 "Swapping an internal hostname for the public one in returned HTML",
             ],
-            example="http://internal.example.com replaced with https://www.example.com",
+            # A rule is everything nginx wants after the word sub_filter: the
+            # text to find and the text to put there, both quoted.  The example
+            # used to be a sentence describing that, which reads well and is
+            # not something anybody can type into the box.
+            example="'http://internal.example.com' 'https://www.example.com'",
             example_config=(
                 "sub_filter 'http://internal.example.com' 'https://www.example.com';\n"
                 "sub_filter_once off;\n"

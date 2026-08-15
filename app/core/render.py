@@ -138,6 +138,44 @@ def map_value(value) -> str:
     return '"' + text.replace('"', '\\"') + '"'
 
 
+def directive_args(value, what: str) -> str:
+    r"""
+    A line of arguments written straight after a directive name.
+
+    For the settings whose value *is* the rest of the directive: a rewrite rule
+    is `^/old/(.*)$ /new/$1 last`, three arguments, and a sub_filter rule is two
+    quoted strings.  They cannot go through `esc`, which quotes the lot into a
+    single argument and refuses backslashes outright, and almost every rewrite
+    worth writing has a backslash in it.  Same lesson as `map_value` in the maps
+    work, one layer along.
+
+    So it is written as typed, and what is refused is only what breaks out of
+    the directive: a semicolon or a brace ends it early and starts writing
+    config of somebody's choosing, a newline does the same, and a `#` turns the
+    rest of the line into a comment, which silently drops half the rule.
+
+    A trailing single backslash escapes whatever nginx reads next, so it goes
+    too, the same as in a map value.
+    """
+    text = "" if value is None else str(value).strip()
+    if not text:
+        raise ValueError(f"an empty {what} is not a rule")
+
+    if re.search(r"[;{}\n\r]", text):
+        raise ValueError(
+            f"a {what} cannot contain a semicolon, a brace or a newline: {text!r}")
+    if "#" in text:
+        raise ValueError(
+            f"a {what} cannot contain a #, which nginx reads as the start of a "
+            f"comment and would drop the rest of the rule: {text!r}")
+
+    trailing = len(text) - len(text.rstrip("\\"))
+    if trailing % 2:
+        raise ValueError(f"a {what} cannot end in a single backslash: {text!r}")
+
+    return text
+
+
 def esc_header_value(value) -> str:
     """
     A response header value, which is allowed to contain semicolons.
@@ -1368,6 +1406,14 @@ map $cookie_{cookie} $sticky_set_{var} {{
         # limit set on the site should cover the whole site.
         lines.extend(self._limit_lines(cfg, indent=4))
 
+        # Rewrites and text replacement, both set on the site.
+        #
+        # A rewrite at this level runs before nginx picks a location, which is
+        # what somebody typing one at the site level means by it.
+        lines.extend(self._rewrite_lines(cfg, indent=4))
+        lines.extend(self._sub_filter_lines(
+            cfg, indent=4, proxying=(host.mode == "proxy" and host.pool is not None)))
+
         if cfg.get("server_tokens") is not None:
             lines.append(f"    server_tokens {'on' if cfg.get('server_tokens') else 'off'};")
 
@@ -1468,6 +1514,75 @@ map $cookie_{cookie} $sticky_set_{var} {{
             for line in host.custom_config.splitlines():
                 lines.append(f"    {line}")
 
+        return lines
+
+    def _rewrite_lines(self, cfg, indent=4) -> list:
+        """
+        The rewrite rules somebody typed, written out.
+
+        A rule that is wrong is left out with a comment naming it, rather than
+        raising.  A raise here stops the whole render, which stops every
+        unrelated change on every node until somebody works out which rule on
+        which site is to blame: the same failure the Content-Security-Policy
+        setting and the first real map both caused.
+        """
+        pad = " " * indent
+        lines = []
+        for rule in cfg.get("rewrite_rules") or []:
+            try:
+                lines.append(f"{pad}rewrite {directive_args(rule, 'rewrite rule')};")
+            except ValueError as exc:
+                log.warning("dropping a rewrite rule: %s", exc)
+                lines.append(f"{pad}# rewrite rule left out, {exc}")
+        return lines
+
+    def _sub_filter_lines(self, cfg, indent=4, proxying=False) -> list:
+        """
+        Text replacement on the way out, and the two things that make it work.
+
+        `sub_filter` on its own replaces the first match in a text/html response
+        and nothing else, which is not what anybody means by find and replace,
+        so `sub_filter_once off` goes with it.
+
+        The one that actually decides whether this works at all is
+        Accept-Encoding.  A backend that gzips its answer, which most do, sends
+        bytes nginx cannot search, and the filter quietly does nothing: the
+        setting is on, the config is valid, and the page comes through
+        unchanged.  So when the traffic is proxied we ask the backend for plain
+        text.  It costs bandwidth between here and the backend and it is the
+        only way the feature is honest.
+        """
+        pad = " " * indent
+        rules = cfg.get("sub_filter_rules") or []
+        if not rules:
+            return []
+
+        # The module has to be in the build.  It is in ours, but a fleet is
+        # entitled to an nginx without it, and writing sub_filter there is a
+        # config that will not load: every site down, because of one setting on
+        # one of them.  Saying so in the file beats that by a mile.
+        if not self.has_module("http_sub_module"):
+            log.warning("sub_filter rules set but this nginx has no sub module")
+            return [f"{pad}# Text replacement is set on this site, and this "
+                    f"nginx was built without",
+                    f"{pad}# the sub module, so it cannot be written."]
+
+        lines = []
+        for rule in rules:
+            try:
+                lines.append(f"{pad}sub_filter {directive_args(rule, 'replacement rule')};")
+            except ValueError as exc:
+                log.warning("dropping a sub_filter rule: %s", exc)
+                lines.append(f"{pad}# replacement rule left out, {exc}")
+
+        if not any(ln.strip().startswith("sub_filter ") for ln in lines):
+            return lines            # nothing usable, so nothing to set up for
+
+        lines.append(f"{pad}sub_filter_once off;")
+        if proxying:
+            lines.append(f"{pad}# Ask the backend not to compress, or there is")
+            lines.append(f"{pad}# nothing readable here to replace.")
+            lines.append(f'{pad}proxy_set_header Accept-Encoding "";')
         return lines
 
     def _limit_lines(self, cfg, indent=4) -> list:
@@ -1754,6 +1869,13 @@ map $cookie_{cookie} $sticky_set_{var} {{
         # from the site, since nginx inherits the server block's otherwise.
         if loc_only.get("limit_req_zone_name") or loc_only.get("limit_conn_zone_name"):
             lines.extend(self._limit_lines(cfg, indent=8))
+
+        # Only this path's own rules.  Everything else in cfg is inherited from
+        # the site, and nginx already inherits those into the location on its
+        # own: writing them again here would run each rule twice.
+        lines.extend(self._rewrite_lines(loc_only, indent=8))
+        lines.extend(self._sub_filter_lines(
+            loc_only, indent=8, proxying=(loc.mode == "proxy" and loc.pool is not None)))
 
         if loc.mode == "proxy" and loc.pool:
             lines.extend(self._proxy_lines(
