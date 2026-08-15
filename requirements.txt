@@ -42,3 +42,12 @@ APScheduler==3.11.0
 
 # Metrics for Prometheus
 prometheus-client==0.21.1
+
+# Backups.  A zip that any tool can open, encrypted with AES-256.
+#
+# Not the zip format's own encryption, which is ZipCrypto and is broken by a
+# known plaintext attack.  A backup here is full of PEM files, which is more
+# known plaintext than anybody needs.  The standard library can read an
+# encrypted zip and cannot write one, hence a package.
+pyzipper==0.3.6
+pycryptodomex==3.21.0        # the AES underneath pyzipper, pinned with it
