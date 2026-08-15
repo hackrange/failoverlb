@@ -2138,6 +2138,100 @@ def _wg_available():
     return shutil.which("wg") is not None
 
 
+# Installing what the tunnel needs, handed to systemd for the same reason the
+# nginx build is.  See nfm-tunnel-install.service.
+TUNNEL_INSTALL_UNIT = "nfm-tunnel-install.service"
+TUNNEL_INSTALL_SCRIPT = Path("/opt/nfm-tunnel-installer.sh")
+TUNNEL_INSTALL_RESULT = Path("/run/nginxmgr/tunnel-install.result")
+TUNNEL_INSTALL_LOG = Path("/var/log/nginx-fleet-manager-tunnel-install.log")
+
+
+def _tunnel_ready():
+    """
+    Whether this node can actually run the tunnel, asked rather than assumed.
+
+    The script is the one place that knows what the answer depends on, so it
+    gets asked instead of this guessing from the presence of a binary.  A node
+    with the tools and no datapath looks installed and carries nothing.
+    """
+    if not TUNNEL_INSTALL_SCRIPT.is_file():
+        return {"ready": _wg_available(), "detail": "", "checked": False}
+    out = run([str(TUNNEL_INSTALL_SCRIPT), "check"], timeout=60)
+    return {"ready": out["rc"] == 0,
+            "detail": (out["stdout"] or out["stderr"] or "").strip()[-1500:],
+            "checked": True}
+
+
+def v_tunnel_install(req):
+    """
+    Install what the tunnel needs on this node.
+
+    Starts the unit and returns.  Installing takes as long as a package
+    manager takes, which is longer than a request should wait, so the GUI asks
+    how it is going rather than holding the connection open.
+    """
+    if not _have_systemd():
+        raise AgentError(
+            "there is no systemd here, so this has to be installed by hand: "
+            "the package is wireguard-tools", "unsupported")
+    if not TUNNEL_INSTALL_SCRIPT.is_file():
+        raise AgentError(
+            f"{TUNNEL_INSTALL_SCRIPT} is not on this node, so it was installed "
+            f"before this existed.  Run install.sh --upgrade there.", "unsupported")
+
+    state = _tunnel_ready()
+    if state["ready"]:
+        return {"ok": True, "already": True, "detail": state["detail"]}
+
+    active = run(["systemctl", "is-active", "--quiet", TUNNEL_INSTALL_UNIT],
+                 timeout=15)["rc"] == 0
+    if active:
+        return {"ok": True, "started": False, "running": True}
+
+    # The old result, gone before the new run, so a stale one cannot be read as
+    # this one finishing instantly.
+    try:
+        TUNNEL_INSTALL_RESULT.unlink()
+    except OSError:
+        pass
+
+    out = run(["systemctl", "start", "--no-block", TUNNEL_INSTALL_UNIT], timeout=30)
+    if out["rc"] != 0:
+        detail = (out["stderr"] or out["stdout"] or "").strip()[:300]
+        raise AgentError(f"could not start the install: {detail or 'no detail'}",
+                         "failed")
+
+    return {"ok": True, "started": True, "running": True}
+
+
+def v_tunnel_install_status(req):
+    """How the install is going, what it said, and whether this node is ready."""
+    running = False
+    if _have_systemd():
+        running = run(["systemctl", "is-active", "--quiet", TUNNEL_INSTALL_UNIT],
+                      timeout=15)["rc"] == 0
+
+    result = ""
+    if TUNNEL_INSTALL_RESULT.is_file():
+        try:
+            result = TUNNEL_INSTALL_RESULT.read_text(errors="replace").strip()
+        except OSError:
+            pass
+
+    tail = ""
+    if TUNNEL_INSTALL_LOG.is_file():
+        try:
+            lines = TUNNEL_INSTALL_LOG.read_text(errors="replace").splitlines()
+            tail = "\n".join(lines[-int(req.get("lines", 40)):])
+        except OSError:
+            pass
+
+    state = _tunnel_ready()
+    return {"running": running, "result": result, "log_tail": tail,
+            "ready": state["ready"], "detail": state["detail"],
+            "installed": _wg_available()}
+
+
 def v_tunnel_key(req):
     """
     This node's tunnel key pair, made once and kept.
@@ -2346,6 +2440,8 @@ VERBS = {
     "acme_register_test": v_acme_register_test,
     "tunnel_key": v_tunnel_key,
     "tunnel_apply": v_tunnel_apply,
+    "tunnel_install": v_tunnel_install,
+    "tunnel_install_status": v_tunnel_install_status,
     "tunnel_status": v_tunnel_status,
     "tunnel_down": v_tunnel_down,
     "cert_list": v_cert_list,

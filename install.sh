@@ -349,6 +349,21 @@ install -m 0644 "$SCRIPT_DIR/host-agent/nginx-rebuild.service" \
 install -m 0644 "$SCRIPT_DIR/host-agent/nginx-revert.service" \
         /etc/systemd/system/nginx-revert.service
 
+# The tunnel install unit, and the script it runs.  Same shape and the same
+# reason: a package manager writes where the agent is not allowed to.
+#
+# These go on every box even when the tunnel is off, which is not the same
+# decision as installing wireguard itself.  A unit file and a script that do
+# nothing until asked are how somebody turns the tunnel on later without
+# finding a shell; the package is the part that waits to be wanted.
+install -m 0644 "$SCRIPT_DIR/host-agent/nfm-tunnel-install.service" \
+        /etc/systemd/system/nfm-tunnel-install.service
+if [[ -f "$SCRIPT_DIR/tunnel-installer.sh" ]]; then
+    install -m 0700 "$SCRIPT_DIR/tunnel-installer.sh" /opt/nfm-tunnel-installer.sh
+else
+    warn "No tunnel-installer.sh in this folder, so the tunnel cannot be set up from the GUI."
+fi
+
 # Both units name the installer by its shipped path.  If it lives somewhere
 # else on this box, point them at it, the same as the agent unit above.
 if [[ -f "$INSTALLER_PATH" && "$INSTALLER_PATH" != "/opt/nginx-installer.sh" ]]; then

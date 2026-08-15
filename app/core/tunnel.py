@@ -107,6 +107,72 @@ def next_free_address(session, network):
     raise ValueError(f"there is no room left in {network.cidr}")
 
 
+async def install_on_fleet():
+    """
+    Ask every node to install what the tunnel needs.
+
+    Every node, not the one somebody happens to be looking at.  A workload
+    peers with all of them so it can survive one going away, and a node that
+    cannot carry the tunnel is a failover that does not work, discovered at
+    the worst moment.
+    """
+    me = get_settings().node_name
+    cluster = get_cluster()
+    started, failed = {}, {}
+
+    try:
+        answer = await get_agent().call("tunnel_install", timeout=60)
+        started[me] = (answer.get("data") or answer)
+    except Exception as exc:
+        failed[me] = str(exc)
+
+    with session_scope() as session:
+        peers = [(p.name, PeerClient(p, cluster.ca)) for p in cluster.peers(session)]
+
+    for node_name, client in peers:
+        try:
+            answer = await client.call("/peer/agent",
+                                       {"verb": "tunnel_install", "payload": {}})
+            started[node_name] = (answer.get("data") or answer)
+        except Exception as exc:
+            failed[node_name] = str(exc)
+
+    return {"ok": not failed, "started": started, "failed": failed}
+
+
+async def install_status():
+    """What each node has, and how any install in flight is going."""
+    me = get_settings().node_name
+    cluster = get_cluster()
+    nodes = {}
+
+    try:
+        answer = await get_agent().call("tunnel_install_status", timeout=90)
+        nodes[me] = (answer.get("data") or answer)
+    except Exception as exc:
+        nodes[me] = {"error": str(exc), "ready": False, "running": False}
+
+    with session_scope() as session:
+        peers = [(p.name, PeerClient(p, cluster.ca)) for p in cluster.peers(session)]
+
+    for node_name, client in peers:
+        try:
+            answer = await client.call(
+                "/peer/agent", {"verb": "tunnel_install_status", "payload": {}})
+            nodes[node_name] = (answer.get("data") or answer)
+        except Exception as exc:
+            # A node we cannot ask is not a node that is ready.  Saying so
+            # beats leaving it out and letting the page imply everything is
+            # fine because nothing said otherwise.
+            nodes[node_name] = {"error": str(exc), "ready": False, "running": False}
+
+    return {
+        "nodes": nodes,
+        "all_ready": all(n.get("ready") for n in nodes.values()) if nodes else False,
+        "any_running": any(n.get("running") for n in nodes.values()),
+    }
+
+
 def endpoint_host(node) -> str:
     """
     Pick the address a workload should dial to reach this node.

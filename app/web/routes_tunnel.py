@@ -155,6 +155,36 @@ async def set_tunnel(request: Request, g: ObjectGuard = Depends(changing)):
         return _network_json(fresh, s)
 
 
+@router.get("/api/tunnel/install")
+async def tunnel_install_status(g: ObjectGuard = Depends(guard)):
+    """What each node has, so the page can offer the button only when it helps."""
+    return await tunnel.install_status()
+
+
+@router.post("/api/tunnel/install")
+async def tunnel_install(g: ObjectGuard = Depends(changing)):
+    """
+    Install what the tunnel needs, on every node.
+
+    Only when the tunnel is on.  Installing a network package on somebody's
+    load balancers is not something to do because a page was open, and the
+    tunnel being switched on is the closest thing there is to being asked.
+    """
+    g.require("manage_cluster")
+
+    network = g.session.query(TunnelNetwork).first()
+    if not network or not network.enabled:
+        raise HTTPException(
+            status_code=400,
+            detail=("turn the tunnel on first.  Nothing is installed for a "
+                    "feature that is switched off."))
+
+    result = await tunnel.install_on_fleet()
+    audit.record("tunnel.install", user=g.user, object_type="tunnel",
+                 object_name=",".join(sorted(result.get("started") or {})) or "none")
+    return result
+
+
 @router.post("/api/tunnel/peers")
 async def add_peer(request: Request, g: ObjectGuard = Depends(changing)):
     """Reserve an address for a workload and mint the ticket it enrols with."""

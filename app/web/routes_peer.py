@@ -487,6 +487,8 @@ PEER_AGENT_VERBS = {
     # private key never comes back out of any of them.
     "tunnel_key",
     "tunnel_apply",
+    "tunnel_install",
+    "tunnel_install_status",
     "tunnel_status",
     "tunnel_down",
     "nginx_upgrade",

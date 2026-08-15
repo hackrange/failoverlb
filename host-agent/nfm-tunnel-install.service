@@ -1,0 +1,50 @@
+# Install what the tunnel needs on this box, on request from the GUI.
+#
+# Same shape and the same reason as nginx-rebuild.service.  The agent runs with
+# ProtectSystem=strict and a short list of writable paths, and a child process
+# inherits that sandbox, so it cannot run a package manager.  That hardening is
+# worth keeping: it stands behind every other verb, none of which needs to
+# write outside nginx config, certificates and its own socket.
+#
+# So this runs as its own unit, with no sandboxing, and it is deliberately a
+# file you can read before you install it rather than something the agent
+# assembles at run time.  What it runs is one script that installs
+# wireguard-tools, and wireguard-go if the kernel has no wireguard of its own.
+
+[Unit]
+Description=Install tunnel support for the fleet manager
+Documentation=file:///opt/nfm-tunnel-installer.sh
+
+[Service]
+Type=oneshot
+
+ExecStart=/opt/nfm-tunnel-installer.sh install
+
+# How it went, written where the agent can read it.
+#
+# The agent cannot ask systemd afterwards.  A oneshot unit that has finished
+# and is not referenced by anything gets unloaded, and its result properties
+# all read as zero, so an install that succeeded ten seconds ago looks exactly
+# like one that never ran.  The unit records its own outcome instead, and this
+# file existing is what says the install is over.  The agent deletes it before
+# asking for another.
+ExecStopPost=/bin/sh -c 'echo "${SERVICE_RESULT} ${EXIT_STATUS}" > /run/nginxmgr/tunnel-install.result'
+
+# Both streams to one file.  An install that fails does so in stderr, and half
+# the story is worse than none: the useful part here is usually the apt error
+# or the note about /dev/net/tun, and both arrive that way.
+StandardOutput=append:/var/log/nginx-fleet-manager-tunnel-install.log
+StandardError=append:/var/log/nginx-fleet-manager-tunnel-install.log
+
+# Minutes, not the hour a source build gets.  This fetches two small packages.
+# Long enough for a slow mirror, short enough that a wedged apt does not sit
+# there holding the page open.
+TimeoutStartSec=600
+
+# Not RemainAfterExit.  The agent asks systemd whether this is still running to
+# decide whether the install has finished, and a unit that stays active after
+# it exits would read as one that never ends.
+RemainAfterExit=no
+
+[Install]
+WantedBy=multi-user.target

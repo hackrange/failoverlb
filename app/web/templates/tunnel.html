@@ -40,6 +40,11 @@
   </div>
 </div>
 
+<div class="card" id="install-card" hidden>
+  <div class="card-head"><h2>Tunnel support</h2></div>
+  <div class="card-body" id="install-body"></div>
+</div>
+
 <div class="card" id="workload-card" hidden>
   <div class="card-head"><h2>Workloads</h2></div>
   <div class="card-body no-pad">
@@ -86,6 +91,7 @@ document.addEventListener("DOMContentLoaded", function () {
     }
     drawSetup();
     drawWorkloads();
+    loadInstall();
   }
 
   function drawSetup() {
@@ -203,6 +209,116 @@ document.addEventListener("DOMContentLoaded", function () {
       NFM.toast("Saved.  The load balancers are setting it up now.", "ok");
       load();
     });
+  }
+
+  // What each load balancer needs before it can carry a tunnel, and a button
+  // to put it there.
+  //
+  // Only shown when the tunnel is on and something is missing.  A load
+  // balancer is somebody's production box, and installing a network package
+  // on one because a page happened to be open is not a decision this page
+  // gets to make on its own.
+  let INSTALL = null;
+  let INSTALL_POLL = null;
+
+  async function loadInstall() {
+    if (!STATE || !STATE.network || !STATE.network.enabled) {
+      el("install-card").hidden = true;
+      return;
+    }
+    try {
+      INSTALL = await NFM.api("/tunnel/install");
+    } catch (err) {
+      el("install-card").hidden = true;
+      return;
+    }
+    drawInstall();
+  }
+
+  function drawInstall() {
+    const nodes = (INSTALL && INSTALL.nodes) || {};
+    const names = Object.keys(nodes).sort();
+
+    el("install-card").hidden = false;
+
+    // When everything is ready this stays, as one line rather than nothing.
+    // Hiding it would be tidier and would also mean the only place that says
+    // what a load balancer needs disappears exactly when somebody goes
+    // looking to check.
+    if (INSTALL.all_ready && !INSTALL.any_running) {
+      el("install-body").innerHTML = names.map(function (name) {
+        return '<div class="small node-line"><span class="dot ok"></span>' +
+          "<strong>" + esc(name) + '</strong> <span class="faint">' +
+          "can carry the tunnel</span></div>";
+      }).join("");
+      return;
+    }
+
+    let html = "";
+    if (INSTALL.any_running) {
+      html += '<div class="notice info"><div>Installing.  This takes as long ' +
+        "as fetching a package takes, and the page keeps up with it.</div></div>";
+    } else {
+      html += '<div class="notice warn"><div>The tunnel is on, but not every ' +
+        "load balancer can carry it yet.  A workload connects to all of them, " +
+        "so one that cannot is a failover that will not work.</div></div>";
+    }
+
+    names.forEach(function (name) {
+      const n = nodes[name] || {};
+      const state = n.ready ? "ok" : (n.running ? "wait" : "off");
+      const words = n.error ? ("could not be asked: " + esc(n.error))
+        : (n.running ? "installing now"
+          : (n.ready ? "ready" : "cannot carry the tunnel yet"));
+      html += '<div class="small node-line"><span class="dot ' + state +
+        '"></span><strong>' + esc(name) + "</strong> " +
+        '<span class="faint">' + words + "</span></div>";
+      if (!n.ready && n.detail) {
+        html += '<pre class="cmd mono">' + esc(n.detail) + "</pre>";
+      }
+    });
+
+    if (CAN_EDIT && !INSTALL.any_running) {
+      html += '<div class="mt"><button class="btn primary" id="install-go">' +
+        "Install tunnel support</button></div>";
+      html += '<div class="hint">Installs wireguard on each load balancer, and ' +
+        "the userspace version where the kernel has none.  Nothing else is " +
+        "changed and nothing is removed.</div>";
+    }
+
+    el("install-body").innerHTML = html;
+
+    const go = el("install-go");
+    if (go) {
+      go.addEventListener("click", async function () {
+        go.disabled = true;
+        try { await NFM.api("/tunnel/install", { method: "POST" }); }
+        catch (err) { NFM.toast(err.message, "bad"); go.disabled = false; return; }
+        NFM.toast("Installing", "ok");
+        watchInstall();
+      });
+    }
+  }
+
+  // Poll while it runs, and stop when it stops.  An interval left running
+  // after the page has moved on is a page that keeps asking forever.
+  function watchInstall() {
+    if (INSTALL_POLL) { clearInterval(INSTALL_POLL); }
+    INSTALL_POLL = setInterval(async function () {
+      try { INSTALL = await NFM.api("/tunnel/install"); }
+      catch (err) { return; }
+      drawInstall();
+      if (!INSTALL.any_running) {
+        clearInterval(INSTALL_POLL);
+        INSTALL_POLL = null;
+        if (INSTALL.all_ready) {
+          NFM.toast("Every load balancer can carry the tunnel now", "ok");
+          load();
+        } else {
+          NFM.toast("Finished, but not every node is ready.  See the detail.", "bad");
+        }
+      }
+    }, 3000);
   }
 
   function drawWorkloads() {
