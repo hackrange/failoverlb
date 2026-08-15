@@ -1406,6 +1406,20 @@ map $cookie_{cookie} $sticky_set_{var} {{
         # limit set on the site should cover the whole site.
         lines.extend(self._limit_lines(cfg, indent=4))
 
+        lines.extend(self._serving_lines(cfg, indent=4))
+
+        # Which resolver nginx uses when it has to look a name up while it is
+        # running.  Several arguments, so it goes through the same writer as a
+        # rewrite rule: esc would quote the lot into one and nginx would read
+        # "1.1.1.1 8.8.8.8 valid=300s" as a single nameserver.
+        resolver = (cfg.get("resolver") or "").strip()
+        if resolver:
+            try:
+                lines.append(f"    resolver {directive_args(resolver, 'resolver')};")
+            except ValueError as exc:
+                log.warning("dropping the resolver setting: %s", exc)
+                lines.append(f"    # resolver left out, {exc}")
+
         # Rewrites and text replacement, both set on the site.
         #
         # A rewrite at this level runs before nginx picks a location, which is
@@ -1513,6 +1527,41 @@ map $cookie_{cookie} $sticky_set_{var} {{
             lines.append("    # Custom config from the manager")
             for line in host.custom_config.splitlines():
                 lines.append(f"    {line}")
+
+        return lines
+
+    def _serving_lines(self, cfg, indent=4) -> list:
+        """
+        The three switches about how files are served, wherever they are set.
+
+        All present in the catalog for years and none of them ever written, so
+        turning any of them on did nothing at all.  They are one line each,
+        except the file cache, which is three: nginx has no `open_file_cache
+        on`, it wants a size, and the two that go with it are what make the
+        cache safe to have.
+        """
+        pad = " " * indent
+        lines = []
+
+        if cfg.get("sendfile") is not None:
+            lines.append(f"{pad}sendfile {'on' if cfg.get('sendfile') else 'off'};")
+
+        if cfg.get("log_not_found") is not None:
+            lines.append(
+                f"{pad}log_not_found {'on' if cfg.get('log_not_found') else 'off'};")
+
+        if cfg.get("open_file_cache") is not None:
+            if cfg.get("open_file_cache"):
+                # The numbers the catalog's own example gives, since the setting
+                # is a switch and nginx wants a size.  Short validity on
+                # purpose: the trap with this cache is a deploy that puts new
+                # files down while nginx keeps serving the old ones.
+                lines.append(f"{pad}open_file_cache max=10000 inactive=20s;")
+                lines.append(f"{pad}open_file_cache_valid 30s;")
+                lines.append(f"{pad}open_file_cache_min_uses 2;")
+                lines.append(f"{pad}open_file_cache_errors on;")
+            else:
+                lines.append(f"{pad}open_file_cache off;")
 
         return lines
 
@@ -1869,6 +1918,8 @@ map $cookie_{cookie} $sticky_set_{var} {{
         # from the site, since nginx inherits the server block's otherwise.
         if loc_only.get("limit_req_zone_name") or loc_only.get("limit_conn_zone_name"):
             lines.extend(self._limit_lines(cfg, indent=8))
+
+        lines.extend(self._serving_lines(loc_only, indent=8))
 
         # Only this path's own rules.  Everything else in cfg is inherited from
         # the site, and nginx already inherits those into the location on its
