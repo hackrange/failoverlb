@@ -53,15 +53,30 @@
               {% if u.full_name %}<div class="small faint">{{ u.full_name }}</div>{% endif %}
             </td>
             <td>
-              <form method="post" action="{{ base }}/users/{{ u.id }}/role" style="margin:0">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                <select name="role" onchange="this.form.submit()"
-                        style="padding:3px 6px; font-size:0.8rem; width:auto">
-                  <option value="viewer"   {{ 'selected' if u.role.value == 'viewer' }}>viewer</option>
-                  <option value="operator" {{ 'selected' if u.role.value == 'operator' }}>operator</option>
-                  <option value="admin"    {{ 'selected' if u.role.value == 'admin' }}>admin</option>
-                </select>
-              </form>
+              {# Your own role is shown and not offered.  Changing it is the
+                 one thing on this page that can take away the permission you
+                 are using, and the route refuses it, so there is no reason to
+                 put a control here that cannot work. #}
+              {% if u.id == user.id %}
+                <span class="badge neutral">{{ u.role.value }}</span>
+                <div class="small faint">your own</div>
+              {% else %}
+                <form method="post" action="{{ base }}/users/{{ u.id }}/role"
+                      style="margin:0" data-role-form
+                      data-username="{{ u.username }}">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                  {# No inline onchange.  The page sends a Content Security
+                     Policy with a nonce and no unsafe-inline, so an attribute
+                     handler is never run and the dropdown silently did
+                     nothing.  It is bound in the script at the bottom. #}
+                  <select name="role" data-was="{{ u.role.value }}"
+                          style="padding:3px 6px; font-size:0.8rem; width:auto">
+                    <option value="viewer"   {{ 'selected' if u.role.value == 'viewer' }}>viewer</option>
+                    <option value="operator" {{ 'selected' if u.role.value == 'operator' }}>operator</option>
+                    <option value="admin"    {{ 'selected' if u.role.value == 'admin' }}>admin</option>
+                  </select>
+                </form>
+              {% endif %}
             </td>
             <td class="small faint">{{ 'local' if u.source.value == 'local' else 'single sign on' }}</td>
             <td>
@@ -111,6 +126,20 @@ Only do this when you are sure who you are talking to.">
                   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                   <input type="hidden" name="enabled" value="{{ 'false' if u.enabled else 'true' }}">
                   <button type="submit" class="btn sm">{{ 'Disable' if u.enabled else 'Enable' }}</button>
+                </form>
+                {# Not on your own row.  Deleting the account you are signed in
+                   as is refused by the route, and offering it is an invitation
+                   to find that out the hard way. #}
+                <form method="post" action="{{ base }}/users/{{ u.id }}/delete"
+                      style="display:inline" data-confirm="Delete {{ u.username }}?
+
+The account goes, and every session it has open stops working at once.  It cannot be undone: a new account with the same name is a different account.
+
+What they did stays in the audit log under their username, so the record of it is not lost.
+
+If they are only going away for a while, Disable does that and can be undone.">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                  <button type="submit" class="btn sm danger">Delete</button>
                 </form>
               {% endif %}
             </td>
@@ -164,6 +193,24 @@ Their sessions all get signed out at the same time.</p>
 Every reset is written to the audit log with your name on it.</p>
   </div>
   <div class="help-section">
+    <h4>Disable or delete</h4>
+    <p>Disable is the usual answer.  The account cannot sign in, everything it
+       did stays where it is, and turning it back on is one click.  That is what
+       somebody on leave or between jobs needs.</p>
+    <p>Delete is for an account that should never have existed.  It goes for
+       good, along with every session it has open, and a new account with the
+       same name is a different account.  What they did stays in the audit log
+       under their username, so the record of it survives them.</p>
+  </div>
+  <div class="help-section">
+    <h4>Your own account</h4>
+    <p>You cannot change your own role or delete yourself, and the page does not
+       offer either.  Both are ways to lock yourself out of this page while
+       standing on it.  Ask another admin.</p>
+    <p>Resetting your own authenticator is allowed, because that one you can do
+       for yourself and nobody else should have to.</p>
+  </div>
+  <div class="help-section">
     <h4>The last admin</h4>
     <p>The tool will not let you disable, delete or demote the only remaining
        enabled admin.  An empty admin list means nobody can fix anything and the
@@ -185,6 +232,37 @@ document.addEventListener("DOMContentLoaded", function () {
     if (!window.confirm(form.getAttribute("data-confirm"))) {
       e.preventDefault();
     }
+  });
+
+  // Changing a role.
+  //
+  // Bound here rather than written on the tag.  This page is served with a
+  // Content Security Policy that allows scripts from this origin and a nonce,
+  // which means an inline onchange attribute is never run: the dropdown moved,
+  // nothing was sent, and the account kept the role it had.
+  //
+  // It asks first, because it is not an ordinary edit.  A role change signs
+  // that account out of every session it has open, and a dropdown that acts
+  // the instant it moves is one stray scroll away from doing that to somebody
+  // mid change.  Saying no puts the dropdown back where it was.
+  document.body.addEventListener("change", function (e) {
+    const select = e.target.closest("form[data-role-form] select[name=role]");
+    if (!select) return;
+
+    const form = select.closest("form");
+    const who = form.getAttribute("data-username");
+    const was = select.getAttribute("data-was");
+    const now = select.value;
+    if (now === was) return;
+
+    const message = "Make " + who + " " + (now === "admin" ? "an " : "a ") + now +
+      "?\n\nThey are signed out of every session, so the new permissions " +
+      "apply straight away rather than whenever they next sign in.";
+    if (!window.confirm(message)) {
+      select.value = was;
+      return;
+    }
+    form.submit();
   });
 
   document.getElementById("new-user").addEventListener("click", function () {

@@ -482,6 +482,11 @@ async def admin_set_role(user_id: int, request: Request,
     target = db.query(User).filter(User.id == int(user_id)).first()
     if not target:
         raise HTTPException(status_code=404, detail="not found")
+    # Not your own, the same as deleting.  An admin who demotes themselves is
+    # locked out of the page they are standing on, and the way back is a shell
+    # on the box.  The page does not offer it either.
+    if target.id == actor.id:
+        return _users_back("you cannot change your own role")
 
     try:
         new_role = UserRole(role)

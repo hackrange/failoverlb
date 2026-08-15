@@ -204,6 +204,26 @@ def main():
           f"these run their script too early, so NFM is undefined and the page "
           f"quietly does nothing: {sorted(set(unwrapped))}")
 
+    # An event handler written on the tag cannot run here.
+    #
+    # Every page is served with script-src 'self' and a nonce, and no
+    # unsafe-inline, so the browser refuses to execute an onclick or an
+    # onchange attribute.  The control still looks right and does nothing at
+    # all: the role dropdown on this very page moved for months and never sent
+    # anything, because that is what the failure looks like.
+    #
+    # Same shape as the check above, and the same reason for reading templates
+    # rather than waiting for somebody to notice.
+    inline = []
+    for path in sorted(template_dir.glob("*.html")):
+        for match in re.finditer(r"<[a-zA-Z][^>]*?\son([a-z]+)\s*=\s*[\"']",
+                                 path.read_text()):
+            inline.append(f"{path.name}: on{match.group(1)}")
+
+    check("no page puts an event handler on the tag", not inline,
+          f"the page's own CSP refuses to run these, so the control does "
+          f"nothing: {sorted(set(inline))}")
+
     failed = [name for name, ok, _ in results if not ok]
 
     # Prove the run actually reached the app.  If the allow list or the session
