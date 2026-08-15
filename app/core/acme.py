@@ -340,6 +340,36 @@ class CertificateManager:
             cert_name = cert.name
             propagation = cert.dns_propagation_seconds
 
+            # Which authority, read off the certificate rather than off a
+            # setting.
+            #
+            # This is what makes a renewal go back to whoever issued it.  A
+            # certificate bought from one authority that quietly renews from
+            # another is a change nobody asked for, and the first sign of it is
+            # a browser complaining about an issuer somebody did not choose.
+            #
+            # Read here, inside the session, with everything else this function
+            # needs.  Reaching for cert.authority further down is a lazy load on
+            # a row whose session has closed, which is a DetachedInstanceError
+            # and a 500 on the page: every Lets Encrypt request on this fleet
+            # failed that way, including the ones that have no authority at all.
+            authority = cert.authority
+            if authority is not None:
+                if not authority.enabled:
+                    raise AcmeError(
+                        f"the authority {authority.name} is turned off, so this "
+                        f"certificate cannot be renewed from it.  Turn it back on, "
+                        f"or point the certificate at another one.")
+                issuer_settings = {
+                    "directory": (authority.directory_url or "").strip(),
+                    "eab_kid": (authority.eab_kid or "").strip(),
+                    "eab_hmac": (decrypt(authority.eab_hmac_key_encrypted) or ""
+                                 if authority.eab_hmac_key_encrypted else ""),
+                    "preferred_chain": (authority.preferred_chain or "").strip(),
+                }
+            else:
+                issuer_settings = None
+
             cert.last_renewal_attempt = utcnow()
             session.commit()
 
@@ -377,24 +407,11 @@ class CertificateManager:
         # ---- run it ----------------------------------------------------------
         ca_bundle = settings_store.get("acme_ca_bundle")
 
-        # Which authority, read off the certificate rather than off a setting.
-        #
-        # This is what makes a renewal go back to whoever issued it.  A
-        # certificate bought from one authority that quietly renews from
-        # another is a change nobody asked for, and the first sign of it is a
-        # browser complaining about an issuer somebody did not choose.
-        authority = cert.authority
-        if authority is not None:
-            directory = (authority.directory_url or "").strip()
-            eab_kid = (authority.eab_kid or "").strip()
-            eab_hmac = decrypt(authority.eab_hmac_key_encrypted) or "" \
-                if authority.eab_hmac_key_encrypted else ""
-            preferred_chain = (authority.preferred_chain or "").strip()
-            if not authority.enabled:
-                raise AcmeError(
-                    f"the authority {authority.name} is turned off, so this "
-                    f"certificate cannot be renewed from it.  Turn it back on, "
-                    f"or point the certificate at another one.")
+        if issuer_settings is not None:
+            directory = issuer_settings["directory"]
+            eab_kid = issuer_settings["eab_kid"]
+            eab_hmac = issuer_settings["eab_hmac"]
+            preferred_chain = issuer_settings["preferred_chain"]
         else:
             # Lets Encrypt, which needs no credentials and is the default.
             directory = (settings_store.get("acme_directory_url") or "").strip()
