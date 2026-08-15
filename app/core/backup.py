@@ -421,6 +421,29 @@ async def restore_all(data: dict, author: str = "restore") -> dict:
         result["dns"] = _retarget_gslb(session)
         session.commit()
 
+    # 1b. The settings, out to every other node.
+    #
+    # These have always been node local, which is survivable while somebody
+    # sets them on the box in front of them, and not survivable after a
+    # restore: a standby with no acme email and no resolvers looks ready and
+    # behaves differently the moment it is promoted.  A restore is supposed to
+    # leave every node able to do the job.
+    result["settings_to_peers"] = {"ok": [], "failed": {}}
+    try:
+        from app.core.cluster import PeerClient, get_cluster
+        cluster = get_cluster()
+        with session_scope() as session:
+            rows = _capture_settings(session)
+            peers = [(p.name, PeerClient(p, cluster.ca)) for p in cluster.peers(session)]
+        for node_name, client in peers:
+            try:
+                await client.call("/peer/settings", {"settings": rows})
+                result["settings_to_peers"]["ok"].append(node_name)
+            except Exception as exc:
+                result["settings_to_peers"]["failed"][node_name] = str(exc)
+    except Exception as exc:
+        result["settings_to_peers"]["failed"]["*"] = str(exc)
+
     # 2. The certificate files that were not in the tables, onto this node
     #    first so there is something for the rest of the fleet to be given.
     from app.core.agent_client import get_agent

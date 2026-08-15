@@ -843,3 +843,34 @@ async def roster(request: Request):
                 for n in session.query(Node).all()
             ]
         }
+
+
+@router.post("/peer/settings")
+async def peer_settings(request: Request):
+    """
+    Take the fleet wide settings from the node running a restore.
+
+    Settings have always been node local in this system, which is fine while
+    somebody sets them on the box they are looking at and never fails over.
+    It is not fine after a restore: the whole point is that every node ends up
+    able to do the job, and a standby with no acme email and no resolvers is a
+    node that looks ready and behaves differently the moment it is promoted.
+
+    Values arrive in the clear, as they do everywhere else between peers, and
+    are sealed again here with this node's own key.  The channel is mutual TLS
+    between two nodes holding certificates from the same private CA.
+    """
+    node, payload = await authenticate(request)
+
+    rows = payload.get("settings")
+    if not isinstance(rows, list):
+        raise HTTPException(status_code=400, detail="settings has to be a list")
+
+    from app.core.backup import _restore_settings
+
+    with session_scope() as session:
+        result = _restore_settings(session, rows)
+        session.commit()
+
+    log.info("%s sent us %s settings during a restore", node.name, result["restored"])
+    return {"ok": True, **result}
