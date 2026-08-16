@@ -340,6 +340,10 @@ class Renderer:
         # it and the rest do without.  Per render, because the whole config is
         # written in one pass.
         self._quic_ports = set()
+        # Access lists by id, filled in when sites are rendered.  A path can
+        # carry its own, and the code that writes a path is too far down to be
+        # handed the map.
+        self.acl_by_id = {}
         self.files = {}
 
     def has_module(self, module: str) -> bool:
@@ -921,6 +925,9 @@ map $cookie_{cookie} $sticky_set_{var} {{
     def _render_sites(self, hosts, certs, access_lists, error_templates=None):
         cert_by_id = {c.id: c for c in certs}
         acl_by_id = {a.id: a for a in access_lists}
+        # Kept on the renderer as well, because a path's own access list is
+        # written several calls down from here and had no way to reach this.
+        self.acl_by_id = acl_by_id
         error_by_id = {t.id: t for t in (error_templates or [])}
 
         for host in hosts:
@@ -2493,6 +2500,27 @@ map $cookie_{cookie} $sticky_set_{var} {{
             path = path + "/"
 
         lines.append(f"    location {prefix}{path} {{")
+
+        # Who may reach this path, if it has a list of its own.
+        #
+        # This was stored, offered in the API and never written.  A path could
+        # be given an access list, the page would show it set, the config would
+        # test clean, and every address on earth could still reach it.  For an
+        # admin login behind an allow list that is the worst possible shape of
+        # bug: it looks locked and is open.
+        #
+        # nginx does not inherit allow and deny into a location that has any of
+        # its own, so a path list replaces the site's rather than adding to it.
+        # The management allow list is written again here for that reason,
+        # which _access_control already does, or the people running this would
+        # lock themselves out of the very path they were protecting.
+        if getattr(loc, "access_list_id", None):
+            loc_acl = (self.acl_by_id or {}).get(loc.access_list_id)
+            if loc_acl is not None:
+                for line in self._access_control(loc_acl, host):
+                    # _access_control writes at server indent; a location is one
+                    # level deeper.
+                    lines.append("    " + line if line.strip() else line)
 
         # This path's own error pages, if somebody gave it different ones.
         #
