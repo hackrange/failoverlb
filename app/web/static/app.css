@@ -734,3 +734,19 @@ label.wafhit {
 label.wafhit:hover { background: var(--hover, rgba(0,0,0,0.03)); }
 label.wafhit input { margin-top: 3px; }
 label.wafhit input:disabled { cursor: not-allowed; }
+
+/* The band drawn while dragging a time range on a chart.
+ *
+ * Positioned against the document rather than the chart, because the charts are
+ * replaced wholesale on every refresh and anything parented to one would go
+ * with them mid drag. */
+#zoom-marker {
+    position: absolute;
+    display: none;
+    pointer-events: none;
+    background: var(--accent, #3b82f6);
+    opacity: 0.18;
+    border-left: 1px solid var(--accent, #3b82f6);
+    border-right: 1px solid var(--accent, #3b82f6);
+    z-index: 40;
+}
