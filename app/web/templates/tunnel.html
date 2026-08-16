@@ -61,8 +61,14 @@
       remembers, not web07.
     #}
     <div class="pad" id="wl-search-row" hidden>
+      {#
+        Wide enough for its own placeholder.  At 340px the last words of
+        "by name, address or note" were cut off, which hides the one thing the
+        box is there to tell you: that it searches the note as well, which is
+        the whole reason notes are worth writing.
+      #}
       <input type="search" id="wl-search" placeholder="Find a workload by name, address or note"
-             style="max-width:340px">
+             style="max-width:420px;width:100%">
       <span class="small faint" id="wl-search-state"></span>
     </div>
     <div id="workload-list"><div class="pad faint">Loading...</div></div>
