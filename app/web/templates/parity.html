@@ -1,24 +1,132 @@
 {% extends "base.html" %}
-{% block title %}Open Source Parity &middot; Failover LB{% endblock %}
+{% block title %}Feature Comparison &middot; Failover LB{% endblock %}
+
+{% macro stars(n) -%}
+  <span class="stars" title="{{ n }} out of 5" aria-label="{{ n }} out of 5">
+    {%- for i in range(1, 6) -%}
+      <span class="star {{ 'on' if i <= n }}" aria-hidden="true">&#9733;</span>
+    {%- endfor -%}
+  </span>
+{%- endmacro %}
 
 {% block content %}
 
 <div class="page-head">
   <div>
-    <h1>Open source parity</h1>
+    <h1>Feature comparison</h1>
     <div class="sub">
-      What the paid NGINX&reg; subscription has, and what we built instead.
+      Failover LB against NGINX&reg; Plus, capability by capability, including
+      what the paid product does not do.
     </div>
   </div>
 </div>
 
-<div class="notice info">
-  <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 3a.9.9 0 1 1 0 1.8A.9.9 0 0 1 8 4zm1.2 8H6.8v-.9h.7V7.9h-.7V7h2.1v4.1h.3V12z"/></svg>
+{#
+  The warning goes first and is not softened.  We are rating our own product
+  against somebody else's, and a comparison table that does not say so is
+  marketing wearing a lab coat.
+#}
+<div class="notice warn">
+  <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.5 15 14H1L8 1.5zm0 4a.7.7 0 0 0-.7.8l.25 3.2a.45.45 0 0 0 .9 0l.25-3.2A.7.7 0 0 0 8 5.5zm0 5.4a.8.8 0 1 0 0 1.6.8.8 0 0 0 0-1.6z"/></svg>
   <div>
-    These boxes are not licensed, so none of the paid features are offered in
-    the forms.  Almost all of them can be done from out here instead, by
-    watching what is going on and rewriting the config when something changes.
-    This page lists each one and what we do about it.
+    <strong>We are scoring ourselves against a competitor.</strong>  Treat every
+    number here as our opinion, not a measurement.  What we can offer is the
+    reasoning: each row says why it scored what it did, so you can disagree
+    with the argument rather than the star.  Where the paid product wins, the
+    row says so plainly — {{ totals.behind }} of {{ totals.total }} rows go
+    that way.
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head"><h2>How to read the stars</h2></div>
+  <div class="card-body">
+    <dl class="kv">
+      <dt>{{ stars(0) }}</dt><dd>Not offered at all.</dd>
+      <dt>{{ stars(1) }}</dt><dd>Possible, but you are building it yourself.</dd>
+      <dt>{{ stars(2) }}</dt><dd>There, and you will feel the gap.</dd>
+      <dt>{{ stars(3) }}</dt><dd>Does the job.</dd>
+      <dt>{{ stars(4) }}</dt><dd>Does the job well.</dd>
+      <dt>{{ stars(5) }}</dt><dd>As good as this gets.</dd>
+    </dl>
+    <p class="small muted">
+      Rows where both score five are usually free nginx doing the work, and
+      saying so is more useful than leaving them out to flatter the table.
+      Instance Manager, NGINX One and App Protect are separate products with
+      separate prices, so they are named in the notes rather than counted as
+      part of Plus.  The tally is
+      <strong>{{ totals.ahead }} ahead, {{ totals.behind }} behind,
+      {{ totals.level }} level</strong> — offered as a shape, not a score,
+      because adding up stars would say a request queue and a support contract
+      weigh the same.
+    </p>
+  </div>
+</div>
+
+{% for name, rows in groups %}
+<div class="card">
+  <div class="card-head"><h2>{{ name }}</h2></div>
+  <div class="card-body no-pad">
+    <div class="table-scroll">
+      <table class="cmp">
+        <thead>
+          <tr>
+            <th>Capability</th>
+            <th>NGINX&reg; Plus</th>
+            <th>Failover LB</th>
+            <th>Why</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for c in rows %}
+          <tr id="cmp-{{ c.key }}">
+            <td><strong>{{ c.label }}</strong></td>
+            <td class="nowrap">{{ stars(c.plus) }}</td>
+            <td class="nowrap">
+              {{ stars(c.lb) }}
+              {% if c.lb > c.plus %}<span class="badge ok">ahead</span>
+              {% elif c.lb < c.plus %}<span class="badge neutral">behind</span>{% endif %}
+            </td>
+            <td class="small muted">{{ c.note }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{% endfor %}
+
+<div class="card">
+  <div class="card-head">
+    <h2>Only here</h2>
+    <span class="small faint">{{ only_here|length }} capabilities</span>
+  </div>
+  <div class="card-body">
+    <p style="margin-top:0" class="small muted">
+      Rows where NGINX&reg; Plus scores nothing at all.  Kept to those, rather
+      than everywhere we happen to score higher: "we do it better" is an
+      argument, "it is not there" is a fact, and only the second belongs on a
+      list with this title.
+    </p>
+    <ul class="small">
+      {% for c in only_here %}
+        <li><a href="#cmp-{{ c.key }}"><strong>{{ c.label }}</strong></a>
+            {{ stars(c.lb) }} &mdash; {{ c.note }}</li>
+      {% endfor %}
+    </ul>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head"><h2>The paid settings, and what we do instead</h2></div>
+  <div class="card-body">
+    <p style="margin-top:0" class="small muted">
+      The detail behind the load balancing rows above.  These boxes are not
+      licensed, so none of these are offered in the forms.  Each one is
+      something somebody will go looking for in the nginx docs, and finding out
+      an hour later that it needs a subscription is a bad afternoon.
+    </p>
   </div>
 </div>
 
@@ -68,11 +176,15 @@
           this one will actually bite you.</li>
       <li><strong>MQTT preread and filter.</strong> Stream level MQTT parsing.
           No way around it.</li>
-      <li><strong>The App Protect WAF.</strong> A separate paid product.  We are
-          not going to pretend a few regular expressions are a web application
-          firewall.  Look at ModSecurity or Coraza, and know that the installer
-          does not compile either one in, so it means changing the module list
-          and rebuilding.</li>
+      <li><strong>The App Protect WAF.</strong> A separate paid product, and
+          this line used to say we were not going to pretend a few regular
+          expressions were a web application firewall.  That is no longer where
+          we are: the installer builds ModSecurity, the OWASP rules are
+          installed and kept current across the fleet, and a site can be put in
+          front of them from its own tab.  App Protect is still the better
+          product, and the part that makes a WAF survivable — learning what
+          your own application does and turning that into exclusions — is
+          specified and not yet built.  See the WAF row above.</li>
       <li><strong>In flight request counts on the dashboard.</strong> Our
           numbers come from the access log, and a request that has not finished
           has not been logged yet.</li>

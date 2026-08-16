@@ -812,17 +812,26 @@ async def upgrade_page(request: Request, db: DBSession = Depends(get_db)):
 @router.get("/parity", response_class=HTMLResponse)
 async def parity_page(request: Request, db: DBSession = Depends(get_db)):
     """
-    What the paid nginx has, and what we built instead.
+    How this compares with NGINX Plus, capability by capability.
 
-    Worth a page of its own.  Every one of these is something an admin will go
-    looking for in the nginx docs, and finding out an hour later that it needs a
-    subscription is a bad afternoon.
+    Worth a page of its own.  Half of it is what an admin will go looking for
+    in the nginx docs, where finding out an hour later that it needs a
+    subscription is a bad afternoon.  The other half is the reverse, and it is
+    the half nobody else will write: what this does that the paid product does
+    not.
+
+    The url stays /parity so links people already have keep working.  The page
+    is called Feature comparison, because parity was only ever half the story.
     """
     from app.catalog import plus_only_features
+    from app.catalog.comparison import by_category, only_here, totals
 
     user = require_page_user(request, db)
     token = ensure_csrf_token(request)
-    response = render(request, "parity.html", user, csrf_token=token, features=plus_only_features())
+    response = render(request, "parity.html", user, csrf_token=token,
+                      features=plus_only_features(),
+                      groups=by_category(), only_here=only_here(),
+                      totals=totals())
     issue_csrf_token(response, token)
     return response
 

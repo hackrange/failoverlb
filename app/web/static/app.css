@@ -705,3 +705,19 @@ input:disabled, select:disabled { background: var(--bg-sunk); color: var(--text-
 .geo-grid input { margin: 0; }
 .geo-grid .code { color: var(--muted); font-size: 0.78rem; }
 .geo-grid label.blocked { color: var(--bad); }
+
+/* Stars on the feature comparison.
+ *
+ * A filled star and an empty one, rather than only drawing the filled ones,
+ * so three out of five reads as three out of five at a glance instead of
+ * needing to be counted.  The number is on the title and the aria-label as
+ * well, because colour and shape alone are no good to a screen reader and not
+ * much better to somebody who cannot tell the two greys apart. */
+.stars { white-space: nowrap; letter-spacing: 1px; }
+.stars .star { color: var(--line, #d0d0d0); }
+.stars .star.on { color: var(--warn, #d9a406); }
+
+/* The comparison table.  The reasoning column is the widest on purpose: it is
+ * the part worth reading, and a table of bare scores would be an assertion. */
+table.cmp td { vertical-align: top; }
+table.cmp td:nth-child(4) { min-width: 22rem; }
