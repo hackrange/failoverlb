@@ -66,6 +66,14 @@ BUILTIN_MODULES=(
   --with-file-aio
   --with-http_ssl_module
   --with-http_v2_module
+  # HTTP/3.  Needs a TLS library with the QUIC API, which is why this was left
+  # out for years: it wanted BoringSSL or quictls and we bake OpenSSL.  OpenSSL
+  # 3.5 has the API and the nginx we build knows how to use it, so the reason
+  # is gone.  Worth having beyond the version number, because QUIC is where the
+  # post quantum key exchange matters most: a handshake somebody captures today
+  # is decrypted whenever a quantum computer turns up, and QUIC handshakes are
+  # the ones carrying everything from the first flight.
+  --with-http_v3_module
   --with-http_realip_module
   --with-http_stub_status_module
   --with-http_gzip_static_module
