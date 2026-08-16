@@ -52,6 +52,13 @@ docker exec -i nginx-fleet-manager python < checks/catalog_sweep.py
 | `parser.py` | Real nginx config parses, including the parts a regex gets wrong, and survives a round trip. |
 | `render_safety.py` | A setting cannot write config of its own, and a missing certificate or an empty pool costs one site rather than the fleet. |
 | `trust.py` | Peer signatures, secret comparison, encryption at rest, key and certificate pairing, and the audit log keeping secrets out of itself. |
+| `templates.py` | A page that looks finished and does nothing: unclosed blocks, a form with no token, a button wired to nothing. |
+| `users_page.py` | Changing a role, deleting an account, and refusing both when the target is yourself. |
+| `geo_blocking.py` | Blocking by country, including the two defects that reached a fleet because both looked like they worked. |
+| `tunnel_addresses.py` | A tunnel address is handed out once and never to two machines, including after a workload is removed. |
+| `waf.py` | The WAF from the setting through to config nginx will load, with the exclusions in the order the rules need them. |
+| `wiring.py` | Every setting reaches the rendered config, by walking the model fields rather than by anybody remembering to check. |
+| `comparison.py` | The feature comparison holds together and has not turned into a brochure: every row scores every product, the totals match the data, and we still lose the rows we lose. |
 
 ## A pass that touched nothing is not a pass
 

@@ -718,9 +718,49 @@ input:disabled, select:disabled { background: var(--bg-sunk); color: var(--text-
 .stars .star.on { color: var(--warn, #d9a406); }
 
 /* The comparison table.  The reasoning column is the widest on purpose: it is
- * the part worth reading, and a table of bare scores would be an assertion. */
+ * the part worth reading, and a table of bare scores would be an assertion.
+ * With four products the score columns are narrow and the last column is the
+ * one that has to breathe, so it is targeted from the end rather than by
+ * counting from the front. */
 table.cmp td { vertical-align: top; }
-table.cmp td:nth-child(4) { min-width: 22rem; }
+table.cmp td:last-child { min-width: 24rem; }
+table.cmp th.us, table.cmp td.us { background: var(--row-alt, #fafafa); }
+
+/* The best score in a row gets a quiet backing rather than a badge.  Four
+ * badges per row would be noise, and the point is only to let the eye find
+ * the winner without comparing five stars against five stars four times. */
+table.cmp td.lead { background: rgba(217, 164, 6, .10); }
+
+/* The second paragraph in the reasoning column, covering the two appliances.
+ * Ruled off from the first so it is clear which argument is about which
+ * products. */
+.cmp-others {
+  margin-top: .55rem; padding-top: .55rem;
+  border-top: 1px dashed var(--line, #d0d0d0);
+}
+
+/* Star totals and pricing, both a row of cards that wrap on a narrow screen.
+ * Our own card is marked so nobody has to work out which one we are, and it
+ * sits wherever the number puts it rather than being pinned to the front. */
+.score-grid, .price-grid {
+  display: grid; gap: .9rem; margin-bottom: 1rem;
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+}
+.score-card, .price-card {
+  border: 1px solid var(--line, #d0d0d0); border-radius: 6px; padding: .8rem;
+}
+.score-card.us, .price-card.us { border-color: var(--ok, #2e7d32); border-width: 2px; }
+.score-rank { font-size: .8rem; color: var(--muted, #666); }
+.score-name, .price-name { font-weight: 600; margin-bottom: .3rem; }
+.score-total { font-size: 1.8rem; font-weight: 700; line-height: 1.1; }
+.score-of { font-size: .9rem; font-weight: 400; color: var(--muted, #666); }
+.score-bar {
+  height: 6px; border-radius: 3px; margin: .45rem 0 .5rem;
+  background: var(--line, #d0d0d0); overflow: hidden;
+}
+.score-bar span { display: block; height: 100%; background: var(--warn, #d9a406); }
+.price-headline { font-size: 1.5rem; font-weight: 700; line-height: 1.2; }
+.price-unit { margin-bottom: .5rem; }
 
 /* One row in the WAF hits list.  The tick box and the detail side by side, so
  * the rule, the path and the addresses that produced it are all readable

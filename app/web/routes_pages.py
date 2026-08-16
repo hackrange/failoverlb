@@ -872,25 +872,32 @@ async def upgrade_page(request: Request, db: DBSession = Depends(get_db)):
 @router.get("/parity", response_class=HTMLResponse)
 async def parity_page(request: Request, db: DBSession = Depends(get_db)):
     """
-    How this compares with NGINX Plus, capability by capability.
+    How this compares with the products people shortlist against it.
 
     Worth a page of its own.  Half of it is what an admin will go looking for
     in the nginx docs, where finding out an hour later that it needs a
     subscription is a bad afternoon.  The other half is the reverse, and it is
-    the half nobody else will write: what this does that the paid product does
+    the half nobody else will write: what this does that the paid products do
     not.
+
+    Four columns now, not two.  NGINX Plus is the closest comparison because it
+    is the same engine, but nobody choosing a load balancer is only weighing
+    those two, so Kemp LoadMaster and HAProxy ALOHA are scored beside it.  That
+    made the table less flattering in several places, which is the point.
 
     The url stays /parity so links people already have keep working.  The page
     is called Feature comparison, because parity was only ever half the story.
     """
     from app.catalog import plus_only_features
-    from app.catalog.comparison import by_category, only_here, totals
+    from app.catalog.comparison import (by_category, only_here, pricing,
+                                        product_totals, totals)
 
     user = require_page_user(request, db)
     token = ensure_csrf_token(request)
     response = render(request, "parity.html", user, csrf_token=token,
                       features=plus_only_features(),
                       groups=by_category(), only_here=only_here(),
+                      scores=product_totals(), pricing=pricing(),
                       totals=totals())
     issue_csrf_token(response, token)
     return response

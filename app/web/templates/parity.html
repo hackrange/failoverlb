@@ -15,26 +15,60 @@
   <div>
     <h1>Feature comparison</h1>
     <div class="sub">
-      Failover LB against NGINX&reg; Plus, capability by capability, including
-      what the paid product does not do.
+      Failover LB against NGINX&reg; Plus, Kemp LoadMaster and HAProxy ALOHA,
+      capability by capability, including what the paid products do not do.
     </div>
   </div>
 </div>
 
 {#
   The warning goes first and is not softened.  We are rating our own product
-  against somebody else's, and a comparison table that does not say so is
+  against three other people's, and a comparison table that does not say so is
   marketing wearing a lab coat.
 #}
 <div class="notice warn">
   <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.5 15 14H1L8 1.5zm0 4a.7.7 0 0 0-.7.8l.25 3.2a.45.45 0 0 0 .9 0l.25-3.2A.7.7 0 0 0 8 5.5zm0 5.4a.8.8 0 1 0 0 1.6.8.8 0 0 0 0-1.6z"/></svg>
   <div>
-    <strong>We are scoring ourselves against a competitor.</strong>  Treat every
-    number here as our opinion, not a measurement.  What we can offer is the
-    reasoning: each row says why it scored what it did, so you can disagree
-    with the argument rather than the star.  Where the paid product wins, the
+    <strong>We are scoring ourselves against three competitors.</strong>  Treat
+    every number here as our opinion, not a measurement.  What we can offer is
+    the reasoning: each row says why it scored what it did, so you can disagree
+    with the argument rather than the star.  Where another product wins, the
     row says so plainly.  {{ totals.behind }} of {{ totals.total }} rows go
-    that way.
+    that way, and we do not come first on the totals below.
+  </div>
+</div>
+
+{#
+  The totals were asked for, so they are here, sorted honestly.  The paragraph
+  underneath is not an excuse for the ranking; it is the same caveat we would
+  print if we were top.
+#}
+<div class="card">
+  <div class="card-head">
+    <h2>Star totals</h2>
+    <span class="small faint">{{ totals.total }} rows, {{ scores[0].ceiling }} stars available</span>
+  </div>
+  <div class="card-body">
+    <div class="score-grid">
+      {% for p in scores %}
+        <div class="score-card {{ 'us' if p.us }}">
+          <div class="score-rank">#{{ p.rank }}</div>
+          <div class="score-name">{{ p.label }}{% if p.us %} <span class="badge ok">this product</span>{% endif %}</div>
+          <div class="score-total">{{ p.total }}<span class="score-of"> / {{ p.ceiling }}</span></div>
+          <div class="score-bar"><span style="width:{{ (100 * p.total / p.ceiling)|round(1) }}%"></span></div>
+          <div class="small muted">{{ p.short }}</div>
+        </div>
+      {% endfor %}
+    </div>
+    <p class="small muted">
+      Adding up stars is the crudest reading of this table there is.  It says a
+      request queue and a support contract weigh the same, and they do not.  It
+      says packaged video streaming is worth exactly one row, when for the
+      people who need it that row decides the whole question on its own.  The
+      total is published because it was asked for, in the order the numbers
+      actually fall.  A comparison that only prints its totals when they
+      flatter the author is not a comparison.
+    </p>
   </div>
 </div>
 
@@ -50,15 +84,23 @@
       <dt>{{ stars(5) }}</dt><dd>As good as this gets.</dd>
     </dl>
     <p class="small muted">
-      Rows where both score five are usually free nginx doing the work, and
-      saying so is more useful than leaving them out to flatter the table.
-      Instance Manager, NGINX One and App Protect are separate products with
-      separate prices, so they are named in the notes rather than counted as
-      part of Plus.  The tally is
+      Rows where everybody scores five are usually work the free engine does,
+      and saying so is more useful than leaving them out to flatter the table.
+      Instance Manager, NGINX One, App Protect, LoadMaster 360 and HAProxy
+      Fusion are separate products with separate prices, so they are named in
+      the notes rather than counted as part of the product they sit beside.
+      Against the whole field the tally is
       <strong>{{ totals.ahead }} ahead, {{ totals.behind }} behind,
-      {{ totals.level }} level</strong>, offered as a shape and not a score,
-      because adding up stars would say a request queue and a support contract
-      weigh the same.
+      {{ totals.level }} level</strong>, where ahead means we beat all three
+      and behind means at least one of them beats us.
+    </p>
+    <p class="small muted">
+      The two appliance columns were scored on {{ totals.pulled }} from vendor
+      documentation, release notes and datasheets.  Both products move, so
+      those scores are a reading of what was published that day and nothing
+      stronger.  Where we could not confirm something either way, the score is
+      one star and the note says we could not confirm it.  A one that admits we
+      do not know is more use than a zero that pretends we do.
     </p>
   </div>
 </div>
@@ -72,8 +114,12 @@
         <thead>
           <tr>
             <th>Capability</th>
-            <th>NGINX&reg; Plus</th>
-            <th>Failover LB</th>
+            {% for p in scores %}
+              <th class="nowrap {{ 'us' if p.us }}">
+                {{ p.label }}
+                <span class="small faint">{{ p.total }} stars</span>
+              </th>
+            {% endfor %}
             <th>Why</th>
           </tr>
         </thead>
@@ -81,13 +127,19 @@
           {% for c in rows %}
           <tr id="cmp-{{ c.key }}">
             <td><strong>{{ c.label }}</strong></td>
-            <td class="nowrap">{{ stars(c.plus) }}</td>
-            <td class="nowrap">
-              {{ stars(c.lb) }}
-              {% if c.lb > c.plus %}<span class="badge ok">ahead</span>
-              {% elif c.lb < c.plus %}<span class="badge neutral">behind</span>{% endif %}
+            {% for p in scores %}
+              <td class="nowrap {{ 'lead' if c[p.key] == c.row_best and c.row_best > 0 }}">
+                {{ stars(c[p.key]) }}
+                {% if p.us %}
+                  {% if c.lb > c.rivals_best %}<span class="badge ok">ahead</span>
+                  {% elif c.lb < c.rivals_best %}<span class="badge neutral">behind</span>{% endif %}
+                {% endif %}
+              </td>
+            {% endfor %}
+            <td class="small muted">
+              {{ c.note }}
+              <div class="cmp-others">{{ c.others }}</div>
             </td>
-            <td class="small muted">{{ c.note }}</td>
           </tr>
           {% endfor %}
         </tbody>
@@ -104,10 +156,18 @@
   </div>
   <div class="card-body">
     <p style="margin-top:0" class="small muted">
-      Rows where NGINX&reg; Plus scores nothing at all.  Kept to those, rather
-      than everywhere we happen to score higher: "we do it better" is an
-      argument, "it is not there" is a fact, and only the second belongs on a
-      list with this title.
+      Rows where all three of the others score nothing at all.  Kept to those,
+      rather than everywhere we happen to score higher: "we do it better" is an
+      argument, "nobody else has it" is a fact, and only the second belongs on
+      a list with this title.
+    </p>
+    <p class="small muted">
+      This list used to be much longer, because it used to be measured against
+      NGINX&reg; Plus alone.  Adding two appliances cut it to
+      {{ only_here|length }}.  Several things that read as ours alone turned
+      out to be what an appliance has done for years: fleet backup and restore,
+      admin accounts with an audit trail, DNS failover between sites.  That is
+      what widening a comparison is supposed to do to it.
     </p>
     <ul class="small">
       {% for c in only_here %}
@@ -115,6 +175,54 @@
             {{ stars(c.lb) }} - {{ c.note }}</li>
       {% endfor %}
     </ul>
+  </div>
+</div>
+
+{#
+  Pricing carries a date because it has to.  Two of the four vendors publish
+  nothing, the other two publish ranges, and a cost table with no date on it
+  looks current forever.
+#}
+<div class="card">
+  <div class="card-head">
+    <h2>What each one costs</h2>
+    <span class="small faint">pulled {{ totals.pulled }}</span>
+  </div>
+  <div class="card-body">
+    <div class="notice warn">
+      <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.5 15 14H1L8 1.5zm0 4a.7.7 0 0 0-.7.8l.25 3.2a.45.45 0 0 0 .9 0l.25-3.2A.7.7 0 0 0 8 5.5zm0 5.4a.8.8 0 1 0 0 1.6.8.8 0 0 0 0-1.6z"/></svg>
+      <div>
+        <strong>These are not quotes.</strong>  Every vendor on this page sells
+        through sales.  None of the three publish a rate card you can just
+        read, so the numbers below come from reseller listings and price
+        trackers, gathered on <strong>{{ totals.pulled }}</strong>.  Treat them
+        as the right order of magnitude and nothing finer.  What you actually
+        pay depends on throughput, term, support tier and how well you
+        negotiate, and it will not be this.
+      </div>
+    </div>
+    <div class="price-grid">
+      {% for p in pricing %}
+        <div class="price-card {{ 'us' if p.key == 'lb' }}">
+          <div class="price-name">{{ p.label }}
+            <span class="small faint">{{ p.vendor }}</span></div>
+          <div class="price-headline">{{ p.headline }}</div>
+          <div class="small muted price-unit">{{ p.unit }}</div>
+          <div class="small"><strong>How it is sold.</strong> {{ p.model }}</div>
+          <div class="small muted mt">{{ p.detail }}</div>
+          <div class="small faint mt"><strong>Where this came from:</strong>
+            {{ p.sources }}</div>
+        </div>
+      {% endfor %}
+    </div>
+    <p class="small muted">
+      The free column needs the same honesty as the star totals.  Zero is the
+      licence, not the cost.  Somebody builds nginx on each node, somebody
+      watches the upgrades, and when it breaks at three in the morning there is
+      no number to ring.  Set that against a support contract and the gap
+      closes a long way, which is exactly what the support row at the top of
+      the table is saying.
+    </p>
   </div>
 </div>
 
