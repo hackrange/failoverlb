@@ -746,6 +746,14 @@ def _staging_for_test() -> str:
 
     A config with no such reference, which is every config this project wrote
     before the firewall existed, takes the old path and copies nothing.
+
+    **Only what staging actually holds gets rewritten.**  Certificates are the
+    reason.  They live in the bundle but are put there by the certificate sync
+    rather than by an apply, so they are not in the staging folder, and nginx
+    opens them while loading the config exactly like it opens a rule file.
+    Rewriting those too pointed them at a folder with no certificates in it and
+    turned a passing test into "cannot load certificate", which is a far more
+    alarming message than the bug deserved.
     """
     if TEST_DIR.exists():
         shutil.rmtree(TEST_DIR, ignore_errors=True)
@@ -753,19 +761,34 @@ def _staging_for_test() -> str:
     live = str(MANAGED_DIR)
     staged = str(STAGING_DIR)
 
-    needs_rewrite = False
+    # A reference is only redirected when the staging folder has the thing it
+    # points at.  Anything else is a file the bundle carries but an apply does
+    # not replace, and it has to keep pointing at the live copy.
+    reference = re.compile(re.escape(live) + r"(/[^\s;\"']*)")
+
+    def redirect(match, root):
+        relative = match.group(1).lstrip("/")
+        if relative and (STAGING_DIR / relative).exists():
+            return root + match.group(1)
+        return match.group(0)
+
+    def needs(text):
+        return any(redirect(m, str(TEST_DIR)) != m.group(0)
+                   for m in reference.finditer(text))
+
+    found = False
     for path in STAGING_DIR.rglob("*"):
         if not path.is_file():
             continue
         try:
-            if live in path.read_text():
-                needs_rewrite = True
+            if needs(path.read_text()):
+                found = True
                 break
         except (OSError, UnicodeDecodeError):
             # Binary or unreadable.  Nothing we would rewrite anyway.
             continue
 
-    if not needs_rewrite:
+    if not found:
         return staged
 
     shutil.copytree(STAGING_DIR, TEST_DIR)
@@ -776,8 +799,9 @@ def _staging_for_test() -> str:
             text = path.read_text()
         except (OSError, UnicodeDecodeError):
             continue
-        if live in text:
-            path.write_text(text.replace(live, str(TEST_DIR)))
+        rewritten = reference.sub(lambda m: redirect(m, str(TEST_DIR)), text)
+        if rewritten != text:
+            path.write_text(rewritten)
 
     return str(TEST_DIR)
 
