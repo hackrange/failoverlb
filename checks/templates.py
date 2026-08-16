@@ -168,6 +168,158 @@ check("every input type in a template is styled by the stylesheet",
       "app.css: " + "; ".join(unstyled))
 
 
+# N. The inline JavaScript parses.
+#
+#    This is the most expensive failure a template can have and the quietest.
+#    A syntax error anywhere in an inline script means the browser runs none of
+#    it, so no handler is registered, no data is fetched, and the page sits on
+#    whatever the server rendered.  The Tunnel page did exactly that for
+#    fourteen minutes: it said "Loading..." forever, every request for the page
+#    returned 200, the API behind it was healthy, and nothing anywhere logged a
+#    thing.  The cause was one character, a single quoted string closed with a
+#    double quote.
+#
+#    There is no JavaScript engine in this repo or in the container, so this
+#    does not parse the language.  It checks the one thing that actually goes
+#    wrong when a person edits generated markup by hand: whether strings,
+#    template literals and their ${...} interpolations balance.  That is a
+#    smaller claim than "this is valid JavaScript" and it would have caught the
+#    bug that prompted it.
+print()
+print("  the inline JavaScript balances")
+
+
+
+# Whether a slash here starts a regular expression rather than dividing.
+#
+# The classic ambiguity in tokenising JavaScript, and it matters: a regex like
+# /"?([^"]+)"?/ is full of quotes that are not string quotes, and reading them
+# as strings turns a healthy file into a reported error.  The rule is what the
+# previous meaningful token was.  After a value (name, number, closing bracket)
+# a slash divides; after an operator, a comma, an opening bracket or one of a
+# few keywords, it opens a regex.
+_BEFORE_REGEX = set("(,=:[!&|?{};+-*%~^<>")
+_KEYWORDS_BEFORE_REGEX = ("return", "typeof", "case", "in", "of", "new",
+                          "delete", "void", "instanceof", "do", "else")
+
+
+def _regex_here(js, i):
+    if js[i + 1:i + 2] in ("", "/", "*"):
+        return False
+    j = i - 1
+    while j >= 0 and js[j] in " \t\n\r":
+        j -= 1
+    if j < 0:
+        return True
+    if js[j] in _BEFORE_REGEX:
+        return True
+    k = j
+    while k >= 0 and (js[k].isalnum() or js[k] == "_"):
+        k -= 1
+    return js[k + 1:j + 1] in _KEYWORDS_BEFORE_REGEX
+
+
+def scan(js):
+    """Balance of strings, template literals and interpolations."""
+    i, line = 0, 1
+    stack = []          # ("tpl", line) or ("interp", depth, line)
+    while i < len(js):
+        c = js[i]
+        if c == "\n":
+            line += 1; i += 1; continue
+        if c == "/" and js[i+1:i+2] == "/":
+            j = js.find("\n", i)
+            if j < 0: break
+            i = j; continue
+        if c == "/" and _regex_here(js, i):
+            j = i + 1
+            while j < len(js):
+                if js[j] == "\\": j += 2; continue
+                if js[j] == "[": 
+                    while j < len(js) and js[j] != "]":
+                        if js[j] == "\\": j += 1
+                        j += 1
+                if js[j] == "\n": break
+                if js[j] == "/": break
+                j += 1
+            if j < len(js) and js[j] == "/":
+                i = j + 1
+                continue
+        if c == "/" and js[i+1:i+2] == "*":
+            j = js.find("*/", i)
+            if j < 0: return "unterminated /* */", stack
+            line += js.count("\n", i, j); i = j + 2; continue
+        if c in "'\"":
+            q, j = c, i + 1
+            while j < len(js):
+                if js[j] == "\\": j += 2; continue
+                if js[j] == "\n": return f"unterminated {q} string opened at line {line}", stack
+                if js[j] == q: break
+                j += 1
+            else:
+                return f"unterminated {q} string opened at line {line}", stack
+            i = j + 1; continue
+        if c == "`":
+            stack.append(("tpl", line)); i += 1
+            # scan template text until ` or ${
+            while i < len(js):
+                if js[i] == "\\": i += 2; continue
+                if js[i] == "\n": line += 1; i += 1; continue
+                if js[i] == "`":
+                    stack.pop(); i += 1; break
+                if js[i] == "$" and js[i+1:i+2] == "{":
+                    stack.append(("interp", 0, line)); i += 2; break
+                i += 1
+            continue
+        if stack and stack[-1][0] == "interp":
+            if c == "{":
+                k = stack[-1]; stack[-1] = ("interp", k[1] + 1, k[2])
+            elif c == "}":
+                k = stack[-1]
+                if k[1] == 0:
+                    stack.pop()          # end of ${ }
+                    # resume the template text that opened it
+                    i += 1
+                    while i < len(js):
+                        if js[i] == "\\": i += 2; continue
+                        if js[i] == "\n": line += 1; i += 1; continue
+                        if js[i] == "`":
+                            if stack and stack[-1][0] == "tpl": stack.pop()
+                            i += 1; break
+                        if js[i] == "$" and js[i+1:i+2] == "{":
+                            stack.append(("interp", 0, line)); i += 2; break
+                        i += 1
+                    continue
+                stack[-1] = ("interp", k[1] - 1, k[2])
+        i += 1
+    return ("" if not stack else "unbalanced"), stack
+
+
+def _js_problems(text, label):
+    pos, problems = 0, []
+    while True:
+        try: s0 = text.index("<script", pos)
+        except ValueError: break
+        s1 = text.index(">", s0) + 1
+        s2 = text.index("</script>", s1)
+        before = text[:s1].count("\n") + 1
+        msg, stack = scan(text[s1:s2])
+        if msg:
+            where = [f"{k[0]} opened at file line {before + k[-1] - 1}" for k in stack]
+            problems.append(f"{label}: {msg}; {'; '.join(where) or 'no open context'}")
+        pos = s2 + 1
+    return problems
+
+
+unbalanced = []
+for p in files:
+    unbalanced.extend(_js_problems(p.read_text(), p.name))
+check("every inline script closes its strings and template literals",
+      not unbalanced,
+      "a parse error means the browser runs none of the script, so the page "
+      "renders and then does nothing at all: " + "; ".join(unbalanced))
+
+
 print()
 print(f"  {len(problems)} problem(s)")
 sys.exit(1 if problems else 0)
