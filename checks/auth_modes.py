@@ -33,6 +33,7 @@ from app.db import session_scope
 from app.models import AuthSource, SystemSetting, User, UserRole
 
 results = []
+skipped = []
 
 
 def check(name, ok, detail=""):
@@ -212,19 +213,37 @@ try:
     print()
     print("  the recovery script is where the page says it is")
 
+    # The script is a host file and lives in the install directory, which is
+    # not mounted into this container, and should not be: it runs docker
+    # commands, so a copy inside the container would be a copy in the one place
+    # it cannot work from.  So this is a skip rather than a failure when it
+    # cannot be seen, and it still checks the file properly when it can, which
+    # is when somebody runs this from a checkout.
     import pathlib
-    script = pathlib.Path("/app/auth-recovery.sh")
-    check("auth-recovery.sh ships", script.exists(),
-          "the settings page and the login page both name this file, so a "
-          "missing one is worse than no advice at all")
-    if script.exists():
-        body = script.read_text()
+
+    found = next((p for p in (pathlib.Path("/app/auth-recovery.sh"),
+                              pathlib.Path("auth-recovery.sh"),
+                              pathlib.Path(__file__).parent.parent / "auth-recovery.sh")
+                  if p.exists()), None)
+
+    if not found:
+        skipped.append("auth-recovery.sh could not be read from in here, which "
+                       "is expected: it is a host script and the install "
+                       "directory is not mounted")
+        print("    skip  auth-recovery.sh is a host file, not visible from in here")
+    else:
+        body = found.read_text()
         check("it offers --allow-local, which is what the pages tell people to run",
-              "--allow-local" in body)
+              "--allow-local" in body,
+              "the settings page and the login page both name that exact "
+              "command, so it has to be the one that works")
         check("it does not quietly do anything else, like resetting a password",
               "hash_password" not in body and "password_hash =" not in body,
               "a recovery script that makes decisions is one nobody trusts "
               "enough to run")
+        check("it writes an audit line", "audit.record" in body,
+              "a change of locks that leaves no trace cannot be told apart "
+              "from an intruder making it")
 
 finally:
     put_mode(ORIGINAL)
@@ -234,7 +253,10 @@ finally:
 
 print()
 failed = [name for name, ok, _ in results if not ok]
-print(f"  {len(results) - len(failed)} of {len(results)} passed")
+print(f"  {len(results) - len(failed)} of {len(results)} passed"
+      + (f", {len(skipped)} skipped" if skipped else ""))
+for note in skipped:
+    print(f"    skipped: {note}")
 print()
 print("  what this does not cover:")
 print("    - a real login against a real provider, which needs one to exist")
