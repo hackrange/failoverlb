@@ -120,8 +120,10 @@ THIRD_PARTY_MODULES=(
 #
 # --with-compat is in BUILTIN_MODULES above, which is what these need.
 #
-# The WAF is off unless asked for.  Building it costs about fifteen minutes and
-# most installs will never switch it on, so a fresh box does not pay for it.
+# The WAF is off unless asked for.  Measured at about two minutes of the four
+# a whole build takes on a sixteen core box, and a good deal more on a small
+# one, and most installs will never switch it on, so a fresh box does not pay
+# for it.
 # Turning it on in the GUI rebuilds nginx with WITH_MODSECURITY=1, which is the
 # same path the version upgrades already take, so nobody has to edit this file
 # or compile anything by hand.
@@ -436,8 +438,8 @@ fetch_sources() {
 }
 
 # True when the WAF module is in the build.  Several steps below are skipped
-# entirely without it, so a box that does not want a WAF does not spend twenty
-# minutes compiling one.
+# entirely without it, so a box that does not want a WAF does not spend any
+# time compiling one.
 wants_modsecurity() {
   printf '%s\n' "${DYNAMIC_MODULES[@]}" | grep -q "modsecurity-nginx"
 }
@@ -521,8 +523,8 @@ build_modsecurity() {
 
   # Skip it when the right version is already here.
   #
-  # This is the difference between an nginx rebuild taking a few minutes and
-  # taking twenty.  People rebuild nginx to pick up a new OpenSSL or to add a
+  # This roughly halves a rebuild on a well specified box and saves far more on
+  # a small one.  People rebuild nginx to pick up a new OpenSSL or to add a
   # module, and making all of them wait for a WAF engine that has not changed
   # since last time is how a maintained thing stops being maintained.  Bump
   # MODSECURITY_VERSION and it builds again; leave it alone and it does not.

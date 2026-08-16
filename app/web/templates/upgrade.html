@@ -66,11 +66,12 @@
     <div class="field">
       <div class="hint">
         Adds ModSecurity to the build, which is what the WAF needs before it can
-        be switched on for a site.  The first build with this on takes about
-        fifteen minutes longer while the engine is compiled; later ones do not,
-        unless the engine version changes.  Unticking it takes the module back
-        out on the next rebuild, so any site still using the WAF would stop
-        passing its config test.
+        be switched on for a site.  The first build with this on also compiles
+        the engine, which on a sixteen core box adds a couple of minutes and on
+        a small one adds rather more; later builds skip it unless the engine
+        version changes.  Unticking it takes the module back out on the next
+        rebuild, so any site still using the WAF would stop passing its config
+        test.
       </div>
     </div>
 

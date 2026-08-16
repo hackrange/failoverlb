@@ -553,6 +553,48 @@ async def geoip_install(request: Request, g: ObjectGuard = Depends(changing)):
     return result
 
 
+# ==============================================================================
+# The WAF rule set
+# ==============================================================================
+
+@router.get("/waf/rules")
+async def waf_rules_state(request: Request, db: DBSession = Depends(get_db)):
+    """What rule set each node has, and whether they agree."""
+    get_user(request, db)
+
+    from app.core import waf_rules
+
+    return await waf_rules.fleet_status()
+
+
+@router.post("/waf/rules/install")
+async def waf_rules_install(request: Request, g: ObjectGuard = Depends(changing)):
+    """Fetch the rule set and put it on every node, now."""
+    g.require("manage_settings")
+
+    from app.core import waf_rules
+
+    try:
+        result = await waf_rules.install_on_fleet()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    versions = result.get("versions") or {}
+    audit.record("waf.rules.install", user=g.user, object_type="setting",
+                 object_name="WAF rule set",
+                 result="success" if result.get("ok") else "failed",
+                 detail=f"{result.get('track')} track, "
+                        f"onto {', '.join(result.get('installed') or []) or 'nothing'}"
+                        + (f", version {sorted(set(versions.values()))[0]}"
+                           if len(set(versions.values())) == 1 and versions else ""))
+    if not result.get("ok"):
+        raise HTTPException(
+            status_code=502,
+            detail="; ".join(f"{node}: {why}"
+                             for node, why in (result.get("failed") or {}).items()))
+    return result
+
+
 @router.get("/catalog/plus")
 async def catalog_plus(request: Request, db: DBSession = Depends(get_db)):
     """

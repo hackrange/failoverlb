@@ -114,6 +114,16 @@ EDITABLE = {
         "env": None,
         "label": "How often to fetch a new country database",
     },
+    "waf_crs_track": {
+        "type": "string",
+        "env": None,
+        "label": "Which rule set track to follow",
+    },
+    "waf_crs_refresh": {
+        "type": "string",
+        "env": None,
+        "label": "How often to fetch a new rule set",
+    },
 }
 
 
@@ -136,6 +146,11 @@ INTERNAL = {
     # an unrelated version upgrade.
     "waf_module": {"type": "bool", "env": None,
                    "label": "build nginx with the WAF module"},
+    # When the rule set was last put on the fleet, so the schedule knows
+    # whether anything is due.  Kept by the app, shown on the page, not
+    # something anybody should be typing.
+    "waf_crs_last_install": {"type": "string", "env": None,
+                             "label": "rule set last installed"},
 }
 
 

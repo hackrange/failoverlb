@@ -365,6 +365,23 @@ def start_scheduler():
         coalesce=True,
     )
 
+    # The WAF rule set, on the same hourly tick and for the same reasons.  Its
+    # own job rather than sharing the country database's, so a source that is
+    # unreachable stops one of them and not both.
+    async def _waf_rules():
+        from app.core import waf_rules
+
+        await waf_rules.refresh_if_due()
+
+    scheduler.add_job(
+        _waf_rules,
+        "interval",
+        minutes=60,
+        id="waf_rules",
+        max_instances=1,
+        coalesce=True,
+    )
+
     # Catching up nodes that were offline.  Runs often, does nothing when the
     # queue is empty, which is nearly always.
     scheduler.add_job(

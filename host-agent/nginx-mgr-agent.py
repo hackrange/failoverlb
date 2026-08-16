@@ -47,7 +47,7 @@ import tempfile
 import threading
 import time
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 # ==============================================================================
 # Settings
@@ -2691,6 +2691,258 @@ def v_geoip_install(req):
             "path": str(GEOIP_FILE)}
 
 
+# ==============================================================================
+# The OWASP Core Rule Set
+# ==============================================================================
+#
+# The rules are the half of a WAF that people actually mean when they say
+# ModSecurity.  Same problem as the country database: they have to be on every
+# node or the node without them refuses the whole config, and telling somebody
+# to go and unpack a tarball on each box by hand is how a feature ends up
+# switched on in the GUI and broken in the fleet.
+#
+# So the same shape is used deliberately.  The manager names a track and the
+# agent works out the version, the URL and the path.  A verb that took a URL
+# would be a way to unpack any tarball anywhere as root.
+
+CRS_DIR = NGINX_PREFIX / "modsecurity"
+CRS_LINK = CRS_DIR / "crs"
+CRS_STATE = CRS_DIR / ".nfm-crs"
+
+CRS_RELEASES = "https://api.github.com/repos/coreruleset/coreruleset/releases"
+CRS_HOSTS = {"api.github.com", "github.com", "objects.githubusercontent.com",
+             "release-assets.githubusercontent.com"}
+CRS_MAX_BYTES = 32 * 1024 * 1024
+
+# Which series is the long term support one.  CRS 4.25 was the first LTS line
+# for CRS 4, and there is no field in the API that says so, so it lives here as
+# a constant and needs bumping when the project names a new one.  Better a
+# constant somebody can find than a guess made at run time.
+CRS_LTS_SERIES = (4, 25)
+CRS_TRACKS = ("lts", "latest")
+
+# Proof that what came back is really a rule set.  This file is the first thing
+# CRS loads and has been in every 3.x and 4.x release, so a tarball without it
+# is not something to point nginx at.
+CRS_SENTINEL = "rules/REQUEST-901-INITIALIZATION.conf"
+
+
+def _crs_fetch(url, timeout=120):
+    """Download one URL, with a ceiling, and refuse anything but CRS's hosts."""
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+
+    host = urllib.parse.urlsplit(url).hostname or ""
+    if host not in CRS_HOSTS:
+        raise AgentError(f"{host} is not a rule set source", "refused")
+
+    request = urllib.request.Request(url, headers={"User-Agent": "failover-lb"})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            data = response.read(CRS_MAX_BYTES + 1)
+    except urllib.error.HTTPError as exc:
+        raise AgentError(f"{host} answered {exc.code}", "failed")
+    except Exception as exc:
+        raise AgentError(f"could not reach {host}: {exc}", "failed")
+
+    if len(data) > CRS_MAX_BYTES:
+        raise AgentError("that download is far bigger than a rule set", "failed")
+    return data
+
+
+def _crs_version(tag):
+    """(4, 25, 1) out of 'v4.25.1', or None for anything else."""
+    match = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)", str(tag or "").strip())
+    return tuple(int(p) for p in match.groups()) if match else None
+
+
+def _crs_pick(track):
+    """
+    The newest release on the track, and the asset to fetch for it.
+
+    Only the -minimal tarball is a real asset.  The plain name exists in the
+    release as a signature only, since the full source tarball is the one
+    GitHub generates, and asking for it by name gets a 404.  Minimal is what is
+    wanted anyway: the rules and the example setup file, without the tests and
+    the tooling.
+    """
+    releases = json.loads(_crs_fetch(CRS_RELEASES, timeout=60).decode("utf-8"))
+
+    best = None
+    for release in releases:
+        if release.get("draft") or release.get("prerelease"):
+            continue
+        version = _crs_version(release.get("tag_name"))
+        if not version:
+            continue
+        if track == "lts" and version[:2] != CRS_LTS_SERIES:
+            continue
+        if best is None or version > best[0]:
+            best = (version, release)
+
+    if not best:
+        raise AgentError(f"no {track} release of the rule set was found", "failed")
+
+    version, release = best
+    name = ".".join(str(p) for p in version)
+    wanted = f"coreruleset-{name}-minimal.tar.gz"
+    for asset in release.get("assets") or []:
+        if asset.get("name") == wanted:
+            return name, asset.get("browser_download_url")
+
+    raise AgentError(f"release {name} has no {wanted} to download", "failed")
+
+
+def _crs_unpack(data, into):
+    """
+    Unpack the tarball, throwing away the version folder it is wrapped in.
+
+    Every member is checked before anything is written.  This runs as root and
+    a tarball is a list of paths somebody else chose, so a name with .. in it,
+    an absolute path, or a symlink pointing out of the tree would be a way to
+    write anywhere on the box.  Refused rather than sanitised, because a rule
+    set that needs sanitising is not one to be running.
+    """
+    import io
+    import tarfile
+
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
+        members = []
+        for member in tar.getmembers():
+            if member.islnk() or member.issym():
+                raise AgentError("the rule set tarball contains a link, refused",
+                                 "refused")
+            if not (member.isfile() or member.isdir()):
+                raise AgentError("the rule set tarball contains something that "
+                                 "is not a file or a folder, refused", "refused")
+
+            # Drop the leading coreruleset-x.y.z/ so the layout is the same
+            # whatever the version is.
+            parts = PurePosixPath(member.name).parts
+            if len(parts) < 2:
+                continue
+            relative = PurePosixPath(*parts[1:])
+
+            if relative.is_absolute() or ".." in relative.parts:
+                raise AgentError(f"refusing a tarball path: {member.name}",
+                                 "refused")
+            member.name = str(relative)
+            members.append(member)
+
+        if not members:
+            raise AgentError("the rule set tarball was empty", "failed")
+
+        tar.extractall(path=into, members=members)
+
+
+def v_crs_install(req):
+    """
+    Put the rule set on this node, from the track we are told to follow.
+
+    Unpacked beside the live one and swapped in by moving a symlink, which is a
+    single atomic step.  Replacing the folder in place would leave a window
+    where half the rules are the old ones and half the new, and nginx reading
+    that window fails its config test for reasons nobody could reproduce
+    afterwards.
+    """
+    payload = req.get("payload") or req
+    track = str(payload.get("track") or "lts").strip().lower()
+    if track not in CRS_TRACKS:
+        raise AgentError("the track has to be lts or latest", "invalid")
+
+    CRS_DIR.mkdir(parents=True, exist_ok=True)
+
+    version, url = _crs_pick(track)
+    target = CRS_DIR / f"crs-{version}"
+    staging = CRS_DIR / f".crs-{version}.new"
+
+    if staging.exists():
+        shutil.rmtree(staging, ignore_errors=True)
+    staging.mkdir(parents=True)
+
+    try:
+        _crs_unpack(_crs_fetch(url), staging)
+
+        if not (staging / CRS_SENTINEL).is_file():
+            raise AgentError("what came back does not look like the rule set: "
+                             f"no {CRS_SENTINEL}", "failed")
+
+        rules = sorted((staging / "rules").glob("*.conf"))
+        if len(rules) < 10:
+            raise AgentError(f"only {len(rules)} rule files came back, which is "
+                             "not a whole rule set", "failed")
+
+        # Config, read by the nginx master while it is still root.  Same
+        # reasoning as everything else we stage.
+        for path in staging.rglob("*"):
+            os.chmod(path, 0o750 if path.is_dir() else 0o640)
+
+        if target.exists():
+            shutil.rmtree(target, ignore_errors=True)
+        os.replace(staging, target)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+    # The swap.  os.replace over a symlink is atomic, so nginx either sees the
+    # whole old rule set or the whole new one and never a mixture.
+    temporary = CRS_DIR / ".crs.swap"
+    if temporary.is_symlink() or temporary.exists():
+        temporary.unlink()
+    temporary.symlink_to(target.name)
+    os.replace(temporary, CRS_LINK)
+
+    CRS_STATE.write_text(json.dumps({
+        "version": version,
+        "track": track,
+        "installed": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "rules": len(rules),
+    }))
+
+    # Keep the one before, and nothing older.  A rule set is a few hundred
+    # kilobytes so this is not about disk; it is so a bad update can be put
+    # back by moving the symlink rather than downloading again from a box that
+    # may be the reason the update went wrong.
+    keep = {target.name, f"crs-{version}"}
+    olds = sorted((p for p in CRS_DIR.glob("crs-*") if p.is_dir()),
+                  key=lambda p: p.stat().st_mtime, reverse=True)
+    for old in olds[2:]:
+        if old.name not in keep:
+            shutil.rmtree(old, ignore_errors=True)
+
+    log.warning("installed CRS %s (%s track), %d rule files", version, track, len(rules))
+    return {"ok": True, "version": version, "track": track,
+            "rules": len(rules), "path": str(CRS_LINK)}
+
+
+def v_crs_status(req):
+    """What rule set this node has, if any."""
+    if not CRS_LINK.exists():
+        return {"ok": True, "present": False, "path": str(CRS_LINK)}
+
+    detail = {}
+    if CRS_STATE.is_file():
+        try:
+            detail = json.loads(CRS_STATE.read_text())
+        except (OSError, ValueError):
+            detail = {}
+
+    try:
+        rules = len(list((CRS_LINK / "rules").glob("*.conf")))
+    except OSError:
+        rules = None
+
+    return {
+        "ok": True,
+        "present": True,
+        "path": str(CRS_LINK),
+        "version": detail.get("version"),
+        "track": detail.get("track"),
+        "installed": detail.get("installed"),
+        "rules": rules,
+    }
+
+
 def v_geoip_status(req):
     """What country database this node has, if any."""
     if not GEOIP_FILE.is_file():
@@ -2756,6 +3008,8 @@ VERBS = {
     "geoip_status": v_geoip_status,
     "waf_module": v_waf_module,
     "waf_module_status": v_waf_module_status,
+    "crs_install": v_crs_install,
+    "crs_status": v_crs_status,
 }
 
 
@@ -2776,6 +3030,9 @@ SERIALIZED_VERBS = {
     # at once, or one alongside an apply, and the test proves nothing about
     # what either of them wrote.
     "waf_module",
+    # Two of these would be unpacking into the same folder and racing to move
+    # the same symlink.
+    "crs_install",
 }
 
 

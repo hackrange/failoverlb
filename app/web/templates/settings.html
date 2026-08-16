@@ -248,6 +248,71 @@
 </div>
 
 <div class="card">
+  <div class="card-head">
+    <h2>Firewall rule set</h2>
+    <span class="small faint" id="crs-summary">checking the fleet</span>
+  </div>
+  <div class="card-body">
+    <p class="small muted" style="margin-top:0">
+      The OWASP Core Rule Set, which is what the firewall actually checks
+      requests against.  Same story as the country database: it is files next
+      to nginx on every node, and a node without them refuses the whole config,
+      so this puts them on all of them and keeps them current.
+    </p>
+
+    <div class="field" style="max-width:420px">
+      <label for="waf_crs_track">Which version to follow</label>
+      <select id="waf_crs_track" name="waf_crs_track">
+        <option value="lts" {{ 'selected' if (values.waf_crs_track.value or 'lts') == 'lts' }}>
+          Long term support, recommended
+        </option>
+        <option value="latest" {{ 'selected' if values.waf_crs_track.value == 'latest' }}>
+          Latest release
+        </option>
+      </select>
+      <div class="hint">
+        The long term support line gets fixes and few new rules, which means
+        few new false positives.  Latest catches more, and the price is that a
+        new rule can start refusing something your own application does, on a
+        site already in blocking mode.
+      </div>
+    </div>
+
+    <div class="field" style="max-width:320px">
+      <label for="waf_crs_refresh">Fetch a new one</label>
+      <select id="waf_crs_refresh" name="waf_crs_refresh">
+        <option value="never" {{ 'selected' if (values.waf_crs_refresh.value or 'never') == 'never' }}>Never, I will do it myself</option>
+        <option value="daily" {{ 'selected' if values.waf_crs_refresh.value == 'daily' }}>Daily</option>
+        <option value="weekly" {{ 'selected' if values.waf_crs_refresh.value == 'weekly' }}>Weekly</option>
+        <option value="monthly" {{ 'selected' if values.waf_crs_refresh.value == 'monthly' }}>Monthly</option>
+      </select>
+      <div class="hint">
+        Monthly suits the support line.  Whatever you pick, the active node
+        does it for the whole fleet, and the rules are swapped in one step so
+        nginx never reads half of one version and half of another.
+      </div>
+    </div>
+
+    <div class="flex mt">
+      <button type="button" class="btn" id="crs-install">Install it now</button>
+      <span class="small faint" id="crs-install-state"></span>
+    </div>
+
+    <div id="crs-nodes" class="mt"></div>
+
+    <div class="notice info mt">
+      <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 3a.9.9 0 1 1 0 1.8A.9.9 0 0 1 8 4zm1.2 8H6.8v-.9h.7V7.9h-.7V7h2.1v4.1h.3V12z"/></svg>
+      <div>
+        Save the page first, then install: the download follows whichever track
+        is saved here.  Having the rules on a node does not switch anything on.
+        A site only gets checked once its own firewall setting is turned on,
+        and that starts in watching mode.
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="card">
   <div class="card-head"><h2>Set in the environment</h2></div>
   <div class="card-body">
     <p class="small muted" style="margin-top:0">
@@ -455,6 +520,64 @@ document.addEventListener("DOMContentLoaded", function () {
   });
 
   load();
+
+  // ---- the firewall rule set ------------------------------------------------
+
+  const crsSummary = document.getElementById("crs-summary");
+  const crsNodes = document.getElementById("crs-nodes");
+
+  async function loadCrs() {
+    let state;
+    try { state = await NFM.api("/waf/rules"); }
+    catch (err) { crsSummary.textContent = err.message; return; }
+
+    const rows = Object.entries(state.nodes || {});
+    const have = rows.filter(([, n]) => n.present).length;
+
+    // Disagreement gets said out loud.  Two nodes on different rule sets is
+    // not an outage, it is a site that behaves differently depending on which
+    // box answered, which is far harder to work out from the outside.
+    if (!rows.length) {
+      crsSummary.textContent = "no nodes to ask";
+    } else if (have !== rows.length) {
+      crsSummary.textContent = have + " of " + rows.length + " nodes have it";
+    } else if (!state.agreed) {
+      crsSummary.textContent = "on all " + rows.length + " nodes, but not the same version";
+    } else {
+      crsSummary.textContent = "on all " + rows.length + " nodes";
+    }
+
+    crsNodes.innerHTML = rows.length ? '<table><thead><tr><th>Node</th>' +
+      '<th>Rule set</th><th>Track</th><th>Rules</th></tr></thead><tbody>' +
+      rows.sort().map(([name, n]) => '<tr><td><strong>' + NFM.escapeHtml(name) +
+        '</strong></td><td>' + (n.present
+          ? '<span class="badge ' + (state.agreed ? "ok" : "warn") + '">' +
+            NFM.escapeHtml(n.version || "unknown") + '</span>'
+          : '<span class="badge bad">missing</span>') +
+        '</td><td class="small faint">' + NFM.escapeHtml(n.track || (n.error ? "could not ask" : "—")) +
+        '</td><td class="small faint">' + (n.rules == null ? "" : n.rules) +
+        '</td></tr>').join("") +
+      "</tbody></table>" : "";
+  }
+
+  document.getElementById("crs-install").addEventListener("click", async function () {
+    const button = document.getElementById("crs-install");
+    const state = document.getElementById("crs-install-state");
+    button.disabled = true;
+    state.textContent = "downloading, this takes a few seconds";
+    try {
+      const r = await NFM.api("/waf/rules/install", { method: "POST", body: {} });
+      state.textContent = "installed on " + (r.installed || []).join(", ");
+      NFM.toast("Rule set installed", "ok");
+    } catch (err) {
+      state.textContent = "";
+      NFM.toast(err.message, "bad");
+    }
+    button.disabled = false;
+    loadCrs();
+  });
+
+  loadCrs();
 });
 </script>
 {% endblock %}

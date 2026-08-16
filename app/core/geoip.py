@@ -20,11 +20,11 @@ agent decides everything else.  A verb that took a URL and a destination would
 be a way to write any file anywhere as root, which is the one thing the agent
 exists not to be.
 """
-import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 
 from app.core import settings_store
+from app.core.fleet_verbs import ask_every_node
 
 log = logging.getLogger("nfm.geoip")
 
@@ -59,46 +59,9 @@ def _payload() -> dict:
     return payload
 
 
-async def _ask_every_node(verb: str, payload: dict) -> dict:
-    """
-    Run one verb here and on every peer.
-
-    Imported inside the function like everything else that reaches the cluster,
-    since those modules import this one back.
-
-    The peer call takes {verb, payload} and not the arguments flattened out.
-    Sent flat, the far agent is called with none of them and the failure reads
-    like the two nodes disagreeing about the request rather than one of them
-    never receiving it.
-    """
-    from app.config import get_settings
-    from app.core.agent_client import get_agent
-    from app.core.cluster import PeerClient, get_cluster
-    from app.db import session_scope
-    from app.models import Node
-
-    me = get_settings().node_name
-    cluster = get_cluster()
-    results = {}
-
-    try:
-        results[me] = await get_agent().call(verb, **payload)
-    except Exception as exc:
-        results[me] = {"ok": False, "error": str(exc)}
-
-    with session_scope() as session:
-        peers = [n for n in session.query(Node).all() if not n.is_self]
-        peer_rows = [(n.name, PeerClient(n, cluster.ca)) for n in peers]
-
-    async def one(name, client):
-        try:
-            answer = await client.call("/peer/agent", {"verb": verb, "payload": payload})
-            results[name] = answer.get("data") or answer
-        except Exception as exc:
-            results[name] = {"ok": False, "error": str(exc)}
-
-    await asyncio.gather(*(one(name, client) for name, client in peer_rows))
-    return results
+# Moved to fleet_verbs, since the rule set install needs exactly the same thing.
+# Kept as a name here so nothing that already calls it has to change.
+_ask_every_node = ask_every_node
 
 
 async def install_on_fleet() -> dict:
