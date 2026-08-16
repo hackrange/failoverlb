@@ -2039,8 +2039,21 @@ map $cookie_{cookie} $sticky_set_{var} {{
             lines.extend(self._limit_lines(cfg, indent=8))
 
         lines.extend(self._serving_lines(loc_only, indent=8))
-        lines.extend(self._cors_lines(
-            loc_only, indent=8, name=f"{host.name}_{loc.path}"))
+
+        # Cross site access is not written per path, and the reason is nginx
+        # rather than laziness.  add_header is not inherited into a block that
+        # has any of its own, so a path with CORS headers silently loses the
+        # site's security headers, HSTS included: watched it happen, the path
+        # answered with its CORS headers and no X-Frame-Options.  And the
+        # preflight cannot work there anyway, because the site's `if` returns
+        # in the rewrite phase, before nginx has picked a location at all.
+        #
+        # So the setting is offered on the site only, and the catalog says so.
+        if loc_only.get("cors_enabled"):
+            log.warning("cors on path %s of %s is set on the site instead",
+                        loc.path, host.name)
+            lines.append("        # Cross site access is set for the whole "
+                         "site rather than per path.")
 
         # Only this path's own rules.  Everything else in cfg is inherited from
         # the site, and nginx already inherits those into the location on its
