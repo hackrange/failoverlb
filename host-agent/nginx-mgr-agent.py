@@ -2540,7 +2540,20 @@ def v_geoip_install(req):
     if source not in GEOIP_HOSTS:
         raise AgentError("the source has to be dbip or maxmind", "invalid")
 
-    GEOIP_DIR.mkdir(parents=True, exist_ok=True)
+    # The one folder outside /etc and /var this agent writes, and the sandbox
+    # only has a hole for it if the unit file is current.  An older unit gives a
+    # read only filesystem here, which as a bare OSError reads like a broken
+    # disk rather than an agent that needs upgrading.
+    try:
+        GEOIP_DIR.mkdir(parents=True, exist_ok=True)
+        probe = GEOIP_DIR / ".nfm-write-test"
+        probe.write_bytes(b"")
+        probe.unlink()
+    except OSError as exc:
+        raise AgentError(
+            f"{GEOIP_DIR} is not writable by the agent ({exc.strerror}).  Run "
+            "install.sh --upgrade on this node, which makes the folder and "
+            "gives the agent a hole in its sandbox for it.", "failed")
 
     errors = []
     data = None

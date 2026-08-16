@@ -335,7 +335,7 @@ fi
 mkdir -p /var/backups/nginx-fleet-manager /var/lib/nginx-fleet-manager \
          /usr/local/lib/nginx-fleet-manager /var/www/certbot \
          /etc/letsencrypt /var/log/letsencrypt /var/lib/letsencrypt \
-         /var/cache/nginx /var/log/nginx /etc/nginx
+         /var/cache/nginx /var/log/nginx /etc/nginx /usr/share/GeoIP
 chmod 0750 /usr/local/lib/nginx-fleet-manager
 
 install -m 0644 "$SCRIPT_DIR/host-agent/nginx-mgr-agent.service" "$AGENT_UNIT"

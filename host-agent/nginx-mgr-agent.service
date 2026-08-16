@@ -122,6 +122,12 @@ ReadWritePaths=-/etc/wireguard
 ReadWritePaths=-/var/log/nginx
 ReadWritePaths=-/var/cache/nginx
 
+# Where the country database goes, the conventional place for one, and the only
+# folder outside /etc and /var this agent may write.  Dashed, so a box that has
+# never installed one starts as before: the install verb says the folder is not
+# writable, which is a better answer than an agent that will not come up.
+ReadWritePaths=-/usr/share/GeoIP
+
 # No reading anybody's home folder.
 ProtectHome=yes
 
