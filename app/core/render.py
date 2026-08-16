@@ -1302,7 +1302,12 @@ map $cookie_{cookie} $sticky_set_{var} {{
         lines.append(f"    ssl_certificate     {cert_dir}/fullchain.pem;")
         lines.append(f"    ssl_certificate_key {cert_dir}/privkey.pem;")
 
-        proto = list(cfg.get("ssl_protocols") or ["TLSv1.2", "TLSv1.3"])
+        # 1.3 only, because that is what makes the post quantum key exchange
+        # the normal case: X25519MLKEM768 is a 1.3 group, and a client that
+        # prefers 1.2 never reaches it.  Existing sites are unaffected — their
+        # versions were written down explicitly before this moved, so this
+        # fallback only ever applies to something new.
+        proto = list(cfg.get("ssl_protocols") or ["TLSv1.3"])
 
         # Post quantum only.  This one overrules the version list on purpose,
         # because the two cannot disagree and both be honoured: the quantum

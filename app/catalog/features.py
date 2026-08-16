@@ -2121,7 +2121,7 @@ register(
         directive="ssl_protocols",
         contexts=("server",),
         type="multiselect",
-        default=["TLSv1.2", "TLSv1.3"],
+        default=["TLSv1.3"],
         options=[
             ("TLSv1", "TLS 1.0 (broken, do not use)"),
             ("TLSv1.1", "TLS 1.1 (broken, do not use)"),

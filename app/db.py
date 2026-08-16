@@ -12,7 +12,7 @@ import logging
 from contextlib import contextmanager
 
 from sqlalchemy import create_engine, event, text
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import get_settings
 from app.models import Base
@@ -184,10 +184,52 @@ def ensure_schema():
         log.warning("added missing columns to the database: %s", ", ".join(added))
 
 
+def pin_existing_tls_versions():
+    """
+    Write down what existing sites already serve, before the default moves.
+
+    New sites now default to TLS 1.3 only, which is what makes the post quantum
+    key exchange the normal case rather than something somebody has to know to
+    ask for.  X25519MLKEM768 is a 1.3 group; leave 1.2 on and a client that
+    prefers it never gets near it.
+
+    The danger is entirely in the sites that already exist.  A site that never
+    set a version renders from a fallback, so moving that fallback would drop
+    TLS 1.2 from every one of them on the next apply — on sites nobody touched,
+    breaking whichever old clients they were quietly still serving, with no
+    change anybody made to point at.
+
+    So this pins them first.  Every site with no explicit setting gets the pair
+    it is serving today written down, and after that the default can move
+    without touching a single existing site.  Idempotent, and it does nothing
+    at all on a fresh install because there is nothing to pin.
+    """
+    from app.models import VirtualHost, json_get, json_set
+
+    engine = get_engine()
+    pinned = 0
+
+    with Session(engine) as session:
+        for host in session.query(VirtualHost).all():
+            settings = json_get(host.settings, {})
+            if "ssl_protocols" in settings:
+                continue
+            settings["ssl_protocols"] = ["TLSv1.2", "TLSv1.3"]
+            host.settings = json_set(settings)
+            pinned += 1
+        if pinned:
+            session.commit()
+
+    if pinned:
+        log.warning("pinned the TLS versions on %d existing sites, so the new "
+                    "1.3 only default changes nothing they already serve", pinned)
+
+
 def init_db():
     engine = get_engine()
     Base.metadata.create_all(engine)
     ensure_schema()
+    pin_existing_tls_versions()
 
     with engine.connect() as conn:
         conn.execute(text("PRAGMA optimize"))

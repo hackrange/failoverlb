@@ -88,11 +88,16 @@ CAPABILITIES = [
         "key": "queueing",
         "label": "Request queueing",
         "category": "Load balancing",
-        "plus": 5, "lb": 0,
-        "note": "Plus holds requests when every backend is busy.  We have "
-                "nothing: at the connection limit a request gets a 502 rather "
-                "than waiting.  Set the limit high enough and shape load with "
-                "rate limiting before it gets there.",
+        "plus": 5, "lb": 1,
+        "note": "Plus queues on the thing that matters, which is every backend "
+                "being busy: at the connection limit we give a 502 rather than "
+                "waiting, and there is no fixing that from out here.  One at "
+                "rather than nought because rate limiting with a burst does "
+                "queue — excess requests are delayed rather than refused unless "
+                "you tick serve burst immediately — so load can be shaped "
+                "before it reaches the limit.  It queues on arrival rate, not "
+                "on how busy the backends are, and those are different "
+                "questions.",
     },
     {
         "key": "stream",
@@ -155,13 +160,29 @@ CAPABILITIES = [
         "label": "TLS termination, stapling, session cache",
         "category": "TLS and certificates",
         "plus": 5, "lb": 5,
-        "note": "Free nginx, both sides.  Ours builds against a current "
-                "OpenSSL so the post quantum key exchange is available, which "
-                "is a build choice rather than a feature either product owns.",
+        "note": "Free nginx, both sides.  Nothing to choose between them, and "
+                "what we do with a current OpenSSL is its own row below.",
     },
     {
+        "key": "pqc",
+        "label": "Post quantum key exchange",
+        "category": "TLS and certificates",
+        "plus": 3, "lb": 5,
+        "note": "Harvest now, decrypt later is the reason this matters before "
+                "anybody has a quantum computer: traffic captured today is "
+                "decrypted whenever one arrives.  We build against OpenSSL "
+                "3.5, so X25519MLKEM768 is there, and the shipped TLS snippet "
+                "offers it first with classic curves behind it, so a site gets "
+                "it without anybody knowing to ask.  F5 have been adding this "
+                "to recent releases, so the honest gap is not whether Plus can "
+                "but whether the build you have does and whether somebody "
+                "configured the groups.  Building our own TLS stack is a cost "
+                "in every other row and it buys this one.",
+    },
+
+    {
         "key": "acme",
-        "label": "Certificate issuance and renewal",
+        "label": "Certificate lifecycle, end to end",
         "category": "TLS and certificates",
         "plus": 3, "lb": 5,
         "note": "nginx has gained a native ACME module, and it issues "
@@ -189,13 +210,28 @@ CAPABILITIES = [
         "key": "waf",
         "label": "Web application firewall",
         "category": "Security",
-        "plus": 5, "lb": 3,
-        "note": "F5's App Protect is a serious WAF and a separate purchase.  "
-                "Ours is ModSecurity with the OWASP rules, installed and kept "
-                "current across the fleet from a page.  Three rather than four "
-                "because the part that makes a WAF survivable — learning from "
-                "known testers and turning that into exclusions — is specified "
-                "and not yet built.",
+        "plus": 5, "lb": 4,
+        "note": "F5's App Protect is a serious WAF and a separate purchase, and "
+                "it covers ground we do not: bot defence, API security, "
+                "signature feeds.  That is why this is four and not five.\n\n"
+                "What it is not is a whitelist, and neither is nearly anything "
+                "else off the shelf.  Almost every WAF sold is a blacklist: it "
+                "ships rules describing attacks, and everything it fails to "
+                "recognise is allowed.  Tuning one means waiting for it to "
+                "break your own application and then excusing it, in "
+                "production, on real users.\n\n"
+                "Ours is built the other way round.  Put a site in watching, "
+                "name the addresses your testers work from, exercise the "
+                "application properly, and what fired for those addresses "
+                "becomes an allowed list you tick and save as a named profile "
+                "reusable across sites.  The safeguard is that only traffic "
+                "from a vouched-for address can be whitelisted at all: a rule "
+                "a stranger also tripped during the window is held back as "
+                "mixed rather than averaged into looking safe, so somebody "
+                "scanning you mid-test cannot get their probes permanently "
+                "excused.  That is the part most products lack, and it is the "
+                "difference between a firewall people keep switched on and one "
+                "they turn off at two in the morning.",
     },
     {
         "key": "jwt",
@@ -428,9 +464,12 @@ CATEGORIES = [
     # answer near the bottom has told you something about itself before you
     # reach any of the numbers.
     "Support",
+    # Second, because this is where the product is strongest and it was sitting
+    # in the middle of the page where nobody would reach it.  Somebody weighing
+    # this up should meet the row we lose, then the rows we win outright.
+    "TLS and certificates",
     "Load balancing",
     "Health and resilience",
-    "TLS and certificates",
     "Security",
     "Observability",
     "Operations",
