@@ -489,6 +489,10 @@ DIRECTIVE_TO_KEY = {
     "proxy_read_timeout": "proxy_read_timeout",
     "proxy_send_timeout": "proxy_send_timeout",
     "proxy_buffering": "proxy_buffering",
+    # Rewriting what a backend says about itself.  Both take two arguments and
+    # arg_string keeps them together, which is what the setting stores.
+    "proxy_cookie_path": "proxy_cookie_path",
+    "proxy_redirect": "proxy_redirect",
     "proxy_buffer_size": "proxy_buffer_size",
     "proxy_buffers": "proxy_buffers",
     "proxy_request_buffering": "proxy_request_buffering",
