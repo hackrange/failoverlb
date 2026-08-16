@@ -940,8 +940,8 @@ async def waf_profile_create(request: Request, g: ObjectGuard = Depends(changing
     """
     Save a set of ticked hits as a named profile.
 
-    The provenance travels with it — which site, which addresses, which
-    request, what date — because an exclusion nobody can explain is one nobody
+    The provenance travels with it, which site, which addresses, which
+    request and what date, because an exclusion nobody can explain is one nobody
     will dare remove, and a WAF full of those checks nothing.
     """
     g.require("edit_sites")
@@ -1112,8 +1112,8 @@ async def duplicate_host(host_id: str, request: Request,
       * **The certificate itself.**  It is issued for names this copy does not
         have, and pointing a new site at it would serve a certificate that does
         not match the address people typed, which browsers refuse loudly.  What
-        *can* be copied is how it was obtained — the challenge type, key type,
-        authority and DNS credentials — so asking for a certificate for the new
+        *can* be copied is how it was obtained, the challenge type, key type,
+        authority and DNS credentials, so asking for a certificate for the new
         names is a tick rather than a form.  It is created and attached here
         and issued by the normal certificate flow, because issuing needs DNS to
         already point at this fleet and the site to be serving, and neither is

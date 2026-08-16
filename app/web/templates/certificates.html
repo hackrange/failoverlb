@@ -127,10 +127,10 @@
                 {% if c.days_left is not none %}
                   {{ c.days_left }} days
                 {% else %}
-                  <span class="faint">&mdash;</span>
+                  <span class="faint">-</span>
                 {% endif %}
               </td>
-              <td class="small faint">{{ c.issued_by_node or '&mdash;'|safe }}</td>
+              <td class="small faint">{{ c.issued_by_node or '-'|safe }}</td>
               <td class="small faint">
                 {% set synced = c.sync_map().keys()|list %}
                 {{ synced|length }} of {{ nodes|length }}

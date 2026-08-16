@@ -128,7 +128,7 @@
                 <span class="dot bad"></span>not running
               {% endif %}
             </td>
-            <td class="mono small faint">{{ n.public_ip or '&mdash;'|safe }}</td>
+            <td class="mono small faint">{{ n.public_ip or '-'|safe }}</td>
             <td class="small faint">
               {% if n.is_self %}
                 now

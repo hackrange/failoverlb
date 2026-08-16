@@ -8,7 +8,7 @@ document.addEventListener("DOMContentLoaded", function () {
   function cell(v) {
     // A rate we do not have yet is different from a rate of zero, and showing
     // 0 for "no second sample" makes a busy box look idle.
-    return v === null || v === undefined ? '<span class="faint">&mdash;</span>' : v;
+    return v === null || v === undefined ? '<span class="faint">-</span>' : v;
   }
 
   async function load() {
@@ -264,7 +264,7 @@ document.addEventListener("DOMContentLoaded", function () {
                 {% endif %}
               </td>
               <td class="faint">
-                {{ pool.hosts|map(attribute='name')|join(', ') or '&mdash;'|safe }}
+                {{ pool.hosts|map(attribute='name')|join(', ') or '-'|safe }}
               </td>
             </tr>
           {% endfor %}

@@ -574,7 +574,7 @@ async def site_detail(host_id: str, request: Request, db: DBSession = Depends(ge
         # placeholder is the default server on port 80, so unknown names over
         # http land on the Coming Soon page.  It carries no https listener at
         # all, so for https nginx falls back to the first server block it
-        # parsed — and our config is pulled in with a glob, which is
+        # parsed, and our config is pulled in with a glob, which is
         # alphabetical.  The alphabetically first site with https on is
         # therefore what somebody actually sees, which is why a switched off
         # site shows a completely unrelated one.
@@ -774,9 +774,9 @@ async def waf_profiles_page(request: Request, db: DBSession = Depends(get_db)):
 
     They are created from a site's own tab, in the middle of a learning
     session, which is the right place to make one and the wrong place to live.
-    A profile is applied to any number of sites, so the questions that follow —
-    which sites use this, is it still valid against the rules installed now,
-    can I delete it — are fleet questions and need a page of their own.
+    A profile is applied to any number of sites, so the questions that follow are
+    fleet questions and need a page of their own: which sites use this, is it
+    still valid against the rules installed now, and can I delete it.
     """
     from app.models import WafProfile
 

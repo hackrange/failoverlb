@@ -58,7 +58,7 @@
   Both cases below end the same way: nginx has no server block for the name, so
   the request goes to the default server and somebody is looking at a different
   site's page.  That is the most confusing answer this system can give, and
-  until now nothing said any of it — the only sign a site was off was an
+  until now nothing said any of it.  The only sign a site was off was an
   unticked box on another tab.
 #}
 {% if not host.enabled %}
@@ -557,7 +557,7 @@
 
     Its own card because it is an activity rather than a setting: it has a
     start, an end and a result.  The addresses are asked for before anything
-    starts, which is the whole safeguard — a firewall that whitelists whatever
+    starts, which is the whole safeguard.  A firewall that whitelists whatever
     fired while it was learning is a gift to anybody scanning the site at the
     time.
   #}
@@ -1687,8 +1687,8 @@ document.addEventListener("DOMContentLoaded", function () {
           <label for="cl-cert">Create a certificate for the new hostnames</label>
         </div>
         <div class="hint" style="margin:-4px 0 14px 23px">
-          Copies how the original gets its certificate — the challenge type, key
-          type and authority — and attaches a new one for these names.  It is
+          Copies how the original gets its certificate, the challenge type, key
+          type and authority, and attaches a new one for these names.  It is
           not issued here: issuing needs the hostname already pointing at this
           fleet and the site already serving, so press Issue on the certificates
           page once both are true.
@@ -1945,7 +1945,7 @@ document.addEventListener("DOMContentLoaded", function () {
               NFM.escapeHtml(e.rule_id) + "</strong></td><td class='mono small'>" +
               NFM.escapeHtml(e.path || "whole site") + "</td><td class='small muted'>" +
               NFM.escapeHtml(e.message || "") + "</td><td class='small faint'>" +
-              NFM.escapeHtml(e.learned_from_ip || "—") + "</td></tr>").join("") +
+              NFM.escapeHtml(e.learned_from_ip || "-") + "</td></tr>").join("") +
             "</tbody></table></div>"
           : '<div class="small faint">This profile excuses nothing yet.</div>';
     }

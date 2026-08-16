@@ -86,7 +86,7 @@ document.addEventListener("DOMContentLoaded", function () {
           "</td><td class='mono small'>" +
           NFM.escapeHtml(e.path || "whole site") + "</td>" +
           "<td class='small muted'>" + NFM.escapeHtml(e.message || "") + "</td>" +
-          "<td class='small faint'>" + NFM.escapeHtml(e.learned_from_ip || "—") +
+          "<td class='small faint'>" + NFM.escapeHtml(e.learned_from_ip || "-") +
           "</td><td class='small faint'>" + when(e.created_at) + "</td></tr>";
       }).join("");
 

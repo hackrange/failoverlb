@@ -94,7 +94,7 @@
                          {{ 'checked' if m.backup }}>
                 </td>
                 <td class="num faint small">
-                  {{ '%.0f ms'|format(m.avg_response_ms) if m.avg_response_ms else '&mdash;'|safe }}
+                  {{ '%.0f ms'|format(m.avg_response_ms) if m.avg_response_ms else '-'|safe }}
                 </td>
                 <td class="right nowrap">
                   {% if can('drain_member') %}

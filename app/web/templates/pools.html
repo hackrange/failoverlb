@@ -123,10 +123,10 @@
                 </td>
                 <td class="num">{{ m.weight }}</td>
                 <td class="num faint">
-                  {{ '%.0f ms'|format(m.last_response_ms) if m.last_response_ms else '&mdash;'|safe }}
+                  {{ '%.0f ms'|format(m.last_response_ms) if m.last_response_ms else '-'|safe }}
                 </td>
                 <td class="num faint">
-                  {{ '%.0f ms'|format(m.avg_response_ms) if m.avg_response_ms else '&mdash;'|safe }}
+                  {{ '%.0f ms'|format(m.avg_response_ms) if m.avg_response_ms else '-'|safe }}
                 </td>
                 <td class="small faint">{{ (m.last_error or '')[:70] }}</td>
                 <td class="right nowrap">

@@ -77,7 +77,7 @@ CAPABILITIES = [
         "note": "Plus issues its own cookie, so it works whatever the "
                 "application does.  We hash a cookie the application already "
                 "sets, which is as good when there is one, or hash the client "
-                "address when there is not — and that sends a whole office "
+                "address when there is not, and that sends a whole office "
                 "behind one NAT to a single backend.",
     },
     {
@@ -91,7 +91,7 @@ CAPABILITIES = [
                 "weight in five steps over a window you choose.  The reason it "
                 "matters is a JVM with a cold JIT and an empty connection pool "
                 "being handed a third of the traffic the instant it answers a "
-                "health check, falling over again, and flapping — which is "
+                "health check, falling over again, and flapping, which is "
                 "worse than it having stayed down.  Four rather than five "
                 "because each step is a reload, where Plus ramps inside the "
                 "worker.",
@@ -105,8 +105,8 @@ CAPABILITIES = [
                 "being busy: at the connection limit we give a 502 rather than "
                 "waiting, and there is no fixing that from out here.  One at "
                 "rather than nought because rate limiting with a burst does "
-                "queue — excess requests are delayed rather than refused unless "
-                "you tick serve burst immediately — so load can be shaped "
+                "queue.  Excess requests are delayed rather than refused unless "
+                "you tick serve burst immediately, so load can be shaped "
                 "before it reaches the limit.  It queues on arrival rate, not "
                 "on how busy the backends are, and those are different "
                 "questions.",
@@ -411,7 +411,7 @@ CAPABILITIES = [
         "label": "DNS based failover between sites",
         "category": "Operations",
         "plus": 0, "lb": 3,
-        "note": "Not in Plus at all — F5 sell that as a different product "
+        "note": "Not in Plus at all.  F5 sell that as a different product "
                 "entirely.  Ours answers DNS with the healthy site, which "
                 "covers the common case and inherits every DNS caching problem "
                 "there has ever been.",

@@ -3208,7 +3208,7 @@ def _waf_rotate_one(path, cap, keep_history=True):
     master and every worker hold this file open for writing, so a rename leaves
     them all writing into the rotated file: the new one stays empty, the hits
     page goes quiet, and the disk carries on filling.  nginx's own logs survive
-    a rename because a USR1 makes it reopen them, and that does not help here —
+    a rename because a USR1 makes it reopen them, and that does not help here,
     libmodsecurity opens the audit log itself, not nginx's log module, so the
     signal never reaches it.
 

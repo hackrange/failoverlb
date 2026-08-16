@@ -195,7 +195,7 @@ def pin_existing_tls_versions():
 
     The danger is entirely in the sites that already exist.  A site that never
     set a version renders from a fallback, so moving that fallback would drop
-    TLS 1.2 from every one of them on the next apply — on sites nobody touched,
+    TLS 1.2 from every one of them on the next apply, on sites nobody touched,
     breaking whichever old clients they were quietly still serving, with no
     change anybody made to point at.
 

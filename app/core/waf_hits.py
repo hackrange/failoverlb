@@ -10,9 +10,8 @@ whitelists whatever fired while it was learning is a gift to anybody scanning
 the site at the time: their probes become permanent exclusions, and nothing in
 the interface would ever say so.  So a hit is only ever a candidate when it
 came from an address somebody named as a tester **before** the traffic
-happened.  Everything else is shown, because it is the more interesting half —
-either a real attack or a real user meeting a false positive — and those need
-different answers.
+happened.  Everything else is shown, because it is the more interesting half.  It is either a real attack or
+a real user meeting a false positive, and those need different answers.
 """
 import ipaddress
 import logging
@@ -68,7 +67,7 @@ async def fleet_hits(site: str, since=None) -> dict:
 
     Both nodes rather than the active one.  Whichever node was active while the
     testers were working is the one holding the evidence, and that is not
-    necessarily the node somebody is looking at now — least of all after a
+    necessarily the node somebody is looking at now, least of all after a
     failover, which is exactly when people go looking.
     """
     payload = {"site": site}

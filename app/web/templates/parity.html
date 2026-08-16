@@ -33,7 +33,7 @@
     number here as our opinion, not a measurement.  What we can offer is the
     reasoning: each row says why it scored what it did, so you can disagree
     with the argument rather than the star.  Where the paid product wins, the
-    row says so plainly — {{ totals.behind }} of {{ totals.total }} rows go
+    row says so plainly.  {{ totals.behind }} of {{ totals.total }} rows go
     that way.
   </div>
 </div>
@@ -56,7 +56,7 @@
       separate prices, so they are named in the notes rather than counted as
       part of Plus.  The tally is
       <strong>{{ totals.ahead }} ahead, {{ totals.behind }} behind,
-      {{ totals.level }} level</strong> — offered as a shape, not a score,
+      {{ totals.level }} level</strong>, offered as a shape and not a score,
       because adding up stars would say a request queue and a support contract
       weigh the same.
     </p>
@@ -112,7 +112,7 @@
     <ul class="small">
       {% for c in only_here %}
         <li><a href="#cmp-{{ c.key }}"><strong>{{ c.label }}</strong></a>
-            {{ stars(c.lb) }} &mdash; {{ c.note }}</li>
+            {{ stars(c.lb) }} - {{ c.note }}</li>
       {% endfor %}
     </ul>
   </div>
@@ -182,9 +182,8 @@
           we are: the installer builds ModSecurity, the OWASP rules are
           installed and kept current across the fleet, and a site can be put in
           front of them from its own tab.  App Protect is still the better
-          product, and the part that makes a WAF survivable — learning what
-          your own application does and turning that into exclusions — is
-          specified and not yet built.  See the WAF row above.</li>
+          product.  The part that makes a WAF survivable, learning what your own
+          application does and turning that into exclusions, is now built.  See the WAF row above.</li>
       <li><strong>In flight request counts on the dashboard.</strong> Our
           numbers come from the access log, and a request that has not finished
           has not been logged yet.</li>

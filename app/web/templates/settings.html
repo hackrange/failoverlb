@@ -497,7 +497,7 @@ document.addEventListener("DOMContentLoaded", function () {
         '</strong></td><td>' + (n.present
           ? '<span class="badge ok">' + NFM.escapeHtml((n.modified || "").slice(0, 10)) + '</span>'
           : '<span class="badge bad">missing</span>') +
-        '</td><td class="small faint">' + NFM.escapeHtml(n.source || (n.error ? "could not ask" : "—")) +
+        '</td><td class="small faint">' + NFM.escapeHtml(n.source || (n.error ? "could not ask" : "-")) +
         '</td><td class="small faint">' + size(n.bytes) + '</td></tr>').join("") +
       "</tbody></table>" : "";
   }
@@ -554,7 +554,7 @@ document.addEventListener("DOMContentLoaded", function () {
           ? '<span class="badge ' + (state.agreed ? "ok" : "warn") + '">' +
             NFM.escapeHtml(n.version || "unknown") + '</span>'
           : '<span class="badge bad">missing</span>') +
-        '</td><td class="small faint">' + NFM.escapeHtml(n.track || (n.error ? "could not ask" : "—")) +
+        '</td><td class="small faint">' + NFM.escapeHtml(n.track || (n.error ? "could not ask" : "-")) +
         '</td><td class="small faint">' + (n.rules == null ? "" : n.rules) +
         '</td></tr>').join("") +
       "</tbody></table>" : "";
