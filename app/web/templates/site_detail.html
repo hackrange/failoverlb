@@ -386,11 +386,19 @@
           where a site may be served, not for keeping anybody determined out.
         </p>
 
+        {#
+          Check all and Uncheck all, rather than Select all and Clear.  Clear
+          is the word on a search box and it reads like one, and on a list of
+          tick boxes the pair of them should say the same thing in both
+          directions.  Both act on whatever the search has left on screen, so
+          finding a continent and unticking it is two moves.
+        #}
         <div class="flex mb">
           <input type="search" id="geo-search" placeholder="Find a country"
                  style="max-width:260px">
-          <button type="button" class="btn sm" id="geo-all">Select all</button>
-          <button type="button" class="btn sm" id="geo-none">Clear</button>
+          <button type="button" class="btn sm" id="geo-all">Check all</button>
+          <button type="button" class="btn sm" id="geo-none">Uncheck all</button>
+          <span class="small faint" id="geo-scope"></span>
           <span class="small faint" id="geo-blocked-summary"></span>
         </div>
 
@@ -1497,13 +1505,20 @@ document.addEventListener("DOMContentLoaded", function () {
 
     document.getElementById("geo-search").addEventListener("input", function (e) {
       const want = e.target.value.trim().toLowerCase();
+      let shown = 0;
       list.querySelectorAll("label").forEach(function (label) {
-        label.style.display = !want || label.textContent.toLowerCase().includes(want)
-          ? "" : "none";
+        const match = !want || label.textContent.toLowerCase().includes(want);
+        label.style.display = match ? "" : "none";
+        if (match) shown += 1;
       });
+      // Say out loud what the two buttons are about to touch.  With a search
+      // running they act on what is left on screen, and a button that quietly
+      // means something different than it did a moment ago should say so.
+      document.getElementById("geo-scope").textContent =
+        want ? "the two buttons act on these " + shown : "";
     });
 
-    // Only what is on screen, so a search then Select all does what it looks
+    // Only what is on screen, so a search then Check all does what it looks
     // like it does rather than quietly touching the other two hundred.
     function setVisible(checked) {
       list.querySelectorAll("label").forEach(function (label) {
