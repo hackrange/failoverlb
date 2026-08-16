@@ -187,6 +187,37 @@ PREREQUISITE = {
     "proxy_cache_min_uses": {"proxy_cache": CACHE_ZONE},
     "proxy_cache_lock": {"proxy_cache": CACHE_ZONE},
     "proxy_cache": {"proxy_cache": CACHE_ZONE},
+    "proxy_cache_background_update": {"proxy_cache": CACHE_ZONE},
+    "cache_status_header": {"proxy_cache": CACHE_ZONE},
+
+    # Read out of the renderer the same way as the rest, by finding what it
+    # tests before it writes the setting.
+    "csp_report_only": {"content_security_policy": "default-src 'self'"},
+    "cors_allow_methods": {"cors_enabled": True, "cors_allow_origin": "https://x.example"},
+    "cors_allow_headers": {"cors_enabled": True, "cors_allow_origin": "https://x.example"},
+    "cors_allow_credentials": {"cors_enabled": True, "cors_allow_origin": "https://x.example"},
+    "websocket_timeout": {"websocket_enabled": True},
+    "autoindex": {"try_files": "$uri $uri/ =404"},
+    "fancyindex_exact_size": {"fancyindex": True},
+    "fancyindex_name_length": {"fancyindex": True},
+}
+
+# Settings that need the site to be a different shape, not another setting.
+#
+# Skipped with the reason rather than reported as dead, because the check is
+# built around one scratch site and changing its mode or its certificate would
+# be testing something other than the setting.
+NEEDS_A_DIFFERENT_SITE = {
+    "proxy_ssl_verify": "only written for a pool that speaks https, and the "
+                        "pool page owns it there",
+    "proxy_ssl_server_name": "same as proxy_ssl_verify",
+    "proxy_intercept_errors": "only written when the site has error pages of "
+                              "its own",
+    "ssl_stapling": "only written for a certificate that names an OCSP "
+                    "responder",
+    "autoindex": "only meaningful on a site serving files",
+    "fancyindex": "only meaningful on a site serving files",
+    "server_header_mode": "written into the http level file, not the site",
 }
 
 print("  every setting changes the config when it is set")
@@ -198,6 +229,7 @@ dead = []
 unavailable = []
 no_value = []
 needs_companion = []
+needs_site = []
 
 for feature in all_features().values():
     if "server" not in feature.contexts:
@@ -222,6 +254,10 @@ for feature in all_features().values():
     # wired.  A check that cries wolf gets ignored, which is worse than not
     # having it, so the companion goes in first and the setting is judged on
     # top of that.
+    if feature.key in NEEDS_A_DIFFERENT_SITE:
+        needs_site.append(feature.key)
+        continue
+
     extra = dict(PREREQUISITE.get(feature.key) or {})
     if extra and any(v is None for v in extra.values()):
         needs_companion.append(feature.key)
@@ -259,6 +295,8 @@ print(f"          {len(unavailable)} skipped, the fleet has no module for them")
 print(f"          {len(no_value)} skipped, no value worth inventing")
 print(f"          {len(needs_companion)} skipped, their companion object does "
       f"not exist on this node")
+print(f"          {len(needs_site)} skipped, they need a site of a different "
+      f"shape than the one tested")
 
 
 # =============================================================================
