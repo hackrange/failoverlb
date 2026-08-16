@@ -17,6 +17,7 @@ import difflib
 import ipaddress
 import json
 import logging
+import time
 import re
 import socket
 
@@ -838,6 +839,38 @@ async def waf_log_state(request: Request, db: DBSession = Depends(get_db)):
 
     get_user(request, db)
     return await hits_mod.log_status()
+
+
+@router.get("/metrics/history")
+async def metrics_history(request: Request, start: int = None, end: int = None,
+                          db: DBSession = Depends(get_db)):
+    """
+    Stored telemetry between two times, at the finest resolution that covers it.
+
+    Takes a range rather than a window name, because the page lets somebody drag
+    across a chart to zoom and "the last hour" cannot express "twenty past two
+    until half past".
+
+    The answer carries the resolution it drew from and the oldest bucket held,
+    so the page can say a flat line is a five minute average rather than
+    nothing happening, and can say when the history is shorter than the window
+    asked for instead of drawing a short line somebody reads as a quiet period.
+    """
+    from app.core import metrics_store
+
+    get_user(request, db)
+    now = int(time.time())
+    end = int(end or now)
+    start = int(start or (end - 3600))
+
+    # A month is the most that is kept, so asking for more is asking for
+    # something that cannot exist.  Clamped rather than refused: somebody
+    # dragging a chart should get what there is.
+    span = end - start
+    if span > metrics_store.KEEP_COARSE:
+        start = end - metrics_store.KEEP_COARSE
+
+    return metrics_store.series(start, end)
 
 
 @router.get("/waf/rule-ids")

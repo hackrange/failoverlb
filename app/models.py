@@ -1406,6 +1406,59 @@ class TunnelPeer(Base):
         return exp is None or exp > utcnow()
 
 
+class MetricSample(Base):
+    """
+    One bucket of telemetry for one node, written down so it outlives a restart.
+
+    The in memory history is fifteen second detail for two hours, which answers
+    "what is happening now" and loses everything the moment the manager
+    restarts.  This is the other question: what did last Tuesday look like.
+
+    **Two resolutions, and the reason is what a chart can usefully draw.**  An
+    hour long window built from five minute buckets is twelve points, which is
+    a sketch.  A thirty day window at one minute is 43,200 points per node,
+    which is more than a chart can draw and more than anybody can read.  So one
+    minute rows are kept for 48 hours and rolled up into five minute rows kept
+    for thirty days.
+
+    Storage is not the constraint anybody expected.  All tiers together are
+    under 35 MB for four nodes, which is why the resolution was chosen for the
+    charts rather than for the disk.
+
+    **Min, mean and max, never a sample.**  A five minute bucket holding one
+    reading throws away the spike that was the reason somebody is looking, and
+    it throws it away at exactly the zoom level where nobody can check.
+    """
+
+    __tablename__ = "metric_samples"
+
+    id = Column(Integer, primary_key=True)
+
+    node = Column(String(64), nullable=False, index=True)
+
+    # Bucket start, epoch seconds.  An integer rather than a DateTime because
+    # every read is a range scan and every write is a bucket boundary, and both
+    # are arithmetic.
+    at = Column(Integer, nullable=False, index=True)
+
+    # "1m" or "5m".
+    resolution = Column(String(4), nullable=False, default="1m")
+
+    # {"cpu_percent": {"min": 3, "avg": 7, "max": 41}, ...}
+    #
+    # Json rather than a column per metric, because the set of things worth
+    # charting has already changed twice and a migration per metric is how a
+    # feature like this stops being extended.
+    values = Column(Text, nullable=False, default="{}")
+
+    __table_args__ = (
+        UniqueConstraint("node", "at", "resolution", name="uq_metric_bucket"),
+    )
+
+    def value_map(self):
+        return json_get(self.values, {})
+
+
 class WafProfile(Base):
     """
     A tuned rule set, named, and applied to any number of sites.

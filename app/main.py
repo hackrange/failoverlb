@@ -499,6 +499,27 @@ def start_scheduler():
         coalesce=True,
     )
 
+    # Telemetry written down, so it survives a restart.
+    #
+    # Every minute, and on every node.  The job folds the completed minute out
+    # of memory, rolls anything past 48 hours into five minute buckets, and
+    # prunes past thirty days.  All three are cheap and two of them usually do
+    # nothing, which is what lets this run on a timer rather than being
+    # something somebody has to remember.
+    def _store_metrics():
+        from app.core import metrics_store
+
+        metrics_store.tick()
+
+    scheduler.add_job(
+        _store_metrics,
+        "interval",
+        seconds=60,
+        id="metrics_store",
+        max_instances=1,
+        coalesce=True,
+    )
+
     # What the backends say about themselves, for anything publishing it.
     #
     # Slower than our own numbers on purpose.  This reaches out to somebody
