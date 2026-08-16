@@ -180,24 +180,37 @@ def write_minute(collector=None) -> dict:
 
 def roll_up() -> dict:
     """
-    One minute buckets into five minute ones, once they are old enough.
+    Keep the five minute tier current, not just eventually.
 
-    Only buckets past the fine retention window are folded, so zooming into
-    yesterday still finds one minute detail and nothing is coarsened while
-    somebody might still want it.
+    The first version only folded buckets already past the fine retention
+    window, which sounds tidy and leaves a hole: the coarse tier then has
+    nothing for the most recent 48 hours, so asking for thirty days comes back
+    missing the two days anybody actually cares about.
+
+    So every completed five minute window gets a coarse bucket as soon as it is
+    complete.  Both tiers stay current, the query picks one by how far back the
+    question reaches, and pruning is what makes them differ rather than a race
+    between two jobs.
     """
-    cutoff = _bucket(time.time() - KEEP_FINE, FIVE_MINUTES)
+    edge = _bucket(time.time(), FIVE_MINUTES)
     made = 0
 
     with session_scope() as session:
+        # Only windows that have finished.  A bucket still filling would be
+        # rewritten on every run and its last point would wobble.
         rows = session.query(MetricSample).filter(
             MetricSample.resolution == "1m",
-            MetricSample.at < cutoff,
+            MetricSample.at < edge,
         ).order_by(MetricSample.node, MetricSample.at).all()
 
         grouped = {}
         for row in rows:
             grouped.setdefault((row.node, _bucket(row.at, FIVE_MINUTES)), []).append(row)
+
+        have = {(r.node, r.at, len(r.value_map()))
+                for r in session.query(MetricSample).filter(
+                    MetricSample.resolution == "5m").all()}
+        seen = {(node, at) for node, at, _ in have}
 
         for (node, at), members in grouped.items():
             merged = _merge([m.value_map() for m in members])
@@ -207,15 +220,15 @@ def roll_up() -> dict:
                 MetricSample.node == node,
                 MetricSample.at == at,
                 MetricSample.resolution == "5m",
-            ).first()
+            ).first() if (node, at) in seen else None
             if existing:
                 existing.values = json_set(merged)
             else:
                 session.add(MetricSample(node=node, at=at, resolution="5m",
                                          values=json_set(merged)))
-            made += 1
+                made += 1
 
-    return {"rolled": made, "before": cutoff}
+    return {"rolled": made, "before": edge}
 
 
 def prune() -> dict:
@@ -274,32 +287,23 @@ def series(start: int, end: int, nodes=None) -> dict:
         return {"resolution": None, "nodes": {}, "start": start, "end": end}
 
     with session_scope() as session:
+        # Which tier, decided by how far back the question reaches rather than
+        # by what happens to be stored.
+        #
+        # The first version asked whether the fine tier already held something
+        # as old as the start, which is false for every window longer than the
+        # history, so a fresh install answered a one hour question with the
+        # coarse tier and no rows at all.  What matters is whether the fine tier
+        # is *kept* that far back; if it is, it has whatever exists.
+        resolution = "1m" if start >= int(time.time()) - KEEP_FINE else "5m"
+
         query = session.query(MetricSample).filter(
-            MetricSample.resolution == "1m",
+            MetricSample.resolution == resolution,
             MetricSample.at >= start, MetricSample.at <= end,
         )
         if nodes:
             query = query.filter(MetricSample.node.in_(list(nodes)))
-        fine = query.order_by(MetricSample.at).all()
-
-        # Does the fine tier really cover this?  Having *some* rows is not the
-        # same as covering the window: after 48 hours the early part has been
-        # rolled up, and drawing only the recent half of a range somebody asked
-        # for is worse than drawing all of it slightly coarser.
-        oldest = session.query(func.min(MetricSample.at)).filter(
-            MetricSample.resolution == "1m").scalar()
-        covered = fine and oldest is not None and oldest <= start + MINUTE
-
-        if covered:
-            rows, resolution = fine, "1m"
-        else:
-            query = session.query(MetricSample).filter(
-                MetricSample.resolution == "5m",
-                MetricSample.at >= start, MetricSample.at <= end,
-            )
-            if nodes:
-                query = query.filter(MetricSample.node.in_(list(nodes)))
-            rows, resolution = query.order_by(MetricSample.at).all(), "5m"
+        rows = query.order_by(MetricSample.at).all()
 
         out = {}
         for row in rows:
