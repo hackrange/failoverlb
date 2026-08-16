@@ -1008,6 +1008,164 @@ async def create_host(request: Request, g: ObjectGuard = Depends(changing)):
     return _host_detail(host)
 
 
+@router.post("/hosts/{host_id}/duplicate")
+async def duplicate_host(host_id: str, request: Request,
+                         g: ObjectGuard = Depends(changing)):
+    """
+    Copy a site, with everything that makes it behave the way it does.
+
+    Most sites in a fleet are the fifth one like the other four.  Rebuilding
+    the settings, the paths and the hand written config by eye is how the fifth
+    one ends up subtly different from the rest, and the difference is found
+    months later by whoever is debugging only that site.
+
+    **Three things are deliberately not copied**, and each of them would be a
+    bug if it were:
+
+      * **The certificate itself.**  It is issued for names this copy does not
+        have, and pointing a new site at it would serve a certificate that does
+        not match the address people typed, which browsers refuse loudly.  What
+        *can* be copied is how it was obtained — the challenge type, key type,
+        authority and DNS credentials — so asking for a certificate for the new
+        names is a tick rather than a form.  It is created and attached here
+        and issued by the normal certificate flow, because issuing needs DNS to
+        already point at this fleet and the site to be serving, and neither is
+        true in the second a clone is made.
+      * **The names it answers to.**  Asked for as part of the clone rather
+        than copied, because two server blocks claiming the same server_name
+        means nginx quietly serves whichever it parsed first and the other site
+        looks broken for no visible reason.  A hostname already claimed by
+        another site is refused here rather than discovered later.
+      * **Being switched on.**  A copy arrives disabled.  It is a starting
+        point somebody is about to edit, and a half edited site taking traffic
+        the moment it is created is not what anybody meant by duplicate.
+    """
+    original = g.get(VirtualHost, host_id, "edit_sites")
+    payload = await request.json() if await request.body() else {}
+
+    name = validate_name(payload.get("name"), "site name")
+    if g.session.query(VirtualHost).filter(VirtualHost.name == name).first():
+        raise HTTPException(status_code=400,
+                            detail=f"there is already a site called {name}")
+
+    # The hostnames are asked for at clone time rather than left to be fixed
+    # afterwards.  Changing the name and the names it answers to are the same
+    # job, and splitting them across two screens is how a clone ends up live on
+    # the original's hostname for the minute in between.
+    raw_names = payload.get("server_names")
+    if isinstance(raw_names, str):
+        raw_names = [n.strip() for n in raw_names.replace(",", "\n").splitlines()]
+    names = [str(n).strip() for n in (raw_names or []) if str(n).strip()] or [name]
+
+    clash = [h.name for h in g.session.query(VirtualHost).all()
+             if set(h.name_list()) & set(names)]
+    if clash:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{', '.join(clash)} already answers to one of those "
+                   f"hostnames.  Two server blocks claiming the same name means "
+                   f"nginx serves whichever it parsed first and the other looks "
+                   f"broken for no visible reason.")
+
+    copy = VirtualHost(
+        name=name,
+        server_names=json_set(names),
+        enabled=False,
+        listen_http=original.listen_http,
+        listen_https=original.listen_https,
+        http_port=original.http_port,
+        https_port=original.https_port,
+        default_server=False,      # only one site can be, and it is not this one
+        http2=original.http2,
+        force_https=original.force_https,
+        redirect_to_primary=original.redirect_to_primary,
+        mode=original.mode,
+        pool_id=original.pool_id,
+        document_root=original.document_root,
+        redirect_target=original.redirect_target,
+        redirect_code=original.redirect_code,
+        settings=original.settings,
+        access_list_id=original.access_list_id,
+        error_page_template_id=original.error_page_template_id,
+        admin_only=original.admin_only,
+        custom_config=original.custom_config,
+        config_mode=original.config_mode,
+        notes=f"Copied from {original.name}." +
+              (f"  {original.notes}" if original.notes else ""),
+        updated_by=g.user.username,
+    )
+    g.session.add(copy)
+    g.session.flush()
+
+    # The paths as well.  A site whose behaviour lives in its locations would
+    # come back as an empty shell without these, which looks like the copy
+    # worked and is the least useful half of it.
+    for loc in original.locations:
+        g.session.add(Location(
+            host_id=copy.id,
+            path=loc.path,
+            match_type=loc.match_type,
+            sort_order=loc.sort_order,
+            mode=loc.mode,
+            pool_id=loc.pool_id,
+            document_root=loc.document_root,
+            alias=loc.alias,
+            redirect_target=loc.redirect_target,
+            redirect_code=loc.redirect_code,
+            settings=loc.settings,
+            access_list_id=loc.access_list_id,
+            error_page_template_id=loc.error_page_template_id,
+            custom_config=loc.custom_config,
+            enabled=loc.enabled,
+        ))
+
+    # A certificate for the new names, if asked for.
+    #
+    # Created and attached, not issued.  Issuing reaches Lets Encrypt, needs
+    # the new hostname already resolving to this fleet and the site already
+    # serving the challenge, and a clone is disabled and usually made before
+    # the DNS exists.  Trying anyway would fail most of the time and leave
+    # somebody unpicking a half made clone rather than pressing one button on
+    # the certificates page when they are ready.
+    made_cert = None
+    if payload.get("create_certificate"):
+        source = original.cert
+        cert = Certificate(
+            name=names[0],
+            domains=json.dumps(names),
+            source=source.source if source else "letsencrypt",
+            challenge_type=source.challenge_type if source else "http-01",
+            key_type=source.key_type if source else "ecdsa",
+            auto_renew=bool(source.auto_renew) if source else True,
+        )
+        if source is not None:
+            # Renew from wherever the original came from.  A clone of a site on
+            # a bought certificate that quietly renewed from somewhere else is
+            # a change nobody asked for and nobody sees until a browser
+            # complains about the issuer.
+            cert.authority_id = source.authority_id
+            cert.dns_plugin = source.dns_plugin
+            cert.dns_credentials_encrypted = source.dns_credentials_encrypted
+        g.session.add(cert)
+        g.session.flush()
+        copy.cert_id = cert.id
+        made_cert = {"id": cert.id, "name": cert.name,
+                     "domains": names, "issued": False}
+
+    g.session.commit()
+
+    audit.record("site.duplicate", user=g.user, object_type="site",
+                 object_name=name,
+                 detail=f"copied from {original.name}, "
+                        f"{len(original.locations)} paths, disabled" +
+                        (f", certificate {made_cert['name']} created and attached "
+                         f"but not issued" if made_cert else ", no certificate"))
+
+    out = _host_detail(copy)
+    out["certificate_created"] = made_cert
+    return out
+
+
 @router.put("/hosts/{host_id}")
 async def update_host(host_id: str, request: Request, g: ObjectGuard = Depends(changing)):
     host = g.get(VirtualHost, host_id, "edit_sites")

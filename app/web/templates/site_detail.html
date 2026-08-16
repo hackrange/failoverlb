@@ -10,6 +10,9 @@
   </div>
   <div class="page-actions">
     <a href="{{ base }}/sites" class="btn">Back to sites</a>
+    {% if can('edit_sites') %}
+      <button class="btn" id="clone-site">Clone this site</button>
+    {% endif %}
     {% if can('apply_config') %}
       <button class="btn primary" id="apply-config">Apply config</button>
     {% endif %}
@@ -1543,6 +1546,86 @@ document.addEventListener("DOMContentLoaded", function () {
       saveBtn.disabled = false;
     }
   });
+
+  // ---- clone ----
+  //
+  // The hostname is asked for here rather than left to be fixed afterwards.
+  // Changing the name and changing what it answers to are the same job, and
+  // splitting them over two screens is how a clone spends a minute live on the
+  // original's hostname.
+  const cloneBtn = document.getElementById("clone-site");
+  if (cloneBtn) {
+    cloneBtn.addEventListener("click", function () {
+      NFM.openModal("Clone " + SITE_NAME, "", `
+        <div class="field">
+          <label for="cl-name">New site name</label>
+          <input type="text" id="cl-name" placeholder="pod02-env12.hackrange.com">
+        </div>
+        <div class="field">
+          <label for="cl-names">Hostnames it answers to</label>
+          <textarea id="cl-names" rows="3"
+                    placeholder="one per line"></textarea>
+          <div class="hint">
+            Follows the name above until you edit it.  A hostname another site
+            already claims is refused: two server blocks with the same
+            server_name means nginx serves whichever it parsed first and the
+            other one looks broken for no visible reason.
+          </div>
+        </div>
+        <div class="checkline">
+          <input type="checkbox" id="cl-cert" checked>
+          <label for="cl-cert">Create a certificate for the new hostnames</label>
+        </div>
+        <div class="hint" style="margin:-4px 0 14px 23px">
+          Copies how the original gets its certificate — the challenge type, key
+          type and authority — and attaches a new one for these names.  It is
+          not issued here: issuing needs the hostname already pointing at this
+          fleet and the site already serving, so press Issue on the certificates
+          page once both are true.
+        </div>
+
+        <div class="notice info">
+          <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 3a.9.9 0 1 1 0 1.8A.9.9 0 0 1 8 4zm1.2 8H6.8v-.9h.7V7.9h-.7V7h2.1v4.1h.3V12z"/></svg>
+          <div>
+            Settings, paths and hand written config come across.  The clone
+            arrives <strong>switched off</strong>, so a half edited site cannot
+            take traffic the moment it exists.
+          </div>
+        </div>
+        <div class="mt"><button class="btn primary" id="cl-go">Clone it</button></div>`,
+        true);
+
+      // Mirror the name into the hostnames until somebody types there.
+      const nameBox = document.getElementById("cl-name");
+      const namesBox = document.getElementById("cl-names");
+      let edited = false;
+      namesBox.addEventListener("input", function () { edited = true; });
+      nameBox.addEventListener("input", function () {
+        if (!edited) namesBox.value = nameBox.value.trim();
+      });
+
+      document.getElementById("cl-go").addEventListener("click", async function () {
+        const name = nameBox.value.trim();
+        if (!name) { NFM.toast("Give the clone a name", "bad"); return; }
+        let made;
+        try {
+          made = await NFM.api("/hosts/" + HOST_ID + "/duplicate", {
+            method: "POST",
+            body: {
+              name: name,
+              server_names: namesBox.value || name,
+              create_certificate: document.getElementById("cl-cert").checked,
+            },
+          });
+        } catch (err) { NFM.toast(err.message, "bad"); return; }
+        NFM.closeModal();
+        NFM.toast(made.certificate_created
+          ? "Cloned, with a certificate ready to issue.  It is switched off until you turn it on."
+          : "Cloned.  It is switched off until you turn it on.", "ok");
+        window.location.href = "{{ base }}/sites/" + made.id;
+      });
+    });
+  }
 
   const delBtn = document.getElementById("delete-site");
   if (delBtn) delBtn.addEventListener("click", function () {
