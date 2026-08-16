@@ -2935,6 +2935,79 @@ register(
     ),
 
     Feature(
+        key="proxy_cookie_path",
+        label="Rewrite cookie paths",
+        category="proxy",
+        directive="proxy_cookie_path",
+        contexts=("server", "location"),
+        type="string",
+        default="",
+        multi_arg=True,
+        help=HelpText(
+            summary="Fix the Path on cookies from a backend served under a "
+                    "different path than the one your visitors use.",
+            detail=(
+                "Needed whenever you proxy an application that lives under a "
+                "sub path to the root of a site.  Guacamole under /guacamole/, "
+                "Jenkins under /jenkins/, almost anything on Tomcat.\n\n"
+                "The application sets its session cookie with Path=/guacamole/ "
+                "because that is where it thinks it is.  Your visitor is at "
+                "the root of the site, so the browser decides the cookie does "
+                "not apply and never sends it back.  The symptom is the "
+                "clearest one in proxying: the login page works, the login "
+                "itself works, and then every page after it says you are "
+                "logged out.  Nothing errors and nothing appears in a log.\n\n"
+                "Two arguments: the path the backend sets, then the path it "
+                "should become."
+            ),
+            use_cases=[
+                "Guacamole, Jenkins or anything else on Tomcat proxied at /",
+                "A backend moved behind a path your visitors do not see",
+            ],
+            example="/guacamole/ /",
+            example_config="proxy_cookie_path /guacamole/ /;",
+            warning=(
+                "Its partner is usually needed too.  If the application sends "
+                "redirects it will point them at its own path, and those need "
+                "rewriting as well, which nginx does with proxy_redirect."
+            ),
+            docs_url=f"{D}/http/ngx_http_proxy_module.html#proxy_cookie_path",
+        ),
+    ),
+
+    Feature(
+        key="proxy_redirect",
+        label="Rewrite redirect locations",
+        category="proxy",
+        directive="proxy_redirect",
+        contexts=("server", "location"),
+        type="string",
+        default="",
+        multi_arg=True,
+        help=HelpText(
+            summary="Fix the Location header when a backend redirects to its "
+                    "own address or path rather than yours.",
+            detail=(
+                "The other half of proxying an application that lives "
+                "somewhere other than where your visitors think it does.  A "
+                "backend that redirects to http://localhost:8080/guacamole/ "
+                "sends the visitor's browser to a machine that is not there.\n\n"
+                "Two arguments: what the backend says, and what it should say "
+                "instead.  Leave this empty and nginx does its default, which "
+                "rewrites redirects pointing at the proxied address and leaves "
+                "everything else alone, and that is right more often than not."
+            ),
+            use_cases=[
+                "A backend under a sub path that redirects to its own path",
+                "An application that redirects to its internal hostname",
+            ],
+            example="/guacamole/ /",
+            example_config="proxy_redirect /guacamole/ /;",
+            docs_url=f"{D}/http/ngx_http_proxy_module.html#proxy_redirect",
+        ),
+    ),
+
+    Feature(
         key="http3_enabled",
         label="HTTP/3 (QUIC)",
         category="tls",
