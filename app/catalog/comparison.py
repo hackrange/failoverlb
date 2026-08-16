@@ -615,22 +615,89 @@ CAPABILITIES = [
                   "the post quantum row above, which we only win because we "
                   "build our own.",
     },
+    # ------------------------------------------------------- backup and restore
+    #
+    # This was one row until somebody pointed out that backup and restore is
+    # not one question.  Taking a copy, what is in the copy, and what you can
+    # do with it later are three different jobs, and the four products are good
+    # at different ones.  Three rows rather than the six it could have been:
+    # expanding a category you happen to be strong in is the oldest way to tilt
+    # a comparison, and doing it in a table you wrote about your own product is
+    # worse.  Note what it did to the totals anyway, in the page copy.
     {
-        "key": "backup",
-        "label": "Backing up and rebuilding a fleet",
-        "category": "Operations",
-        "plus": 0, "lb": 5, "kemp": 5, "aloha": 3,
-        "note": "One file holds the whole configuration, and a fleet with "
-                "nothing in common with the old one can be rebuilt from it.  "
-                "With Plus this is whatever you already do for config files, "
-                "which for most people is whatever their configuration "
-                "management does.",
-        "others": "Kemp matches us: scheduled backups, a copy pushed to a "
-                  "remote server, and a restore that lets you pick which parts "
-                  "come back.  On ALOHA you export the configuration and keep "
-                  "the file, and the sync between cluster members is a manual "
-                  "push per service, so rebuilding a pair is more steps than "
-                  "it sounds.",
+        "key": "backup_taking",
+        "label": "Taking a backup, and where it goes",
+        "category": "Backup and restore",
+        "plus": 1, "lb": 3, "kemp": 5, "aloha": 3,
+        "note": "With Plus this is your config files, so it is whatever your "
+                "configuration management already does, which for a lot of "
+                "people is a real answer and for the rest is nothing.  Ours is "
+                "a button and one file that lands in your browser.  Three and "
+                "not more, because there is no schedule and nowhere to send "
+                "it: a backup somebody has to remember to take is a backup "
+                "that is three months old when you need it.",
+        "others": "Kemp is the best here and it is not close.  Backups can run "
+                  "on a schedule and push themselves to a remote server over "
+                  "SCP or SFTP, so the copy is off the box without anybody "
+                  "doing anything.  FTP is the default and that is worth "
+                  "changing, since it sends the file and the password in "
+                  "clear.  ALOHA is an Export button on the Setup tab, which "
+                  "is the same shape as ours.",
+    },
+    {
+        "key": "backup_contents",
+        "label": "What is actually in the backup",
+        "category": "Backup and restore",
+        "plus": 1, "lb": 5, "kemp": 2, "aloha": 3,
+        "note": "The row that decides whether a backup is worth having.  Ours "
+                "holds everything the fleet is configured to do: sites, pools, "
+                "certificates and their private keys, WAF profiles and the "
+                "exclusions somebody spent an afternoon earning, accounts, "
+                "access lists, error pages.  Node names and cluster identity "
+                "are deliberately left out, because they belong to the "
+                "machines rather than to the configuration.  The file is "
+                "encrypted with AES-256, and the honest caveat is that the "
+                "password is the operator's login password through PBKDF2 at "
+                "1000 iterations, which is not a lot: treat the file as the "
+                "bag of private keys it is.",
+        "others": "Kemp scores two for one specific reason, and it is the "
+                  "single most useful fact on this page: **their documentation "
+                  "says no SSL certificate information is contained within a "
+                  "backup.**  Everything else is there, and the certificates "
+                  "are a separate export you have to remember.  A restore that "
+                  "brings back every virtual service and no certificates is a "
+                  "restore that ends with every site down, and you find that "
+                  "out at the worst moment.  For ALOHA the export carries the "
+                  "configuration; we could not confirm from published material "
+                  "whether uploaded certificates travel with it, so three "
+                  "reflects what we could read and not a judgement.",
+    },
+    {
+        "key": "backup_restore",
+        "label": "Restoring, and rebuilding somewhere else",
+        "category": "Backup and restore",
+        "plus": 1, "lb": 4, "kemp": 4, "aloha": 2,
+        "note": "Ours rebuilds a fleet that has nothing in common with the old "
+                "one: different addresses, different node names, different "
+                "hardware.  Secrets are unsealed on the way out and sealed "
+                "again with the new fleet's own key, because the key that "
+                "protects them here does not exist there.  Four and not five "
+                "because it is all or nothing.  You cannot restore only the "
+                "pools, and the one thing deliberately left behind is the "
+                "management network list, since restoring it is a fine way to "
+                "lock yourself out of the system you are in the middle of "
+                "rebuilding.",
+        "others": "Kemp draws with us by being good at the opposite half.  "
+                  "You choose what comes back: the base configuration, the "
+                  "virtual services, GEO, each on its own.  That is genuinely "
+                  "better than our all or nothing for the everyday case of "
+                  "undoing one afternoon.  It is weaker for the disaster case, "
+                  "because the base configuration carries the addresses of the "
+                  "box it came from.  ALOHA imports what it exported and has a "
+                  "well documented factory reset, including one from the "
+                  "serial console for when the config is bad enough that the "
+                  "interface will not load, which is a nice thing to have and "
+                  "not the same as a restore.",
     },
     {
         "key": "tunnel",
@@ -792,6 +859,7 @@ CATEGORIES = [
     "Security",
     "Observability",
     "Operations",
+    "Backup and restore",
     "Content and protocols",
 ]
 
