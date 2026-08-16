@@ -34,6 +34,10 @@ from app.models import MemberState
 
 log = logging.getLogger("nfm.render")
 
+# Where the country database lives.  One place, because it has to match what is
+# actually on the nodes and a path typed twice is a path that disagrees.
+GEOIP_DATABASE = "/usr/share/GeoIP/GeoLite2-Country.mmdb"
+
 MANAGED_ROOT = "/etc/nginx/nginxmgr"
 CERT_SYNC_DIR = f"{MANAGED_ROOT}/certs"
 LE_LIVE_DIR = "/etc/letsencrypt/live"
@@ -295,6 +299,10 @@ class Renderer:
         # list, so the only way to honour a list is to look the caller's origin
         # up and answer with it when it is on the list.
         self._cors_maps = []
+        # Same idea for the country blocking: the lookup is declared once at
+        # the http level, and each site that blocks anything gets a map turning
+        # a country code into a yes or no.
+        self._geo_maps = []
         # Render as though every enabled backend were healthy.
         #
         # Only used to answer "has a person changed something since the last
@@ -356,6 +364,21 @@ class Renderer:
             self.files["maps/cors.conf"] = (
                 HEADER.format(detail="Which origins each site answers to.")
                 + "\n" + "\n".join(self._cors_maps))
+
+        if self._geo_maps:
+            # The lookup has to be at the http level, so it lives here rather
+            # than in a server block, and it is only written when a site
+            # actually blocks somewhere.  The database has to exist on every
+            # node: without it nginx will not start, and the apply is refused
+            # on the node that is missing it before anything goes live.
+            self.files["maps/geoip.conf"] = (
+                HEADER.format(detail="Country lookup, and who each site refuses.")
+                + "\n"
+                + "geoip2 " + GEOIP_DATABASE + " {\n"
+                + "    auto_reload 5m;\n"
+                + "    $nfm_geoip2_country country iso_code;\n"
+                + "}\n\n"
+                + "\n".join(self._geo_maps))
 
         return self.files
 
@@ -1420,6 +1443,9 @@ map $cookie_{cookie} $sticky_set_{var} {{
 
         lines.extend(self._serving_lines(cfg, indent=4))
         lines.extend(self._cors_lines(cfg, indent=4, name=host.name))
+        lines.extend(self._geo_block_lines(cfg, indent=4, name=host.name))
+        lines.extend(self._exploit_lines(cfg, indent=4))
+        lines.extend(self._purge_lines(cfg, indent=4))
 
         # Which resolver nginx uses when it has to look a name up while it is
         # running.  Several arguments, so it goes through the same writer as a
@@ -1541,6 +1567,136 @@ map $cookie_{cookie} $sticky_set_{var} {{
             for line in host.custom_config.splitlines():
                 lines.append(f"    {line}")
 
+        return lines
+
+    # A short list of things scanners try, in one place so the pattern can be
+    # read and argued with rather than being buried in a format string.
+    #
+    # Deliberately narrow.  Every entry here is something no ordinary request
+    # contains, because a pattern that catches real traffic gets turned off
+    # after the first complaint and then protects nothing.  The catalog says
+    # plainly this is a speed bump and not a firewall, and the entries are the
+    # ones its own example names plus the two that everybody scans for.
+    #
+    # No dollar sign in here, and that is not an oversight.  nginx unescapes
+    # \$ inside a quoted string before the regex ever sees it, so a pattern
+    # written to match a literal ${jndi: reaches PCRE as ${jndi:, where the
+    # dollar is an end of string anchor and the whole branch can never match.
+    # It looked right in the config file and let the probe straight through,
+    # which a real request found and reading never would.  Matching jndi: on
+    # its own catches the same thing and cannot be got wrong.
+    EXPLOIT_PATTERN = (
+        r"(\.\./|\.\.%2[fF]|<script|%3[cC]script|"
+        r"union[[:space:]%+]+select|/etc/passwd|jndi:)"
+    )
+
+    def _exploit_lines(self, cfg, indent=4) -> list:
+        """The scanner speed bump, when somebody asks for it."""
+        if not cfg.get("block_common_exploits"):
+            return []
+        pad = " " * indent
+        return [
+            f"{pad}# Obvious attack patterns in the path or the query string.",
+            f"{pad}# A speed bump for scanners, not a firewall: it stops the",
+            f"{pad}# noisy ones and nobody who is actually trying.  Watch the",
+            f"{pad}# logs after turning it on, since an app that puts odd",
+            f"{pad}# things in a query string will be caught by it too.",
+            f'{pad}if ($request_uri ~* "{self.EXPLOIT_PATTERN}") {{',
+            f"{pad}    return 403;",
+            f"{pad}}}",
+        ]
+
+    def _purge_lines(self, cfg, indent=4) -> list:
+        """
+        The PURGE endpoint, locked to the management network.
+
+        Only rendered when there is a cache to purge.  proxy_cache_purge names
+        a zone, so writing it without one is a config nginx refuses, and the
+        setting is on a site that may have no cache at all.
+
+        The allow list is not optional.  A purge anybody can reach is a way to
+        push every request through to the backend on demand, which is a denial
+        of service with fewer steps than usual.
+        """
+        if not cfg.get("cache_purge_enabled"):
+            return []
+
+        pad = " " * indent
+        zone = cfg.get("proxy_cache_zone")
+        if not zone:
+            return [
+                f"{pad}# Cache purging is switched on and this site has no cache",
+                f"{pad}# zone, so there is nothing to purge.  Pick a cache on the",
+                f"{pad}# site first.",
+            ]
+
+        if not self.has_module("ngx_cache_purge"):
+            return [
+                f"{pad}# Cache purging is switched on and this nginx was built",
+                f"{pad}# without the purge module, so it cannot be written.",
+            ]
+
+        lines = [
+            f"{pad}# Drop one cached page on demand:  curl -X PURGE https://.../path",
+            f"{pad}# Management network only, on purpose.",
+            f"{pad}location ~ ^/purge(/.*)$ {{",
+        ]
+        for addr in self.node_addresses:
+            lines.append(f"{pad}    allow {addr};")
+        for cidr in self.settings.get("management_networks", []):
+            lines.append(f"{pad}    allow {cidr};")
+        lines.append(f"{pad}    deny all;")
+        lines.append(f"{pad}    proxy_cache_purge {_safe_name(zone)} "
+                     f"$scheme$host$1;")
+        lines.append(f"{pad}}}")
+        return lines
+
+    def _geo_block_lines(self, cfg, indent=4, name="site") -> list:
+        """
+        Refusing a list of countries, which takes a database and two blocks.
+
+        The lookup itself lives in the http level file, once, because the
+        geoip2 block cannot go in a server.  What is written here is the map
+        that turns a country code into a yes or no for this site, and the test.
+
+        Worth knowing what this costs: the database has to be on every node.
+        Without it nginx will not start at all, so the apply is refused on the
+        node that is missing it and nothing goes live, which is the two phase
+        apply doing its job rather than a fleet going dark.
+        """
+        codes = [str(c).strip().upper() for c in (cfg.get("geoip2_country_block") or [])
+                 if str(c).strip()]
+        if not codes:
+            return []
+
+        if not self.has_module("geoip2"):
+            pad = " " * indent
+            return [
+                f"{pad}# Country blocking is set and this nginx was built without",
+                f"{pad}# the geoip2 module, so it cannot be written.",
+            ]
+
+        bad = [c for c in codes if not re.fullmatch(r"[A-Z]{2}", c)]
+        codes = [c for c in codes if re.fullmatch(r"[A-Z]{2}", c)]
+        pad = " " * indent
+        lines = []
+        for code in bad:
+            log.warning("dropping a country code that is not two letters: %r", code)
+            lines.append(f"{pad}# {code!r} is not a two letter country code, left out")
+        if not codes:
+            return lines
+
+        var = f"nfm_geo_{_safe_var(name)}"
+        entries = ["    default 0;"] + [f"    {code} 1;" for code in codes]
+        self._geo_maps.append(
+            f"map $nfm_geoip2_country ${var} {{\n" + "\n".join(entries) + "\n}\n")
+
+        lines.append(f"{pad}# Refused: {', '.join(codes)}.  A VPN defeats this in one")
+        lines.append(f"{pad}# click, so it is for cutting scanner noise and meeting a")
+        lines.append(f"{pad}# rule about where a site may be served, not for security.")
+        lines.append(f"{pad}if (${var}) {{")
+        lines.append(f"{pad}    return 403;")
+        lines.append(f"{pad}}}")
         return lines
 
     def _cors_lines(self, cfg, indent=4, name="site") -> list:

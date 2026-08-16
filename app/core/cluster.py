@@ -870,8 +870,10 @@ class ClusterManager:
           - nodes we cannot see right now
           - nodes whose nginx is not running
           - pools with no healthy members left
+          - country blocking, which needs a database this cannot see
         """
-        from app.models import Pool
+        from app.core.render import GEOIP_DATABASE
+        from app.models import Pool, VirtualHost
 
         warnings = []
         with session_scope() as session:
@@ -910,6 +912,23 @@ class ClusterManager:
                             f"backends, below the {pool.min_healthy_members} you asked for"
                         ),
                     })
+
+            # Country blocking needs a database file on every node, and
+            # nothing here can see a node's filesystem.  Without it nginx does
+            # not start, so the apply is refused on that node and the error is
+            # about opening an MMDB file, which says nothing about which
+            # setting asked for it.  One sentence here beats that.
+            blocking = [h.name for h in session.query(VirtualHost).all()
+                        if h.enabled and h.setting_map().get("geoip2_country_block")]
+            if blocking:
+                warnings.append({
+                    "level": "warning",
+                    "message": (
+                        f"country blocking is set on {', '.join(sorted(blocking))}, "
+                        f"which needs {GEOIP_DATABASE} on every node.  Without it "
+                        f"nginx will not start and this change will be refused"
+                    ),
+                })
 
         return {"warnings": warnings, "safe": not any(
             w["level"] == "critical" for w in warnings
