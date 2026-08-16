@@ -39,6 +39,18 @@ SESSION_COOKIE = "nfm_session"
 # and must not change anything, which is why they do not need one.
 UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
+# Paths where a one time ticket in the URL stands in for the management allow
+# list, because the machine that has to reach them is by definition not on it.
+#
+# A tuple rather than a check buried in the middleware, so adding a third is
+# one line in one place and checks/trust.py can assert the list rather than
+# trusting somebody to remember.  Every entry must be a path whose credential
+# is the ticket: single use, short lived, stored only as a hash.
+TICKETED_PATHS = (
+    "/tunnel/enrol/",     # a workload joining the tunnel
+    "/tunnel/psk/",       # a workload already on it, taking a pre-shared key
+)
+
 # Paths that skip the login check.  Kept short on purpose and checked by exact
 # match or a strict prefix, never with a loose "in" test, because a substring
 # check here is how /healthz-but-actually-admin sneaks through.
@@ -273,21 +285,30 @@ class AdminAllowlistMiddleware(BaseHTTPMiddleware):
         if request.url.path == "/healthz":
             return await call_next(request)
 
-        # Tunnel enrolment is open too, and this one is a deliberate trade
-        # rather than an oversight.
+        # The two tunnel paths a workload has to reach are open, and this is a
+        # deliberate trade rather than an oversight.
         #
         # The whole point of the tunnel is that a workload on somebody else's
         # network, with no inbound access and no public address, can run one
         # command and join.  That machine is not on the management allow list
         # and never will be: if it were, it would not need a tunnel.
         #
-        # What stands in for the allow list is the ticket in the path.  It is
-        # single use, it expires in two hours, only its hash is stored, and it
-        # is spent the moment a key comes back.  Without a valid one this
-        # answers exactly what it answers anybody else, which is nothing.
+        # What stands in for the allow list is the ticket in the path.  Each is
+        # single use, expires in two hours, only its hash is stored, and it is
+        # spent the moment it is read.  Without a valid one these answer exactly
+        # what they answer anybody else, which is nothing.
         #
-        # Narrow on purpose.  Only this path, only the enrolment, and nothing
-        # else about the tunnel is reachable without a session.
+        # **Both of them, and the second was missed.**  Enrolment was exempt
+        # from the day it was written; the pre-shared key upgrade was added
+        # later and was not, so a workload running the command it was given got
+        # the allow list's answer instead of a script, and bash met an HTML
+        # error page.  It fails in a confusing way rather than a clear one,
+        # because the refusal looks like a 404 and the 404 has a body.
+        #
+        # Narrow on purpose.  Only these two prefixes, both of them a ticket in
+        # a path, and nothing else about the tunnel is reachable without a
+        # session.
+        #
         # The root path is taken off first, because this fleet may be served
         # under a prefix.  Matching the raw path would work at the root and
         # silently block every enrolment on an install behind /lb, which is
@@ -296,7 +317,7 @@ class AdminAllowlistMiddleware(BaseHTTPMiddleware):
         _path = request.url.path
         if _root and _path.startswith(_root):
             _path = _path[len(_root):] or "/"
-        if _path.startswith("/tunnel/enrol/"):
+        if _path.startswith(TICKETED_PATHS):
             return await call_next(request)
 
         ip = client_ip(request)

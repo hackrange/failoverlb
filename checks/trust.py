@@ -194,6 +194,58 @@ for secret in ("hunter2", "JBSWY3DPEHPK3PXP", "abcdef", "t-12345", "sk-live-9999
 check("the harmless fields survive", "websec_pool" in blob and "443" in blob,
       "scrubbing took the useful part of the entry with it")
 
+# ---------------------------------------------------------------------------
+# The paths a workload has to reach without being on the allow list
+#
+# The tunnel exists so a machine on somebody else's network, with no inbound
+# access and no public address, can run one command and join.  That machine is
+# by definition not on the management allow list, so a couple of paths accept a
+# one time ticket in the URL instead.
+#
+# **Both of them, and the second was missed for a while.**  Enrolment was
+# exempt from the day it was written.  The pre-shared key upgrade was added
+# later and was not, so a workload running the command it had just been given
+# got the allow list's answer instead of a script, and bash met an HTML error
+# page.  It fails confusingly rather than clearly, because the refusal is a 404
+# and a 404 has a body.
+#
+# So the exemptions are a named list and this asserts it, both ways: every path
+# that hands a script to a workload is on it, and nothing that is not a
+# ticketed path has crept on.
+from app.web import routes_tunnel  # noqa: E402
+from app.web.security import TICKETED_PATHS  # noqa: E402
+
+print()
+print("  paths a workload reaches with a ticket instead of an allow list")
+
+# What the router actually serves to a workload: a GET taking a token, on the
+# public side rather than under /api.
+handed_out = sorted({
+    r.path.rsplit("{", 1)[0]
+    for r in routes_tunnel.router.routes
+    if getattr(r, "path", "").startswith("/tunnel/")
+    and "{token}" in getattr(r, "path", "")
+    and "GET" in getattr(r, "methods", set())
+})
+
+missing = [p for p in handed_out if p not in TICKETED_PATHS]
+check("every path that hands a script to a workload is exempt from the allow list",
+      not missing,
+      f"a workload running the command it was given would get a 404 with an "
+      f"HTML body, and bash would report a syntax error near '<!doctype': "
+      f"{missing}")
+
+stale = [p for p in TICKETED_PATHS if p not in handed_out]
+check("nothing is exempt that is not one of those paths",
+      not stale,
+      f"an exemption whose route has gone is a hole nobody is watching: {stale}")
+
+check("every exempt path is under the tunnel and takes a ticket",
+      all(p.startswith("/tunnel/") and p.endswith("/") for p in TICKETED_PATHS),
+      f"these are checked with startswith, so a prefix that does not end in a "
+      f"slash matches more than it looks: {list(TICKETED_PATHS)}")
+
+
 print()
 failed = [name for name, ok, _ in results if not ok]
 print(f"  {len(results) - len(failed)} of {len(results)} passed")
