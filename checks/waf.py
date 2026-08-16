@@ -144,12 +144,20 @@ if built:
           "SecRuleEngine On" in blocking_text,
           f"engine line was: {[l for l in blocking_text.splitlines() if 'SecRuleEngine' in l]}")
 
-    known = rendered_with(with_waf("block_known"))
+    # Block known malicious is a locked preset.  The thing worth asserting is
+    # not the number but that it ignores a strictness somebody else set: the
+    # mode promises "safe without tuning", and it can only keep that promise by
+    # overriding a level that was raised on the assumption of tuning.
+    known = rendered_with(with_waf("block_known", paranoia="3"))
     known_text = "\n".join(t for p, t in known.items() if p.startswith("waf/"))
-    check("block known malicious raises the bar rather than lowering the rules",
+    check("block known malicious blocks on one critical rule, as CRS ships",
           "SecRuleEngine On" in known_text
-          and "inbound_anomaly_score_threshold=15" in known_text,
-          "the threshold was not raised")
+          and "inbound_anomaly_score_threshold=5" in known_text,
+          "the threshold is not the rule set's own default")
+
+    check("block known malicious pins strictness to 1 whatever the site says",
+          "blocking_paranoia_level=1" in known_text,
+          "a strictness of 3 leaked into the locked preset")
 
     off = rendered_with(with_waf("off"))
     check("off writes nothing at all",

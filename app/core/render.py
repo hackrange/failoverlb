@@ -1729,14 +1729,30 @@ map $cookie_{cookie} $sticky_set_{var} {{
         # DetectionOnly logs what it would have refused and refuses nothing.
         engine = "DetectionOnly" if mode == "watching" else "On"
 
-        # The bar a request has to clear before it is refused.  The rule set's
-        # own default is 5, which is tuned for somebody who has done the
-        # tuning.  Block known malicious raises it so that only a request
-        # tripping several rules, or one critical one, is refused.
+        # Block known malicious is a locked preset, so it ignores the site's
+        # strictness.  Pinning paranoia to 1 is the whole of what makes "safe
+        # to turn on without tuning" true, since 1 is the level CRS keeps
+        # deployable.  Somebody who has raised strictness has taken on the
+        # tuning that goes with it, and this mode is for the people who have
+        # not.
+        if mode == "block_known":
+            paranoia = "1"
+
+        # The bar a request has to clear before it is refused, and it is CRS's
+        # own number rather than one of ours.
         #
-        # This number is a starting point and is not yet measured.  It should
-        # be set by replaying real hits, which needs the hits page first.
-        threshold = "15" if mode == "block_known" else "5"
+        # It was 15 for a day, chosen because it sounded conservative, and the
+        # first two real probes showed what that cost: CRS scores critical 5,
+        # error 4, warning 3, so 15 means three critical rules, and a
+        # libinjection confirmed SQL injection scores exactly 5.  Block known
+        # malicious would have waved through the most obvious attack there is
+        # while catching a path traversal that scored 30.
+        #
+        # 5 is what crs-setup ships, which means one critical rule is enough.
+        # Every number we invent here is one we have to defend later with
+        # nothing behind it, and this setting has already been bitten once by
+        # exactly that.
+        threshold = "5"
 
         return "\n".join([
             f"# Written by the fleet manager for {safe}.  Do not edit.",
