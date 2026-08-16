@@ -136,6 +136,8 @@ THIRD_PARTY_ALIASES = {
     "auth-pam": "auth_pam",
     "ngx_http_geoip2_module": "geoip2",
     "geoip2": "geoip2",
+    "modsecurity-nginx": "modsecurity",
+    "ModSecurity-nginx": "modsecurity",
     "nchan": "nchan",
     "nginx-upstream-fair": "upstream_fair",
     "upstream-fair": "upstream_fair",

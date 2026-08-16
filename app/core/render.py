@@ -43,6 +43,15 @@ log = logging.getLogger("nfm.render")
 GEOIP_DATABASE = "/usr/share/GeoIP/nfm-country.mmdb"
 
 MANAGED_ROOT = "/etc/nginx/nginxmgr"
+
+# Where the agent puts the firewall rule set.  Not under MANAGED_ROOT, because
+# that folder is wiped and rewritten on every apply and these are installed by
+# the agent on a schedule of their own.  One place, because it has to match
+# what the agent writes and a path typed twice is a path that disagrees.
+#
+# It is the symlink rather than the versioned folder, so an update swaps what
+# this points at without every site's rule file having to be rewritten.
+CRS_ROOT = "/etc/nginx/modsecurity/crs"
 CERT_SYNC_DIR = f"{MANAGED_ROOT}/certs"
 LE_LIVE_DIR = "/etc/letsencrypt/live"
 
@@ -1458,6 +1467,7 @@ map $cookie_{cookie} $sticky_set_{var} {{
         lines.extend(self._serving_lines(cfg, indent=4))
         lines.extend(self._cors_lines(cfg, indent=4, name=host.name))
         lines.extend(self._geo_block_lines(cfg, indent=4, name=host.name))
+        lines.extend(self._waf_lines(cfg, indent=4, name=host.name))
         lines.extend(self._exploit_lines(cfg, indent=4))
         lines.extend(self._purge_lines(cfg, indent=4))
 
@@ -1664,6 +1674,114 @@ map $cookie_{cookie} $sticky_set_{var} {{
                      f"$scheme$host$1;")
         lines.append(f"{pad}}}")
         return lines
+
+    def _waf_lines(self, cfg, indent=4, name="site") -> list:
+        """
+        Point this site at the firewall, and write the rules it will read.
+
+        Two lines in the server block and a file beside it.  The file is where
+        everything interesting is, because ModSecurity takes its whole
+        configuration from rule files rather than from nginx directives.
+
+        Deliberately in the **server** block and not a location.  A location
+        that sets modsecurity replaces the server's setting for requests that
+        reach it rather than adding to it, which is the same trap this project
+        has already met with add_header, with error_page and with a server
+        level if.  Setting it per site means every request gets checked, and a
+        location that wanted to opt out would have to say so itself.
+        """
+        mode = (cfg.get("waf_mode") or "off").strip()
+        if mode in ("", "off"):
+            return []
+
+        pad = " " * indent
+
+        if not self.has_module("modsecurity"):
+            return [
+                f"{pad}# The firewall is set to {mode} and this nginx was built",
+                f"{pad}# without the modsecurity module, so it cannot be written.",
+                f"{pad}# Rebuild nginx with the firewall module from the build page.",
+            ]
+
+        safe = _safe_name(name)
+        rules_path = f"{MANAGED_ROOT}/waf/{safe}.conf"
+        self.files[f"waf/{safe}.conf"] = self._waf_rules_file(cfg, mode, safe)
+
+        return [
+            f"{pad}modsecurity on;",
+            f"{pad}modsecurity_rules_file {rules_path};",
+        ]
+
+    def _waf_rules_file(self, cfg, mode: str, safe: str) -> str:
+        """
+        The rule file for one site.
+
+        Order is not a style choice here.  The engine settings come first, then
+        the rule set's own defaults, then our overrides, then the rules
+        themselves.  Set a variable after the rules have already been included
+        and it is read too late to change anything, which fails silently: the
+        config tests clean and the setting does nothing.
+        """
+        paranoia = (cfg.get("waf_paranoia") or "1").strip()
+        if paranoia not in ("1", "2", "3", "4"):
+            paranoia = "1"
+
+        # DetectionOnly logs what it would have refused and refuses nothing.
+        engine = "DetectionOnly" if mode == "watching" else "On"
+
+        # The bar a request has to clear before it is refused.  The rule set's
+        # own default is 5, which is tuned for somebody who has done the
+        # tuning.  Block known malicious raises it so that only a request
+        # tripping several rules, or one critical one, is refused.
+        #
+        # This number is a starting point and is not yet measured.  It should
+        # be set by replaying real hits, which needs the hits page first.
+        threshold = "15" if mode == "block_known" else "5"
+
+        return "\n".join([
+            f"# Written by the fleet manager for {safe}.  Do not edit.",
+            f"# Mode: {mode}.  Paranoia level {paranoia}.",
+            "",
+            f"SecRuleEngine {engine}",
+            "SecRequestBodyAccess On",
+            "",
+            "# Inspect a body up to this size and refuse anything larger rather",
+            "# than waving it through unchecked.  A firewall that stops looking",
+            "# past a size an attacker chooses is not one.",
+            "SecRequestBodyLimit 13107200",
+            "SecRequestBodyNoFilesLimit 131072",
+            "SecRequestBodyLimitAction Reject",
+            "SecPcreMatchLimit 10000",
+            "SecPcreMatchLimitRecursion 10000",
+            "",
+            "# The audit log, which is what the hits page reads.",
+            "#",
+            "# The parts are chosen to leave request and response bodies out.",
+            "# A body is where passwords and card numbers are, and a firewall",
+            "# that writes them to a log has created a worse problem than the",
+            "# one it was fitted to solve.  A, B, F, H and Z are the headers",
+            "# and the outcome, which is what identifying a false positive",
+            "# actually needs.",
+            "SecAuditEngine RelevantOnly",
+            "SecAuditLogParts ABFHZ",
+            "SecAuditLogType Serial",
+            "SecAuditLogFormat JSON",
+            f"SecAuditLog /var/log/nginx/waf-{safe}.log",
+            "",
+            "# The rule set's own defaults, then ours on top.",
+            f"Include {CRS_ROOT}/crs-setup.conf.example",
+            "",
+            "# Rule ids in the 900000 block are the rule set's own setup range.",
+            "# These two are the ones it leaves commented out for exactly this.",
+            f'SecAction "id:900000,phase:1,nolog,pass,t:none,'
+            f'setvar:tx.blocking_paranoia_level={paranoia}"',
+            f'SecAction "id:900110,phase:1,nolog,pass,t:none,'
+            f'setvar:tx.inbound_anomaly_score_threshold={threshold},'
+            f'setvar:tx.outbound_anomaly_score_threshold=4"',
+            "",
+            f"Include {CRS_ROOT}/rules/*.conf",
+            "",
+        ])
 
     def _geo_block_lines(self, cfg, indent=4, name="site") -> list:
         """

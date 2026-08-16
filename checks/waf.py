@@ -1,0 +1,201 @@
+"""
+The web application firewall, from the setting to config nginx will load.
+
+Four things are worth checking and only one of them is "does it render".
+
+  * The module has to be there.  Without it the site must degrade to a comment
+    rather than writing a directive nginx cannot parse, which would fail the
+    apply for every site on the node and not just this one.
+  * The rules file must be beside the site config and must not be included as
+    nginx config.  It is ModSecurity syntax, and nginx meeting it would refuse
+    the whole config.
+  * The mode has to reach the engine.  Watching means DetectionOnly, and a
+    watching site that quietly refuses traffic is the worst outcome this
+    feature has.
+  * nginx has to actually load the result, rules and all, which is the only
+    check here that proves anything about the engine.
+
+Nothing is applied.  Scratch objects live in a transaction that is rolled back.
+
+    docker exec -i nginx-fleet-manager python < checks/waf.py
+"""
+import json
+import socket
+import sys
+
+from app.core.render import CRS_ROOT
+from app.db import session_scope
+from app.models import VirtualHost, json_set
+from app.web.routes_api import render_current
+
+SOCKET = "/run/nginxmgr/agent.sock"
+
+results = []
+skipped = []
+
+
+def check(name, ok, detail=""):
+    results.append((name, ok, detail))
+    print(f"    {'pass' if ok else 'FAIL'}  {name}")
+    if detail and not ok:
+        print(f"          {detail[:300]}")
+
+
+def skip(name, why):
+    skipped.append((name, why))
+    print(f"    skip  {name}")
+    print(f"          {why}")
+
+
+def agent(payload):
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(120)
+    s.connect(SOCKET)
+    s.sendall((json.dumps(payload) + "\n").encode())
+    return json.loads(s.makefile().readline())
+
+
+def rendered_with(mutate):
+    with session_scope() as session:
+        mutate(session)
+        session.flush()
+        try:
+            files, _c, _s = render_current(session)
+        finally:
+            session.rollback()
+    return files
+
+
+def with_waf(mode, paranoia=None):
+    def mutate(session):
+        host = session.query(VirtualHost).first()
+        cfg = host.setting_map()
+        cfg["waf_mode"] = mode
+        if paranoia:
+            cfg["waf_paranoia"] = paranoia
+        host.settings = json_set(cfg)
+    return mutate
+
+
+print("\n=== The web application firewall ===\n")
+
+with session_scope() as s:
+    site_count = s.query(VirtualHost).count()
+
+if not site_count:
+    skip("everything", "no sites on this node, which is normal for a standby")
+    print("\nnothing to check here\n")
+    sys.exit(0)
+
+module = agent({"verb": "waf_module_status"}).get("data") or {}
+built = bool(module.get("built"))
+loaded = bool(module.get("loaded"))
+
+print(f"    module built: {built}, loaded: {loaded}\n")
+
+crs = agent({"verb": "crs_status"}).get("data") or {}
+print(f"    rule set: {crs.get('version') or 'not installed'}, "
+      f"{crs.get('rules') or 0} files\n")
+
+
+# =============================================================================
+# What gets written
+# =============================================================================
+
+files = rendered_with(with_waf("watching"))
+
+site_files = {p: t for p, t in files.items() if p.startswith("sites/")}
+waf_files = {p: t for p, t in files.items() if p.startswith("waf/")}
+
+if built:
+    check("a rules file is written for the site",
+          len(waf_files) == 1,
+          f"expected one waf file, got {sorted(waf_files)}")
+
+    check("the site points at its own rules file",
+          any("modsecurity_rules_file" in t and "modsecurity on;" in t
+              for t in site_files.values()),
+          "no modsecurity directives in the site config")
+else:
+    check("without the module the site degrades to a comment",
+          not waf_files and not any("modsecurity on;" in t
+                                    for t in site_files.values()),
+          "the module is missing and directives were written anyway")
+
+    check("and says why, in the config",
+          any("without the modsecurity module" in t for t in site_files.values()),
+          "no explanation was left in the config")
+
+
+# =============================================================================
+# The mode has to survive the trip
+# =============================================================================
+
+if built:
+    rules_text = "\n".join(waf_files.values())
+
+    check("watching means DetectionOnly",
+          "SecRuleEngine DetectionOnly" in rules_text,
+          f"engine line was: {[l for l in rules_text.splitlines() if 'SecRuleEngine' in l]}")
+
+    blocking = rendered_with(with_waf("block"))
+    blocking_text = "\n".join(t for p, t in blocking.items() if p.startswith("waf/"))
+    check("blocking means On",
+          "SecRuleEngine On" in blocking_text,
+          f"engine line was: {[l for l in blocking_text.splitlines() if 'SecRuleEngine' in l]}")
+
+    known = rendered_with(with_waf("block_known"))
+    known_text = "\n".join(t for p, t in known.items() if p.startswith("waf/"))
+    check("block known malicious raises the bar rather than lowering the rules",
+          "SecRuleEngine On" in known_text
+          and "inbound_anomaly_score_threshold=15" in known_text,
+          "the threshold was not raised")
+
+    off = rendered_with(with_waf("off"))
+    check("off writes nothing at all",
+          not any(p.startswith("waf/") for p in off)
+          and not any("modsecurity" in t for p, t in off.items()
+                      if p.startswith("sites/")),
+          "off still wrote firewall config")
+
+    # Order is the silent one.  A variable set after the rules are included is
+    # read too late, the config tests clean, and the setting does nothing.
+    strict = rendered_with(with_waf("watching", paranoia="3"))
+    strict_text = "\n".join(t for p, t in strict.items() if p.startswith("waf/"))
+    setvar = strict_text.find("blocking_paranoia_level=3")
+    include = strict_text.find(f"Include {CRS_ROOT}/rules/")
+    check("the paranoia level is set before the rules are included",
+          setvar != -1 and include != -1 and setvar < include,
+          f"setvar at {setvar}, rules include at {include}")
+
+    check("bodies are kept out of the audit log",
+          "SecAuditLogParts ABFHZ" in rules_text
+          and "SecAuditLogFormat JSON" in rules_text,
+          "the audit log parts would capture a request body")
+
+
+# =============================================================================
+# Does nginx load it
+# =============================================================================
+
+if not built:
+    skip("nginx loads the rules", "the module is not in this build")
+elif not crs.get("version"):
+    skip("nginx loads the rules", "no rule set is installed on this node")
+else:
+    ok, output = (lambda f: (
+        agent({"verb": "write_staging", "files": f}).get("ok"),
+        agent({"verb": "test_staging"}).get("data", {}),
+    ))(files)
+
+    detail = (output.get("output") or "").strip() if isinstance(output, dict) else ""
+    check("nginx loads the site, the module and the whole rule set",
+          bool(ok) and bool(output.get("ok")),
+          detail)
+
+
+print()
+failed = [r for r in results if not r[1]]
+print(f"    {len(results) - len(failed)} passed, {len(failed)} failed, "
+      f"{len(skipped)} skipped\n")
+sys.exit(1 if failed else 0)

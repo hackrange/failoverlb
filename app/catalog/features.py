@@ -2935,6 +2935,103 @@ register(
     ),
 
     Feature(
+        key="waf_mode",
+        label="Web application firewall",
+        category="security",
+        directive="",            # one setting, several lines, so the renderer does it
+        contexts=("server",),
+        type="select",
+        default="off",
+        module="modsecurity",
+        options=[
+            ("off", "Off"),
+            ("watching", "Watching, refuse nothing"),
+            ("block_known", "Block known malicious"),
+            ("block", "Block what the rules say"),
+        ],
+        help=HelpText(
+            summary="Check requests against the OWASP rules, and choose how much to refuse.",
+            detail=(
+                "Four settings, and the order matters.\n\n"
+                "Watching checks every request and refuses none of them.  It is where "
+                "you start, and it is the only one that is safe to turn on without "
+                "knowing anything about the site, because the worst it can do is fill "
+                "a log.\n\n"
+                "Block known malicious refuses the traffic that is obviously an "
+                "attack and nothing else.  It is not a hand picked list of attacks: "
+                "the rules score each request, and this sets the bar high enough that "
+                "only a request tripping several rules, or one serious one, is "
+                "refused.  One odd looking header never is.  That is why it can go on "
+                "without tuning.\n\n"
+                "Block what the rules say applies the full rule set.  It will refuse "
+                "things your own application does until you have told it not to, so "
+                "run watching first, exercise the site, and turn the false positives "
+                "into exclusions.  Going straight here is how people end up switching "
+                "a firewall off at two in the morning.\n\n"
+                "Whatever you pick, the rules have to be on every node.  A node "
+                "without them refuses the whole config, so install them from Settings "
+                "first."
+            ),
+            use_cases=[
+                "Watching a new site to find out what the rules would refuse",
+                "Blocking obvious attacks on a site nobody has time to tune",
+                "Full blocking on a site whose false positives have been dealt with",
+            ],
+            example="watching",
+            example_config=(
+                "modsecurity on;\n"
+                "modsecurity_rules_file /etc/nginx/nginxmgr/waf/example-com.conf;"
+            ),
+            warning=(
+                "Not free.  The rules cost real time on every request and tens of "
+                "megabytes per worker, so watch the Utilization page after turning it "
+                "on rather than finding out under load."
+            ),
+            docs_url="https://coreruleset.org/docs/",
+        ),
+    ),
+
+    Feature(
+        key="waf_paranoia",
+        label="Firewall strictness",
+        category="security",
+        directive="",
+        contexts=("server",),
+        type="select",
+        default="1",
+        module="modsecurity",
+        advanced=True,
+        options=[
+            ("1", "1, the default"),
+            ("2", "2, stricter"),
+            ("3", "3, stricter still"),
+            ("4", "4, refuses ordinary things"),
+        ],
+        help=HelpText(
+            summary="How suspicious the rules are allowed to be.  Leave this at 1.",
+            detail=(
+                "The rule set ships four levels.  Level 1 is what it is tuned to be "
+                "deployable at, and is what this uses unless you change it.\n\n"
+                "Each level above adds rules that catch more and are wrong more "
+                "often.  Level 4 refuses things a normal application does every day.  "
+                "Raising this is not a way to be more secure for free; it is a "
+                "commitment to spend time on the false positives it produces, and it "
+                "should be done in watching mode first.\n\n"
+                "Only does anything when the firewall above is not off."
+            ),
+            use_cases=[
+                "A site holding something worth the tuning time",
+            ],
+            example="1",
+            warning=(
+                "Expect to spend time tuning anything above 1.  Raise it in watching "
+                "mode and look at what fires before you let it refuse anything."
+            ),
+            docs_url="https://coreruleset.org/docs/concepts/paranoia_levels/",
+        ),
+    ),
+
+    Feature(
         key="geoip2_country_block",
         own_screen=True,
         label="Block by country",
