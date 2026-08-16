@@ -80,23 +80,30 @@ def _asset_version() -> str:
 
     Built from what is on disk rather than a release number, so a fix that
     ships without a version bump still counts.
+
+    **From the contents, not the modification times**, and on a fleet that is
+    the difference between working and crying wolf.  Timestamps are set by
+    whenever each node happened to check the code out, so two nodes running the
+    identical commit produced different stamps.  A page loaded from one node
+    and an answer from the other would then insist the page was out of date
+    when nothing had changed, which is exactly the warning nobody believes the
+    second time they see it.  Hashing the bytes gives every node the same
+    answer for the same code, which is the only thing that makes this claim
+    trustworthy.
     """
-    parts = []
+    digest = hashlib.sha256()
     static = Path(__file__).parent / "static"
-    for name in ("app.js", "app.css"):
+    files = [static / "app.js", static / "app.css"]
+    files += sorted(TEMPLATE_DIR.glob("*.html"))
+    seen = False
+    for path in files:
         try:
-            stat = (static / name).stat()
-            parts.append(f"{name}:{stat.st_mtime_ns}-{stat.st_size}")
+            digest.update(path.name.encode())
+            digest.update(path.read_bytes())
+            seen = True
         except OSError:
             continue
-    for path in sorted(TEMPLATE_DIR.glob("*.html")):
-        try:
-            stat = path.stat()
-            parts.append(f"{path.name}:{stat.st_mtime_ns}-{stat.st_size}")
-        except OSError:
-            continue
-    stamp = "|".join(parts)
-    return hashlib.sha256(stamp.encode()).hexdigest()[:12] if stamp else "dev"
+    return digest.hexdigest()[:12] if seen else "dev"
 
 
 ASSET_VERSION = _asset_version()

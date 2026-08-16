@@ -357,6 +357,13 @@ check("the stamp covers the templates, not only the css and the js",
       "the template, so a stamp built only from app.js and app.css does not "
       "change when the thing the browser is actually running changes")
 
+check("the stamp is built from the file contents, not their timestamps",
+      "read_bytes" in _pages and "st_mtime_ns" not in _pages,
+      "modification times are set by whenever each node checked the code out, "
+      "so two nodes on the identical commit would disagree and every page "
+      "would be told it was out of date after a failover, which is the "
+      "warning nobody believes the second time")
+
 
 print()
 print(f"  {len(problems)} problem(s)")
