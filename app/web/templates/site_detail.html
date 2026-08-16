@@ -62,6 +62,7 @@
   <button class="tab active" data-tab="basics" role="tab">Basics</button>
   <button class="tab" data-tab="paths" role="tab">Paths</button>
   <button class="tab" data-tab="settings" role="tab">Settings</button>
+  <button class="tab" data-tab="geo" role="tab" id="tab-geo" hidden>Geo blocking</button>
   <button class="tab" data-tab="config" role="tab">nginx config</button>
 </div>
 
@@ -345,6 +346,67 @@
 
   <div id="settings-holder">
     <div class="empty"><strong>Loading settings...</strong></div>
+  </div>
+</div>
+
+{# ============================ geo blocking ============================ #}
+{#
+  Its own tab, beside the config, rather than a line in the long list of
+  advanced settings.  It is a question about who may reach the site, which is
+  the sort of thing people go looking for, and a list of two letter codes typed
+  into a box is not something anybody wants to compose by hand.
+
+  The ticks are countries that may reach the site, so a new site has all of
+  them ticked and blocks nobody.  What is stored is the other half, the list of
+  countries to refuse, because that is what nginx is asked to do and because a
+  country that appears in the world later is then allowed rather than silently
+  blocked.
+#}
+<div class="tab-panel" data-panel="geo" hidden>
+  <div class="card">
+    <div class="card-head">
+      <h2>Who may reach this site</h2>
+      <span class="small faint" id="geo-count"></span>
+    </div>
+    <div class="card-body">
+      <div id="geo-unavailable" class="notice warn" hidden>
+        <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.4 15 14H1z"/></svg>
+        <div>
+          There is no country database on the fleet yet, so blocking cannot be
+          applied.  Set one up under <strong>Settings, Country database</strong>
+          and it takes a few seconds.
+        </div>
+      </div>
+
+      <div id="geo-live">
+        <p class="small muted" style="margin-top:0">
+          Ticked countries can reach this site.  Untick one and requests from it
+          get a 403 before they touch your backend.  A VPN gets around this in
+          one click, so it is for cutting scanner noise and meeting a rule about
+          where a site may be served, not for keeping anybody determined out.
+        </p>
+
+        <div class="flex mb">
+          <input type="search" id="geo-search" placeholder="Find a country"
+                 style="max-width:260px">
+          <button type="button" class="btn sm" id="geo-all">Select all</button>
+          <button type="button" class="btn sm" id="geo-none">Clear</button>
+          <span class="small faint" id="geo-blocked-summary"></span>
+        </div>
+
+        <div id="geo-warning" class="notice warn" hidden>
+          <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.4 15 14H1z"/></svg>
+          <div id="geo-warning-text"></div>
+        </div>
+
+        <div id="geo-list" class="geo-grid"></div>
+
+        <div class="flex mt">
+          <button type="button" class="btn primary" id="geo-save">Save</button>
+          <span class="small faint">Applies at the next Apply config, like every other change.</span>
+        </div>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -1368,6 +1430,139 @@ document.addEventListener("DOMContentLoaded", function () {
   window.addEventListener("beforeunload", function (e) {
     if (dirty) { e.preventDefault(); e.returnValue = ""; }
   });
+
+  // ---- geo blocking ----
+  //
+  // The ticks are countries that may reach the site.  What gets stored is the
+  // other half, the ones to refuse, because that is what nginx is told to do
+  // and because a country that appears in the world later is then allowed
+  // rather than blocked by an omission nobody made on purpose.
+  (function geoBlocking() {
+    const tab = document.getElementById("tab-geo");
+    const list = document.getElementById("geo-list");
+    if (!tab || !list) return;
+
+    let countries = [];
+
+    function blockedNow() {
+      return Array.from(list.querySelectorAll("input[type=checkbox]"))
+        .filter(box => !box.checked)
+        .map(box => box.value);
+    }
+
+    function refreshSummary() {
+      const blocked = blockedNow();
+      document.getElementById("geo-count").textContent =
+        blocked.length ? blocked.length + " blocked" : "everywhere allowed";
+      document.getElementById("geo-blocked-summary").textContent =
+        blocked.length ? blocked.slice(0, 6).join(", ") +
+          (blocked.length > 6 ? " and " + (blocked.length - 6) + " more" : "")
+        : "";
+
+      list.querySelectorAll("label").forEach(function (label) {
+        const box = label.querySelector("input");
+        label.classList.toggle("blocked", box && !box.checked);
+      });
+
+      // Clearing the list blocks the planet, which is a thing somebody may
+      // mean and is never a thing to do by accident.
+      const warning = document.getElementById("geo-warning");
+      const text = document.getElementById("geo-warning-text");
+      if (blocked.length === countries.length && countries.length) {
+        text.textContent = "Every country is unticked, so nobody at all can " +
+          "reach this site once this is applied.";
+        warning.hidden = false;
+      } else if (blocked.length > countries.length - 6 && countries.length) {
+        text.textContent = "Only " + (countries.length - blocked.length) +
+          " countries can reach this site.  That is an allow list, which is " +
+          "fine if you meant it and locks out everybody else if you did not.";
+        warning.hidden = false;
+      } else {
+        warning.hidden = true;
+      }
+    }
+
+    function draw(blocked) {
+      const blockedSet = new Set((blocked || []).map(c => c.toUpperCase()));
+      list.innerHTML = countries.map(function (c) {
+        return '<label><input type="checkbox" value="' + c.code + '"' +
+          (blockedSet.has(c.code) ? "" : " checked") + ">" +
+          '<span>' + NFM.escapeHtml(c.name) + "</span>" +
+          '<span class="code">' + c.code + "</span></label>";
+      }).join("");
+      refreshSummary();
+    }
+
+    list.addEventListener("change", refreshSummary);
+
+    document.getElementById("geo-search").addEventListener("input", function (e) {
+      const want = e.target.value.trim().toLowerCase();
+      list.querySelectorAll("label").forEach(function (label) {
+        label.style.display = !want || label.textContent.toLowerCase().includes(want)
+          ? "" : "none";
+      });
+    });
+
+    // Only what is on screen, so a search then Select all does what it looks
+    // like it does rather than quietly touching the other two hundred.
+    function setVisible(checked) {
+      list.querySelectorAll("label").forEach(function (label) {
+        if (label.style.display === "none") return;
+        const box = label.querySelector("input");
+        if (box) box.checked = checked;
+      });
+      refreshSummary();
+    }
+
+    document.getElementById("geo-all").addEventListener("click", () => setVisible(true));
+    document.getElementById("geo-none").addEventListener("click", () => setVisible(false));
+
+    document.getElementById("geo-save").addEventListener("click", async function () {
+      const button = document.getElementById("geo-save");
+      button.disabled = true;
+      try {
+        // Read the settings back and put them whole.  A settings put replaces
+        // the blob, so sending only this key would drop every other setting on
+        // the site.
+        const host = await NFM.api("/hosts/" + HOST_ID);
+        const settings = Object.assign({}, host.settings || {});
+        const blocked = blockedNow();
+        if (blocked.length) settings.geoip2_country_block = blocked;
+        else delete settings.geoip2_country_block;
+        await NFM.api("/hosts/" + HOST_ID, { method: "PUT", body: { settings: settings } });
+        NFM.toast(blocked.length ? "Blocking " + blocked.length + " countries"
+                                 : "Not blocking anywhere", "ok");
+      } catch (err) {
+        NFM.toast(err.message, "bad");
+      }
+      button.disabled = false;
+    });
+
+    (async function start() {
+      let state, host;
+      try {
+        state = await NFM.api("/geoip");
+        host = await NFM.api("/hosts/" + HOST_ID);
+      } catch (err) {
+        return;                   // the tab stays hidden, which is the truth
+      }
+      countries = state.countries || [];
+
+      const nodes = Object.values(state.nodes || {});
+      const anywhere = nodes.some(n => n.present);
+      const everywhere = nodes.length && nodes.every(n => n.present);
+      const blocked = (host.settings || {}).geoip2_country_block || [];
+
+      // The tab appears once there is a database to block with, or if this site
+      // already blocks somewhere, so a setting cannot become invisible.
+      if (!anywhere && !blocked.length) return;
+      tab.hidden = false;
+
+      document.getElementById("geo-unavailable").hidden = everywhere;
+      document.getElementById("geo-live").style.display = anywhere ? "" : "none";
+      draw(blocked);
+    })();
+  })();
 });
 </script>
 {% endblock %}

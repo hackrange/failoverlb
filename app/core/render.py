@@ -34,9 +34,13 @@ from app.models import MemberState
 
 log = logging.getLogger("nfm.render")
 
-# Where the country database lives.  One place, because it has to match what is
-# actually on the nodes and a path typed twice is a path that disagrees.
-GEOIP_DATABASE = "/usr/share/GeoIP/GeoLite2-Country.mmdb"
+# Where the country database lives.  One place, because it has to match what
+# the agent writes and a path typed twice is a path that disagrees.
+#
+# Our own name rather than either source's, since the file can come from db-ip
+# or from MaxMind and calling a db-ip database GeoLite2 would be a small lie
+# that somebody eventually debugs.
+GEOIP_DATABASE = "/usr/share/GeoIP/nfm-country.mmdb"
 
 MANAGED_ROOT = "/etc/nginx/nginxmgr"
 CERT_SYNC_DIR = f"{MANAGED_ROOT}/certs"

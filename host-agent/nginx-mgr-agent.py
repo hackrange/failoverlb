@@ -2427,6 +2427,181 @@ def v_tunnel_down(req):
     return {"ok": True}
 
 
+# ==============================================================================
+# The country database
+# ==============================================================================
+#
+# Blocking by country needs a MaxMind format database on every node, and a node
+# without one refuses the whole config, so this is the half that puts it there.
+#
+# Two sources, and the difference is an account.  db-ip publish a free country
+# database every month and ask for nothing; MaxMind's GeoLite2 is free and
+# wants an account id and a licence key.  Both are the same format once
+# downloaded, so nothing past this function cares which was used.
+#
+# The manager never sends a URL or a path.  It sends the name of a source and,
+# for MaxMind, the credentials, and everything else is decided here.  A verb
+# that took a URL and a destination would be a way to write any file anywhere
+# as root, which is the one thing this agent exists not to be.
+
+GEOIP_DIR = Path("/usr/share/GeoIP")
+GEOIP_FILE = GEOIP_DIR / "nfm-country.mmdb"
+GEOIP_SOURCE_FILE = GEOIP_DIR / ".nfm-source"
+
+# What a MaxMind format file has near its end.  Checked before anything is put
+# in place, because half a download is still a file, and nginx meeting one
+# refuses to start.
+MMDB_MARKER = b"\xab\xcd\xefMaxMind.com"
+
+GEOIP_MAX_BYTES = 128 * 1024 * 1024
+GEOIP_HOSTS = {"dbip": "download.db-ip.com", "maxmind": "download.maxmind.com"}
+
+
+def _geoip_fetch(url, timeout=180):
+    """Download one URL, with a ceiling, and refuse anything but our two hosts."""
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+
+    host = urllib.parse.urlsplit(url).hostname or ""
+    if host not in GEOIP_HOSTS.values():
+        raise AgentError(f"{host} is not a country database source", "refused")
+
+    request = urllib.request.Request(url, headers={"User-Agent": "failover-lb"})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            data = response.read(GEOIP_MAX_BYTES + 1)
+    except urllib.error.HTTPError as exc:
+        raise AgentError(f"{host} answered {exc.code}", "failed")
+    except Exception as exc:
+        raise AgentError(f"could not reach {host}: {exc}", "failed")
+
+    if len(data) > GEOIP_MAX_BYTES:
+        raise AgentError("that download is far bigger than a country database",
+                         "failed")
+    return data
+
+
+def _geoip_extract(data, source):
+    """Get the .mmdb out of whatever the source wraps it in."""
+    import gzip
+    import io
+    import tarfile
+
+    if source == "dbip":
+        # A single gzipped file.
+        return gzip.decompress(data)
+
+    # MaxMind ship a tarball with the database inside a dated folder.
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
+        for member in tar.getmembers():
+            if member.isfile() and member.name.endswith(".mmdb"):
+                extracted = tar.extractfile(member)
+                if extracted:
+                    return extracted.read()
+    raise AgentError("no .mmdb file inside what MaxMind sent", "failed")
+
+
+def _geoip_url(source, payload):
+    """Where to get it, worked out here rather than taken from the caller."""
+    if source == "dbip":
+        # Published monthly, on the first.  Early in the month the new one may
+        # not be up yet, so the previous month is tried as well: a database a
+        # few weeks old is worth far more than a failed install.
+        now = datetime.now(timezone.utc)
+        months = [(now.year, now.month)]
+        months.append((now.year - 1, 12) if now.month == 1
+                      else (now.year, now.month - 1))
+        return [f"https://download.db-ip.com/free/dbip-country-lite-"
+                f"{year:04d}-{month:02d}.mmdb.gz" for year, month in months]
+
+    account = str(payload.get("account_id") or "").strip()
+    key = str(payload.get("license_key") or "").strip()
+    if not key:
+        raise AgentError("MaxMind needs a licence key", "invalid")
+    if not re.fullmatch(r"[A-Za-z0-9_\-]{1,80}", key) or (
+            account and not re.fullmatch(r"[0-9]{1,20}", account)):
+        raise AgentError("that does not look like a MaxMind account id and key",
+                         "invalid")
+    return ["https://download.maxmind.com/app/geoip_download"
+            f"?edition_id=GeoLite2-Country&license_key={key}&suffix=tar.gz"]
+
+
+def v_geoip_install(req):
+    """
+    Put a country database on this node, from one of two known sources.
+
+    Written to a temporary file beside the real one and renamed into place, so
+    a download that dies half way leaves the old database serving rather than a
+    truncated one that stops nginx.
+    """
+    payload = req.get("payload") or req
+    source = str(payload.get("source") or "").strip()
+    if source not in GEOIP_HOSTS:
+        raise AgentError("the source has to be dbip or maxmind", "invalid")
+
+    GEOIP_DIR.mkdir(parents=True, exist_ok=True)
+
+    errors = []
+    data = None
+    used = None
+    for url in _geoip_url(source, payload):
+        try:
+            data = _geoip_fetch(url)
+            used = url
+            break
+        except AgentError as exc:
+            errors.append(str(exc))
+    if data is None:
+        raise AgentError("; ".join(errors) or "nothing to download", "failed")
+
+    mmdb = _geoip_extract(data, source)
+
+    # Is this really a database.  The marker sits near the end of the file, so
+    # a truncated download fails here rather than at the next nginx start.
+    if MMDB_MARKER not in mmdb[-200000:]:
+        raise AgentError("what came back is not a MaxMind format database",
+                         "failed")
+
+    temporary = GEOIP_FILE.with_suffix(".mmdb.new")
+    temporary.write_bytes(mmdb)
+    os.chmod(temporary, 0o644)
+    os.replace(temporary, GEOIP_FILE)
+    GEOIP_SOURCE_FILE.write_text(
+        json.dumps({"source": source,
+                    "installed": datetime.now(timezone.utc).isoformat(
+                        timespec="seconds"),
+                    "url": used.split("?")[0]}))
+
+    log.warning("installed a country database from %s, %d bytes", source, len(mmdb))
+    return {"ok": True, "source": source, "bytes": len(mmdb),
+            "path": str(GEOIP_FILE)}
+
+
+def v_geoip_status(req):
+    """What country database this node has, if any."""
+    if not GEOIP_FILE.is_file():
+        return {"ok": True, "present": False, "path": str(GEOIP_FILE)}
+
+    stat = GEOIP_FILE.stat()
+    detail = {}
+    try:
+        detail = json.loads(GEOIP_SOURCE_FILE.read_text())
+    except Exception:
+        pass
+
+    return {
+        "ok": True,
+        "present": True,
+        "path": str(GEOIP_FILE),
+        "bytes": stat.st_size,
+        "modified": datetime.fromtimestamp(
+            stat.st_mtime, timezone.utc).isoformat(timespec="seconds"),
+        "source": detail.get("source"),
+        "installed": detail.get("installed"),
+    }
+
+
 VERBS = {
     "ping": v_ping,
     "nginx_upgrade": v_nginx_upgrade,
@@ -2464,6 +2639,8 @@ VERBS = {
     "public_ip": v_public_ip,
     "local_addresses": v_local_addresses,
     "write_hook_scripts": v_write_hook_scripts,
+    "geoip_install": v_geoip_install,
+    "geoip_status": v_geoip_status,
 }
 
 
@@ -2478,6 +2655,8 @@ APPLY_LOCK = threading.Lock()
 SERIALIZED_VERBS = {
     "apply", "write_staging", "rollback", "reload", "service", "certbot",
     "nginx_upgrade", "nginx_revert",
+    # Two downloads racing would both be writing the same file.
+    "geoip_install",
 }
 
 

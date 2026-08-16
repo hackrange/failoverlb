@@ -94,6 +94,26 @@ EDITABLE = {
         "env": None,
         "label": "Read the access logs for per site numbers",
     },
+    "geoip_source": {
+        "type": "string",
+        "env": None,
+        "label": "Where the country database comes from",
+    },
+    "geoip_account_id": {
+        "type": "string",
+        "env": None,
+        "label": "MaxMind account id",
+    },
+    "geoip_license_key": {
+        "type": "secret",
+        "env": None,
+        "label": "MaxMind licence key",
+    },
+    "geoip_refresh": {
+        "type": "string",
+        "env": None,
+        "label": "How often to fetch a new country database",
+    },
 }
 
 
@@ -103,6 +123,11 @@ EDITABLE = {
 # them by accident.
 INTERNAL = {
     "acme_hook_secret": {"type": "secret", "env": None, "label": "certbot hook secret"},
+    # When the country database was last put on the fleet.  Kept by the app so
+    # the schedule knows whether anything is due, and shown on the page, but
+    # not something anybody should be typing.
+    "geoip_last_install": {"type": "string", "env": None,
+                           "label": "country database last installed"},
 }
 
 

@@ -456,6 +456,10 @@ async def catalog(request: Request, context: str = "server",
             continue
         if context not in feature.contexts:
             continue
+        # Has a card of its own on the page that uses it, so it is not in the
+        # long list of advanced settings as well.
+        if feature.own_screen:
+            continue
 
         options = zone_options.get(feature.key, feature.options)
 
@@ -497,6 +501,56 @@ async def catalog(request: Request, context: str = "server",
         ],
         "features": out,
     }
+
+
+# ==============================================================================
+# The country database
+# ==============================================================================
+
+@router.get("/geoip")
+async def geoip_state(request: Request, db: DBSession = Depends(get_db)):
+    """
+    What the fleet has, and every country somebody could pick.
+
+    The country list goes with it rather than in its own call, because the page
+    needs both to draw anything and two round trips would let it render half a
+    picker.
+    """
+    get_user(request, db)
+
+    from app.core import geoip
+    from app.core.countries import COUNTRIES
+
+    state = await geoip.fleet_status()
+    state["countries"] = [{"code": code, "name": name}
+                          for code, name in sorted(COUNTRIES.items(),
+                                                   key=lambda kv: kv[1])]
+    return state
+
+
+@router.post("/geoip/install")
+async def geoip_install(request: Request, g: ObjectGuard = Depends(changing)):
+    """Fetch the database and put it on every node, now."""
+    g.require("manage_settings")
+
+    from app.core import geoip
+
+    try:
+        result = await geoip.install_on_fleet()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    audit.record("geoip.install", user=g.user, object_type="setting",
+                 object_name="country database",
+                 result="success" if result.get("ok") else "failed",
+                 detail=f"from {result.get('source')}, "
+                        f"onto {', '.join(result.get('installed') or []) or 'nothing'}")
+    if not result.get("ok"):
+        raise HTTPException(
+            status_code=502,
+            detail="; ".join(f"{node}: {why}"
+                             for node, why in (result.get("failed") or {}).items()))
+    return result
 
 
 @router.get("/catalog/plus")

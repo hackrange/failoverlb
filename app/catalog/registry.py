@@ -95,6 +95,15 @@ class Feature:
     default: Any = None
     options: list = field(default_factory=list)   # for select, list of (value, label)
 
+    # Kept out of the generic settings form.
+    #
+    # For a setting that has a screen of its own.  Blocking by country is a
+    # list of two letter codes typed into a box when it lives here, and a list
+    # of countries with tick boxes when it has its own card, and offering both
+    # is how two controls end up disagreeing about what is set.  The setting is
+    # still real: it validates, it renders, and the API takes it.
+    own_screen: bool = False
+
     # The value is the rest of a directive, not a value in one.
     #
     # A rewrite rule is a regular expression and a replacement, and nearly every

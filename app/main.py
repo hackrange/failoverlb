@@ -348,6 +348,23 @@ def start_scheduler():
         coalesce=True,
     )
 
+    # The country database, if anybody asked for one.  Hourly ticks, and the
+    # job itself decides whether anything is due, so changing the schedule from
+    # monthly to daily takes effect without a restart.
+    async def _geoip():
+        from app.core import geoip
+
+        await geoip.refresh_if_due()
+
+    scheduler.add_job(
+        _geoip,
+        "interval",
+        minutes=60,
+        id="geoip",
+        max_instances=1,
+        coalesce=True,
+    )
+
     # Catching up nodes that were offline.  Runs often, does nothing when the
     # queue is empty, which is nearly always.
     scheduler.add_job(

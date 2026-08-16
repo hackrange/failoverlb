@@ -2936,6 +2936,7 @@ register(
 
     Feature(
         key="geoip2_country_block",
+        own_screen=True,
         label="Block by country",
         category="access",
         directive="",

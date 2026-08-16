@@ -643,7 +643,11 @@ async def save_settings(request: Request, db: DBSession = Depends(get_db),
                         management_networks: str = Form(""),
                         dns_resolvers: str = Form(""),
                         dns_use_system_resolver: str = Form(None),
-                        health_check_interval: str = Form("10")):
+                        health_check_interval: str = Form("10"),
+                        geoip_source: str = Form(""),
+                        geoip_account_id: str = Form(""),
+                        geoip_license_key: str = Form(""),
+                        geoip_refresh: str = Form("monthly")):
     await check_csrf(request)
     user = require_page_user(request, db)
     if not can(user, "manage_settings"):
@@ -720,6 +724,32 @@ async def save_settings(request: Request, db: DBSession = Depends(get_db),
     settings_store.set("dns_resolvers", resolvers, user.username)
     settings_store.set("dns_use_system_resolver", bool(dns_use_system_resolver), user.username)
     settings_store.set("health_check_interval", interval, user.username)
+
+    # The country database.
+    #
+    # The licence key is only written when somebody typed one.  The field comes
+    # back empty on every load, because a secret is never sent to the browser,
+    # so saving the page with it untouched must not wipe what is stored.  Same
+    # rule the DNS credentials already follow.
+    from app.core import geoip
+
+    source = geoip_source.strip()
+    if source not in ("", *geoip.SOURCES):
+        return RedirectResponse(
+            _p(f"/settings?error={quote('that is not a country database source')}"),
+            status_code=303)
+    schedule = geoip_refresh.strip() or "never"
+    if schedule not in geoip.SCHEDULES:
+        return RedirectResponse(
+            _p(f"/settings?error={quote('that is not a refresh schedule')}"),
+            status_code=303)
+
+    settings_store.set("geoip_source", source, user.username)
+    settings_store.set("geoip_refresh", schedule, user.username)
+    settings_store.set("geoip_account_id", geoip_account_id.strip(), user.username)
+    if geoip_license_key.strip():
+        settings_store.set("geoip_license_key", geoip_license_key.strip(),
+                           user.username)
 
     audit.record("settings.update", user=user, source_ip=client_ip(request),
                  object_type="settings",
