@@ -567,9 +567,26 @@ async def site_detail(host_id: str, request: Request, db: DBSession = Depends(ge
         # https half cannot be written, quietly shows somebody a different
         # site.  Looking at another site's page is the single most confusing
         # answer a load balancer can give, and it is the one nothing said.
+        # Which site answers for a name nginx does not recognise, over https.
+        #
+        # Not simply the one flagged default_server, and working that out is
+        # the whole point of computing it here.  The installer's own
+        # placeholder is the default server on port 80, so unknown names over
+        # http land on the Coming Soon page.  It carries no https listener at
+        # all, so for https nginx falls back to the first server block it
+        # parsed — and our config is pulled in with a glob, which is
+        # alphabetical.  The alphabetically first site with https on is
+        # therefore what somebody actually sees, which is why a switched off
+        # site shows a completely unrelated one.
         default_site=next(
             (h.name for h in db.query(VirtualHost)
-             .filter(VirtualHost.default_server.is_(True)).all()), None),
+             .filter(VirtualHost.default_server.is_(True)).all()),
+            next((h.name for h in sorted(
+                    db.query(VirtualHost).filter(
+                        VirtualHost.enabled.is_(True),
+                        VirtualHost.listen_https.is_(True)).all(),
+                    key=lambda x: x.name)
+                  if h.name != host.name), None)),
         # Whether the certificate this site points at can actually be written.
         #
         # A row exists the moment somebody asks for a certificate; the files

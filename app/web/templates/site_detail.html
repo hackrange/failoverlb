@@ -69,10 +69,11 @@
       It is not written into the nginx config at all, which is why the config
       tab is empty.
       {% if default_site and default_site != host.name %}
-        Anything pointed at
-        {{ host.name_list()|join(', ') }}
-        is reaching <strong>{{ default_site }}</strong> instead, because that is
-        the default server and nginx sends a name it does not recognise there.
+        Anything pointed at {{ host.name_list()|join(', ') }} reaches
+        <strong>{{ default_site }}</strong> over https instead, because nginx
+        sends a name it does not recognise to the first site it loaded, and
+        over http it reaches the installer's placeholder page.  Seeing another
+        site's content is the symptom, not the cause.
       {% else %}
         Anything pointed at its names reaches whichever site is the default
         server, because nginx sends a name it does not recognise there.
@@ -90,7 +91,8 @@
       block is deliberately left out.
       {% if default_site and default_site != host.name %}
         Until it is issued, https for these names reaches
-        <strong>{{ default_site }}</strong> rather than this site.
+        <strong>{{ default_site }}</strong> instead, because nginx sends a name
+        it has no https block for to the first site it loaded.
       {% endif %}
       Issue it from the <a href="{{ base }}/certificates">Certificates</a> page,
       then apply.  The challenge is served over http and is never redirected, so
