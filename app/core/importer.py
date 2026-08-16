@@ -449,6 +449,73 @@ def _read_server(block, pools_by_raw_name: dict, index: int) -> dict:
     root_proxy = next((p for p in proxied if p[0].strip() in ("/", "= /")), None)
     chosen = root_proxy or (proxied[0] if proxied else None)
 
+    # The site's own backend, from the location that serves everything.
+    #
+    # This is the half that was missing and it lost whole sites.  `chosen` was
+    # worked out here, used once below to keep it out of the custom config on
+    # the grounds that it had been folded into the site, and then never
+    # actually folded into anything.  With exactly one location the block was
+    # excluded from the paths as well, since those only start at two, so a site
+    # whose entire behaviour was one `location / { proxy_pass ... }` imported
+    # with no backend, no path and nothing in its custom config.
+    #
+    # Worse than losing it: a config with a `root` alongside imported as a
+    # static site serving that root, which is a site that answers, with the
+    # wrong thing, and reported ok with no warnings.  The "looks like a proxy
+    # but no backend" warning could not fire because the mode was no longer
+    # proxy.
+    if chosen is not None:
+        dest = chosen[1]
+        upstream = dest.split("://", 1)[-1].split("/", 1)[0]
+        site["mode"] = "proxy"
+        # A location that proxies everything beats a root.  nginx would never
+        # reach the root for a request the location handles, so keeping static
+        # describes a site that does not exist.
+        site["document_root"] = None
+        if upstream in pools_by_raw_name:
+            site["pool"] = pools_by_raw_name[upstream]["name"]
+        elif _looks_like_a_host(upstream):
+            site["inline_backend"] = dest
+        else:
+            site["notes"].append(
+                f"the main location proxies to an upstream called {upstream!r} "
+                f"that was not in what you pasted, so no backend was attached"
+            )
+
+        # A path on the end of proxy_pass is a rewrite, and nginx does not do
+        # it for you when the target is an upstream name.  Said rather than
+        # dropped, because the site would otherwise proxy to the backend's root
+        # and every page would be wrong in a way that looks like the backend's
+        # fault.
+        suffix = dest.split("://", 1)[-1]
+        suffix = suffix[len(upstream):] if suffix.startswith(upstream) else ""
+        if suffix and suffix != "/":
+            site["notes"].append(
+                f"the backend is served under {suffix} rather than at its root.  "
+                f"A rewrite rule was added for it, and the cookie and redirect "
+                f"paths were set to match."
+            )
+            settings = site.setdefault("settings_seed", {})
+            escaped = suffix.rstrip("/")
+            settings["rewrite_rules"] = [
+                r"^/(?!\.well-known/)(.*)$ %s/$1 break" % escaped
+            ]
+            settings["proxy_cookie_path"] = f"{suffix} /"
+            settings["proxy_redirect"] = f"{suffix} /"
+
+        # Everything else that location did, which is where the WebSocket
+        # headers and the buffering live.  Dropped, these come back as a
+        # console that connects and dies, or a page that arrives in bursts.
+        leftover = _verbatim(chosen[2], {}, extra_drop=(
+            "proxy_pass", "proxy_set_header", "proxy_http_version", "root",
+            "alias", "return",
+        ))
+        if leftover.strip():
+            site["custom_config"] += (
+                "\n# From the location that serves this site, kept because "
+                "there is no setting here for it.\n" + leftover
+            )
+
     # Every location that does something, as a path on the site.
     #
     # This used to keep one backend and report the rest as not brought over.
@@ -481,6 +548,13 @@ def _read_server(block, pools_by_raw_name: dict, index: int) -> dict:
 
     # ---- settings we understand, and everything else kept verbatim
     site["settings"] = extract_settings(block) or {}
+
+    # The rewrite and cookie settings worked out from the main location's
+    # proxy_pass path.  Merged after the block's own settings and never over
+    # them, so anything actually written in the config wins over what we
+    # inferred from a path.
+    for key, value in (site.pop("settings_seed", {}) or {}).items():
+        site["settings"].setdefault(key, value)
     extra = ["http2"]
     if site["mode"] == "static" and site["document_root"]:
         extra.append("root")
