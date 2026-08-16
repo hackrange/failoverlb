@@ -794,6 +794,13 @@ cp -a "$CONF" "$CONF.before-psk"
 
 # Written into the file first so it survives a reboot, then pushed into the
 # live interface so it takes effect without dropping anything else.
+#
+# chr(10) rather than a backslash n, and that is not style.  This script is a
+# Python string in routes_tunnel.py, so anything with a backslash in it is
+# escaped once by the file and once by the string, and the first version of
+# this shipped a newline in the middle of a quoted string.  The workload got
+# "SyntaxError: unterminated string literal" and no key.  Nothing in here needs
+# a backslash, so nothing in here has one.
 python3 - "$CONF" "$PSK" <<'PYEOF'
 import sys
 path, psk = sys.argv[1], sys.argv[2]
@@ -807,7 +814,8 @@ for line in open(path).read().splitlines():
     # One key line per peer block, straight after PublicKey so it reads well.
     if seen and line.strip().startswith("PublicKey"):
         out.append("PresharedKey = " + psk)
-open(path, "w").write("\n".join(out) + "\n")
+nl = chr(10)
+open(path, "w").write(nl.join(out) + nl)
 PYEOF
 
 for PUB in $(wg show $IFACE peers 2>/dev/null); do

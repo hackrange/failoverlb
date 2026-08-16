@@ -233,6 +233,64 @@ def main():
             else:
                 print("      (no gap on this fleet to try)")
 
+    # -----------------------------------------------------------------------
+    # The scripts handed to a workload actually run
+    #
+    # These are shell scripts written as Python strings, with Python heredocs
+    # inside them, and they are piped straight into bash on somebody else's
+    # machine.  Nothing between here and there checks them, and when one is
+    # wrong the person running it gets a parse error from a language they did
+    # not know was involved.
+    #
+    # That has now happened twice in one afternoon.  Once the workload was
+    # handed an HTML error page because the path was not exempt from the
+    # management allow list, and bash reported a syntax error near "<!doctype".
+    # Once the embedded Python arrived with a real newline inside a quoted
+    # string, because a backslash n in a Python string is escaped by the file
+    # and again by the string, and the workload got "unterminated string
+    # literal".
+    #
+    # So both scripts are rendered here and put through bash -n and through
+    # Python's own compiler.  It is cheap and it is the difference between
+    # finding this in a check and finding it on somebody else's server.
+    print()
+    print("  the scripts handed to a workload parse")
+
+    import re as _re
+    import subprocess
+    import tempfile
+    from app.web import routes_tunnel as _rt
+
+    _scripts = {
+        "the pre-shared key upgrade":
+            _rt.PSK_SCRIPT.format(iface=_rt.IFACE, psk="a" * 43 + "="),
+        "the enrolment script":
+            _rt.SCRIPT.format(fleet="lb", iface=_rt.IFACE, binary=_rt.BINARY,
+                              address="10.77.0.9", routes="10.77.0.1/32",
+                              peers="[Peer]", callback="https://example/cb"),
+    }
+
+    for label, text in _scripts.items():
+        with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as fh:
+            fh.write(text)
+            where = fh.name
+        run = subprocess.run(["bash", "-n", where], capture_output=True, text=True)
+        check(f"{label} is valid bash", run.returncode == 0,
+              (run.stderr or "").strip())
+
+        blocks = _re.findall(r"<<'PYEOF'\n(.*?)\nPYEOF", text, _re.S)
+        for i, block in enumerate(blocks, 1):
+            try:
+                compile(block, f"{label} block {i}", "exec")
+                ok, why = True, ""
+            except SyntaxError as exc:
+                ok, why = False, f"{exc}.  The usual cause is a backslash that "\
+                                 f"got escaped twice on the way out."
+            check(f"{label}, embedded python block {i} compiles", ok, why)
+
+        import os
+        os.unlink(where)
+
     failed = [name for name, ok, _ in results if not ok]
     print()
     print(f"  {len(results) - len(failed)} passed, {len(failed)} failed")
