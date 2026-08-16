@@ -188,15 +188,24 @@ PREREQUISITE = {
     "limit_req_status": {"limit_req_zone_name": REQ_ZONE},
     "limit_conn_count": {"limit_conn_zone_name": CONN_ZONE},
     "limit_conn_status": {"limit_conn_zone_name": CONN_ZONE},
-    "proxy_cache_valid": {"proxy_cache": CACHE_ZONE},
-    "proxy_cache_key": {"proxy_cache": CACHE_ZONE},
-    "proxy_cache_bypass": {"proxy_cache": CACHE_ZONE},
-    "proxy_no_cache": {"proxy_cache": CACHE_ZONE},
-    "proxy_cache_use_stale": {"proxy_cache": CACHE_ZONE},
-    "proxy_cache_min_uses": {"proxy_cache": CACHE_ZONE},
-    "proxy_cache_lock": {"proxy_cache": CACHE_ZONE},
-    "proxy_cache": {"proxy_cache": CACHE_ZONE},
-    "proxy_cache_background_update": {"proxy_cache": CACHE_ZONE},
+    # The setting is called proxy_cache_zone.  proxy_cache is the nginx
+    # directive it writes, and naming the directive here meant the
+    # prerequisite set a key the catalog does not have, which the settings
+    # validator drops without complaint.  So caching was never switched on for
+    # these, they correctly rendered nothing, and the check reported five
+    # settings as unwired that were fine.  A check failing for the wrong reason
+    # is the mirror of the failure this file's README warns about.
+    "proxy_cache_valid": {"proxy_cache_zone": CACHE_ZONE},
+    "proxy_cache_key": {"proxy_cache_zone": CACHE_ZONE},
+    "proxy_cache_bypass": {"proxy_cache_zone": CACHE_ZONE},
+    "proxy_no_cache": {"proxy_cache_zone": CACHE_ZONE},
+    "proxy_cache_use_stale": {"proxy_cache_zone": CACHE_ZONE},
+    "proxy_cache_min_uses": {"proxy_cache_zone": CACHE_ZONE},
+    "proxy_cache_lock": {"proxy_cache_zone": CACHE_ZONE},
+    "proxy_cache_background_update": {"proxy_cache_zone": CACHE_ZONE},
+    # The header saying whether a response came from cache is only written
+    # when there is a cache to come from.
+    "cache_status_header": {"proxy_cache_zone": CACHE_ZONE},
     "cache_status_header": {"proxy_cache": CACHE_ZONE},
 
     # Read out of the renderer the same way as the rest, by finding what it
