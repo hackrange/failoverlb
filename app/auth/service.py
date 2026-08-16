@@ -14,6 +14,7 @@ import io
 import json
 import logging
 import secrets
+import time
 from datetime import timedelta
 
 import pyotp
@@ -177,6 +178,19 @@ def check_totp(user: User, code: str) -> bool:
     valid_window=1 accepts the code either side of now.  Phone clocks drift, and
     people start typing a code with two seconds left on it.  Without the window
     you get a stream of complaints that the codes do not work.
+
+    **A code is accepted once and never again.**  The window is what makes that
+    necessary: without it the same six digits authenticate as often as somebody
+    submits them, for up to about ninety seconds.  RFC 6238 section 5.2
+    requires the verifier to refuse a code it has already taken, and the reason
+    is the ordinary one, which is that a code can be seen.  Over a shoulder, in
+    a screen share, through a proxy relaying a real login.  The attacker still
+    needs the password, so this is an amplifier rather than a way in, and it is
+    an amplifier worth removing.
+
+    Which step was used is recorded rather than which code, because the step is
+    what the comparison needs and because it will not do as a password
+    equivalent if the row is ever read.
     """
     if not code:
         return False
@@ -186,7 +200,19 @@ def check_totp(user: User, code: str) -> bool:
     secret = decrypt(user.totp_secret_encrypted)
     if secret:
         totp = pyotp.TOTP(secret)
-        if totp.verify(code, valid_window=1):
+        # Which step this code belongs to, checked across the same window the
+        # verify below allows.  Asked first, so a replay is refused before it
+        # can be counted as a success anywhere.
+        now = int(time.time()) // totp.interval
+        used = user.totp_last_step
+        for offset in (0, -1, 1):
+            step = now + offset
+            if not totp.verify(code, for_time=step * totp.interval):
+                continue
+            if used is not None and step <= used:
+                log.warning("%s replayed a TOTP code from step %s", user.username, step)
+                return False
+            user.totp_last_step = step
             return True
 
     # Recovery codes.  Single use, so we take it out of the list once it works.

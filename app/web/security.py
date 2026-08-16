@@ -384,7 +384,31 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         self._attempts = {}
 
     async def dispatch(self, request: Request, call_next):
-        if request.url.path not in ("/auth/login", "/auth/totp"):
+        # The prefix comes off first, and leaving it on made this middleware
+        # inert on every install served under one.
+        #
+        # This fleet runs under /lb, so the path here is /lb/auth/login and the
+        # comparison below never matched.  The middleware ran on every request
+        # and its body was unreachable, which looks exactly like a middleware
+        # that is working: no error, no log line, nothing to notice.  Fourteen
+        # consecutive login attempts from one address were accepted before this
+        # was fixed.
+        #
+        # AdminAllowlistMiddleware in this same file has always done this, and
+        # its comment says why: matching the raw path "would work at the root
+        # and silently block every enrolment on an install behind /lb, which is
+        # the sort of thing that only shows up at a customer."  The same
+        # reasoning applies here and was not carried across.
+        #
+        # There was a second entry, "/auth/totp", for a route that does not
+        # exist.  The second factor is posted to /auth/login with the password
+        # carried alongside it, so that entry protected nothing and is gone.
+        root = get_settings().root_path.rstrip("/")
+        path = request.url.path
+        if root and path.startswith(root):
+            path = path[len(root):] or "/"
+
+        if path != "/auth/login":
             return await call_next(request)
         if request.method != "POST":
             return await call_next(request)

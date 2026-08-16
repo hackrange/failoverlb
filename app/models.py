@@ -2022,6 +2022,20 @@ class User(Base):
 
     password_hash = Column(String(255))
     totp_secret_encrypted = Column(Text)
+
+    # The last time step this account successfully used.
+    #
+    # A TOTP code is valid for a window, not an instant, so without this the
+    # same six digits authenticate as many times as somebody cares to submit
+    # them.  RFC 6238 section 5.2 says the verifier must not accept a code it
+    # has already accepted, and the reason is the obvious one: a code seen once
+    # over a shoulder, through a phishing proxy that relays a real login, or in
+    # a screen share, is otherwise good for another minute and a half.
+    #
+    # Stored as the counter rather than a timestamp because that is what the
+    # comparison needs, and because it makes the rule simple: anything at or
+    # below this has been used.
+    totp_last_step = Column(Integer)
     totp_enrolled = Column(Boolean, default=False)
 
     # One time codes for when somebody loses their phone.  Hashed, single use.

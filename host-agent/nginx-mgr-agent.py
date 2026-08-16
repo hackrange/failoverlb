@@ -3974,11 +3974,33 @@ def main():
         d.mkdir(parents=True, exist_ok=True)
     os.chmod(MANAGED_DIR / "certs", 0o750)
 
-    SOCKET_DIR.mkdir(parents=True, exist_ok=True)
+    # The socket is created private and then opened to the group, rather than
+    # created open and closed afterwards.
+    #
+    # It used to be bound and then chmod'd, which left a window carrying
+    # whatever umask the process inherited.  Narrow, and on a root process that
+    # writes nginx configuration the thing on the other side of that window is
+    # worth more than the window is small.
+    #
+    # **Scoped, not global.**  Setting the umask for the whole process looked
+    # tidier and would have broken the fleet: nineteen directories here are
+    # created with mkdir and no explicit mode, and several of them have to be
+    # traversable by nginx.  The ACME challenge directory is the one that would
+    # have bitten first, since a webroot nginx cannot read fails every
+    # certificate issue and renewal on the box.  So it covers the bind and
+    # nothing else.
+    #
+    # A mode on the mkdir for the same reason as the umask: a first run creates
+    # this directory and the chmod below is several lines later.
+    SOCKET_DIR.mkdir(parents=True, exist_ok=True, mode=0o750)
     if SOCKET_PATH.exists():
         SOCKET_PATH.unlink()
 
-    server = Server(str(SOCKET_PATH), Handler)
+    previous_umask = os.umask(0o177)
+    try:
+        server = Server(str(SOCKET_PATH), Handler)
+    finally:
+        os.umask(previous_umask)
 
     # This is the access control.  Group only, no world bits.  The container
     # runs with this group added, which is the entire reason it can talk to us.
