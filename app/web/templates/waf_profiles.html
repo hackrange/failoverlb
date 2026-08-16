@@ -80,14 +80,32 @@ document.addEventListener("DOMContentLoaded", function () {
 
       const rows = (p.exclusions || []).map(function (e) {
         const dead = known && !known.has(String(e.rule_id));
+        // The path is an input rather than text when you may edit, because
+        // generalising a learned path is the everyday job here, not a rare
+        // one: learning gives one row per object and the useful rule is the
+        // pattern behind them.
+        const pathCell = CAN_EDIT
+          ? '<input class="mono small waf-path" style="width:100%;min-width:16rem" ' +
+            'value="' + NFM.escapeHtml(e.path || "") +
+            '" placeholder="blank means the whole site" ' +
+            'data-profile="' + p.id + '" data-exclusion="' + e.id +
+            '" data-was="' + NFM.escapeHtml(e.path || "") + '">'
+          : "<span class='mono small'>" +
+            NFM.escapeHtml(e.path || "whole site") + "</span>";
         return "<tr" + (dead ? ' class="faint"' : "") + ">" +
           "<td><strong>" + NFM.escapeHtml(e.rule_id) + "</strong>" +
           (dead ? ' <span class="badge warn">not in the rule set</span>' : "") +
-          "</td><td class='mono small'>" +
-          NFM.escapeHtml(e.path || "whole site") + "</td>" +
+          "</td><td>" + pathCell + "</td>" +
           "<td class='small muted'>" + NFM.escapeHtml(e.message || "") + "</td>" +
           "<td class='small faint'>" + NFM.escapeHtml(e.learned_from_ip || "-") +
-          "</td><td class='small faint'>" + when(e.created_at) + "</td></tr>";
+          "</td><td class='small faint'>" + when(e.created_at) + "</td>" +
+          (CAN_EDIT
+            ? '<td><button class="btn sm danger" data-drop-profile="' + p.id +
+              '" data-drop="' + e.id + '" data-rule="' + NFM.escapeHtml(e.rule_id) +
+              '" data-path="' + NFM.escapeHtml(e.path || "the whole site") +
+              '">Remove</button></td>'
+            : "") +
+          "</tr>";
       }).join("");
 
       const used = p.used_by || [];
@@ -130,7 +148,24 @@ document.addEventListener("DOMContentLoaded", function () {
 
         '<div class="table-scroll"><table><thead><tr>' +
         "<th>Rule</th><th>Path</th><th>Why</th><th>From</th><th>Added</th>" +
+        (CAN_EDIT ? "<th></th>" : "") +
         "</tr></thead><tbody>" + rows + "</tbody></table></div>" +
+
+        (CAN_EDIT
+          ? '<p class="small muted">Edit a path and press Enter or click away ' +
+            "to save.  <code>*</code> matches one part of a path and " +
+            "<code>**</code> matches any number, so " +
+            "<code>/trice/*.git/*</code> covers every repository including " +
+            "the ones that do not exist yet.  Blank means the whole site, " +
+            "which is a much bigger decision than it looks.</p>" +
+            '<div class="flex mb">' +
+            '<input class="mono sm waf-new-rule" style="max-width:9rem" ' +
+            'placeholder="rule id" data-profile="' + p.id + '">' +
+            '<input class="mono sm waf-new-path" style="max-width:22rem" ' +
+            'placeholder="/path/*  (blank means the whole site)" data-profile="' + p.id + '">' +
+            '<button class="btn sm" data-add="' + p.id + '">Add by hand</button>' +
+            "</div>"
+          : "") +
 
         (CAN_EDIT
           ? '<div class="flex mt"><button class="btn danger" data-del="' + p.id +
@@ -146,7 +181,70 @@ document.addEventListener("DOMContentLoaded", function () {
     }).join("");
   }
 
-  holder.addEventListener("click", function (ev) {
+  // Saving a path.  On blur rather than on every keystroke, and only when it
+  // actually changed, so tabbing through a table does not write a row per
+  // column.
+  holder.addEventListener("focusout", async function (ev) {
+    const box = ev.target.closest(".waf-path");
+    if (!box || box.value === box.dataset.was) return;
+    const wanted = box.value.trim();
+    box.disabled = true;
+    try {
+      await NFM.api("/waf/profiles/" + box.dataset.profile + "/exclusions/" +
+                    box.dataset.exclusion,
+                    { method: "PATCH", body: { path: wanted } });
+      box.dataset.was = wanted;
+      NFM.toast("Saved.  It reaches the sites at the next Apply config.", "ok");
+      load();
+    } catch (err) {
+      NFM.toast(err.message, "bad");
+      box.value = box.dataset.was;
+      box.disabled = false;
+    }
+  });
+
+  holder.addEventListener("keydown", function (ev) {
+    if (ev.key === "Enter" && ev.target.closest(".waf-path")) {
+      ev.preventDefault();
+      ev.target.blur();
+    }
+  });
+
+  holder.addEventListener("click", async function (ev) {
+    const add = ev.target.closest("[data-add]");
+    if (add) {
+      const id = add.dataset.add;
+      const rule = holder.querySelector('.waf-new-rule[data-profile="' + id + '"]');
+      const path = holder.querySelector('.waf-new-path[data-profile="' + id + '"]');
+      if (!rule.value.trim()) { NFM.toast("Which rule id?", "bad"); return; }
+      try {
+        await NFM.api("/waf/profiles/" + id + "/exclusions", {
+          method: "POST",
+          body: { rule_id: rule.value.trim(), path: path.value.trim() },
+        });
+        NFM.toast("Added", "ok");
+        load();
+      } catch (err) { NFM.toast(err.message, "bad"); }
+      return;
+    }
+
+    const drop = ev.target.closest("[data-drop]");
+    if (drop) {
+      NFM.confirmThen(
+        "Put rule " + drop.dataset.rule + " back into force on " +
+        drop.dataset.path + "?\n\n" +
+        "Every site using this profile starts checking that rule again at the " +
+        "next apply.  If it was excused because it was wrong about your " +
+        "application, it will start refusing that traffic again.",
+        async function () {
+          await NFM.api("/waf/profiles/" + drop.dataset.dropProfile +
+                        "/exclusions/" + drop.dataset.drop, { method: "DELETE" });
+          NFM.toast("Removed", "ok");
+          load();
+        });
+      return;
+    }
+
     const del = ev.target.closest("[data-del]");
     if (!del) return;
     NFM.confirmThen(

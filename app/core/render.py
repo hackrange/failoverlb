@@ -52,6 +52,63 @@ MANAGED_ROOT = "/etc/nginx/nginxmgr"
 # It is the symlink rather than the versioned folder, so an update swaps what
 # this points at without every site's rule file having to be rewritten.
 CRS_ROOT = "/etc/nginx/modsecurity/crs"
+
+
+def waf_path_to_regex(path: str) -> str:
+    """
+    Turn a path with `*` in it into a regular expression.
+
+    Learning produces one exclusion per path it saw, and on anything with a
+    path per object that is dozens of near identical rows: a git server gives
+    `/trice/apache2.git/git-upload-pack`, `/trice/site.git/git-upload-pack`
+    and so on for every repository that exists now or ever will.  Somebody
+    reviewing that cannot see the shape, and a repository created tomorrow is
+    not covered by any of them.
+
+    So the stored path is a glob, which is what a person can read and edit,
+    and the translation happens here on the way to nginx.  Storing the regex
+    instead would mean the page shows somebody `^/trice/[^/]*\\.git/` and asks
+    them to maintain it.
+
+      *   anything except a slash, so one path segment
+      **  anything at all, slashes included
+
+    Everything outside a star is escaped, which matters more than it looks:
+    `.git` has a dot in it, and an unescaped dot matches any character, so
+    `/trice/*.git/` would quietly also match `/trice/anythingXgit/`.
+
+    Not anchored at the end, on purpose.  These replace a `@beginsWith`, and
+    an exclusion for a path is meant to cover what sits under it.
+    """
+    out = []
+    i = 0
+    while i < len(path):
+        if path.startswith("**", i):
+            out.append(".*")
+            i += 2
+        elif path[i] == "*":
+            out.append("[^/]*")
+            i += 1
+        else:
+            j = i
+            while j < len(path) and path[j] != "*":
+                j += 1
+            out.append(re.escape(path[i:j]))
+            i = j
+    return "^" + "".join(out)
+
+
+def _waf_path_match(path: str) -> str:
+    """
+    The ModSecurity operator for one exclusion's path.
+
+    Plain paths keep `@beginsWith`, which is a string compare and cheaper than
+    a regular expression on every request.  Only a path somebody has actually
+    put a star in pays for `@rx`.
+    """
+    if "*" in path:
+        return "@rx " + waf_path_to_regex(path)
+    return "@beginsWith " + path
 CERT_SYNC_DIR = f"{MANAGED_ROOT}/certs"
 LE_LIVE_DIR = "/etc/letsencrypt/live"
 
@@ -1933,7 +1990,7 @@ map $cookie_{cookie} $sticky_set_{var} {{
             if path:
                 lines.append(f"# {rule_id} off for {path}: {why}")
                 lines.append(
-                    f'SecRule REQUEST_URI "@beginsWith {path}" '
+                    f'SecRule REQUEST_URI "{_waf_path_match(path)}" '
                     f'"id:{next_id},phase:1,pass,nolog,'
                     f'ctl:ruleRemoveById={rule_id}"'
                 )

@@ -25,7 +25,7 @@ import sys
 
 from app.core.render import CRS_ROOT, _safe_name
 from app.db import session_scope
-from app.models import VirtualHost, json_set
+from app.models import WafExclusion, WafProfile, VirtualHost, json_set
 from app.web.routes_api import render_current
 
 SOCKET = "/run/nginxmgr/agent.sock"
@@ -278,6 +278,79 @@ else:
           bool(ok) and bool(out.get("ok")),
           (out.get("output") or "").strip())
 
+
+
+# ---------------------------------------------------------------------------
+# Wildcards in an exclusion path
+#
+# Learning gives one row per object it saw, so anything with a path per object
+# fills a profile with near duplicates and still misses whatever is created
+# tomorrow.  A git server is the example that forced this: one exclusion per
+# repository, forever.  So a path can carry a star and the renderer turns it
+# into a regular expression on the way out.
+#
+# The escaping is the part that has to be right.  `.git` has a dot in it, and
+# an unescaped dot matches any character, so a careless translation of
+# `/trice/*.git/` would also excuse `/trice/anythingXgit/`, which is a rule
+# switched off on a path nobody chose.
+print()
+print("  wildcards in an exclusion path")
+
+import re as _re
+from app.core.render import waf_path_to_regex
+
+_cases = [
+    ("/trice/*.git/*",
+     ["/trice/apache2.git/git-upload-pack", "/trice/site.git/info/refs"],
+     ["/trice/anythingXgit/x", "/other/a.git/x", "/trice/a/b.git/x"]),
+    ("/api/**/edit", ["/api/v1/deep/edit"], ["/apix/v1/edit"]),
+    ("/upload", ["/upload", "/upload/more"], ["/other"]),
+]
+for glob, should, shouldnt in _cases:
+    rx = waf_path_to_regex(glob)
+    check(f"{glob} matches what it should",
+          all(_re.search(rx, u) for u in should),
+          f"{rx} missed one of {should}")
+    check(f"{glob} matches nothing it should not",
+          not any(_re.search(rx, u) for u in shouldnt),
+          f"{rx} wrongly matched one of {shouldnt}")
+
+check("a star is not left in the regular expression as a literal",
+      "*" not in waf_path_to_regex("/a/*/b").replace("[^/]*", "").replace(".*", ""),
+      "an unconverted star would be a regex quantifier on the wrong thing")
+
+# And the same thing through a real render, because a translation that is
+# right in isolation and never reaches the config file is worth nothing.
+def _render_with_paths(paths):
+    """Render the target site against a scratch profile holding these paths."""
+    def mutate(session):
+        profile = WafProfile(name="check-waf-glob-scratch",
+                             learned_from_site=TARGET_NAME)
+        session.add(profile)
+        session.flush()
+        for i, path in enumerate(paths):
+            session.add(WafExclusion(profile_id=profile.id,
+                                     rule_id=942100 + i, path=path))
+        host = session.get(VirtualHost, TARGET_ID)
+        cfg = host.setting_map()
+        cfg["waf_mode"] = "block"
+        cfg["waf_paranoia"] = "custom:check-waf-glob-scratch"
+        host.settings = json_set(cfg)
+    return rendered_with(mutate).get(TARGET_FILE, "")
+
+
+_out = _render_with_paths(["/upload", "/trice/*.git/*"])
+check("a plain path still uses the cheap operator",
+      "@beginsWith /upload" in _out,
+      "every request would pay for a regular expression it does not need")
+check("a path with a star renders as a regular expression",
+      "@rx ^/trice/[^/]*\\.git/[^/]*" in _out,
+      f"beginsWith would compare the star literally and never match.  "
+      f"Got: {[l for l in _out.splitlines() if 'trice' in l]}")
+check("the dot in .git is escaped in the rendered rule",
+      "\\.git" in _out,
+      "an unescaped dot matches any character, so the exclusion would also "
+      "cover paths nobody chose")
 
 print()
 failed = [r for r in results if not r[1]]

@@ -1112,6 +1112,160 @@ async def waf_profile_delete(profile_id: int, g: ObjectGuard = Depends(changing)
     return {"ok": True, "deleted": name}
 
 
+# The path an exclusion applies to, which people edit by hand.
+#
+# A quote or a line break would end the ModSecurity directive early and start
+# writing rules of its own, and a rule that switches off checking is the worst
+# possible thing to let somebody inject.  Same reasoning as the catalog's own
+# breakout check, applied here because these do not go through the catalog.
+_WAF_PATH_BAD = re.compile(r'["\'\\\n\r;{}]')
+
+
+def _waf_path_problem(path: str) -> str:
+    """Why this exclusion path cannot be stored, or empty when it can."""
+    if not path:
+        return ""            # blank means the whole site, which is allowed
+    if not path.startswith("/"):
+        return "a path has to start with /"
+    if len(path) > 500:
+        return "that path is too long"
+    if _WAF_PATH_BAD.search(path):
+        return "a path cannot contain quotes, backslashes, semicolons, braces or line breaks"
+    if "***" in path:
+        return "use * for one path segment or ** for any number, not three"
+    return ""
+
+
+@router.post("/waf/profiles/{profile_id}/exclusions")
+async def waf_exclusion_add(profile_id: int, request: Request,
+                            g: ObjectGuard = Depends(changing)):
+    """
+    Add an exclusion to a profile by hand.
+
+    Learning produces these from evidence, which is the right way round, but it
+    can only produce what somebody exercised.  A repository created next week
+    is not in any learned path, so there has to be a way to write the general
+    case yourself.
+    """
+    g.require("edit_sites")
+    profile = g.get(WafProfile, profile_id)
+    payload = await request.json() if await request.body() else {}
+
+    try:
+        rule_id = int(payload.get("rule_id"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="a rule id has to be a number")
+
+    path = (payload.get("path") or "").strip()
+    problem = _waf_path_problem(path)
+    if problem:
+        raise HTTPException(status_code=400, detail=problem)
+
+    if any(e.rule_id == rule_id and (e.path or "") == path
+           for e in profile.exclusions):
+        raise HTTPException(
+            status_code=400,
+            detail=f"rule {rule_id} is already excused on {path or 'the whole site'}")
+
+    g.session.add(WafExclusion(
+        profile_id=profile.id, rule_id=rule_id, path=path or None,
+        message=(payload.get("message") or "added by hand")[:300],
+        created_by=g.user.username))
+    g.session.commit()
+
+    audit.record("waf.exclusion.add", user=g.user, object_type="waf_profile",
+                 object_name=profile.name,
+                 detail=f"rule {rule_id} on {path or 'the whole site'}")
+    return _profile_json(profile, _profile_users(g.session, profile.name))
+
+
+@router.patch("/waf/profiles/{profile_id}/exclusions/{exclusion_id}")
+async def waf_exclusion_edit(profile_id: int, exclusion_id: int, request: Request,
+                             g: ObjectGuard = Depends(changing)):
+    """
+    Change the path an exclusion covers.
+
+    This is what makes learning usable on anything with a path per object.  A
+    git server produces one row per repository, so a learning round gives
+    `/trice/apache2.git/git-upload-pack` and will give another for every
+    repository that ever exists.  Editing that to `/trice/*.git/*` turns
+    dozens of rows into one that also covers the repository somebody makes
+    next week.
+
+    The star is kept as a star.  What is stored is what the page shows and
+    what a person edits; the translation into a regular expression happens in
+    the renderer, because asking somebody to maintain
+    `^/trice/[^/]*\\.git/` is how a tuned profile stops being reviewed.
+
+    The evidence is deliberately not editable.  Which address it was learned
+    from, and what the rule said, are the record of why somebody decided this,
+    and a note that can be rewritten is not a record.
+    """
+    g.require("edit_sites")
+    profile = g.get(WafProfile, profile_id)
+    payload = await request.json() if await request.body() else {}
+
+    entry = next((e for e in profile.exclusions if e.id == exclusion_id), None)
+    if entry is None:
+        raise HTTPException(status_code=404,
+                            detail="that exclusion is not in this profile")
+
+    path = (payload.get("path") or "").strip()
+    problem = _waf_path_problem(path)
+    if problem:
+        raise HTTPException(status_code=400, detail=problem)
+
+    if any(e.id != entry.id and e.rule_id == entry.rule_id
+           and (e.path or "") == path for e in profile.exclusions):
+        raise HTTPException(
+            status_code=400,
+            detail=f"rule {entry.rule_id} is already excused on "
+                   f"{path or 'the whole site'} in this profile")
+
+    was = entry.path or ""
+    entry.path = path or None
+    g.session.commit()
+
+    audit.record("waf.exclusion.edit", user=g.user, object_type="waf_profile",
+                 object_name=profile.name,
+                 changes={"path": {"from": was or "(whole site)",
+                                   "to": path or "(whole site)"},
+                          "rule_id": entry.rule_id})
+    return _profile_json(profile, _profile_users(g.session, profile.name))
+
+
+@router.delete("/waf/profiles/{profile_id}/exclusions/{exclusion_id}")
+async def waf_exclusion_delete(profile_id: int, exclusion_id: int,
+                               g: ObjectGuard = Depends(changing)):
+    """
+    Take one exclusion out of a profile.
+
+    Not refused when sites are using the profile, unlike deleting the profile
+    itself, and the difference is which way the risk runs.  Deleting a profile
+    a site points at leaves it pointing at nothing, which is an outage.
+    Removing one exclusion puts a rule back into force, which is the firewall
+    checking more rather than less.  It may well break the application again,
+    and that is a thing somebody can see and undo, not a fleet going dark.
+    """
+    g.require("edit_sites")
+    profile = g.get(WafProfile, profile_id)
+
+    entry = next((e for e in profile.exclusions if e.id == exclusion_id), None)
+    if entry is None:
+        raise HTTPException(status_code=404,
+                            detail="that exclusion is not in this profile")
+
+    rule_id, path = entry.rule_id, entry.path or ""
+    g.session.delete(entry)
+    g.session.commit()
+
+    audit.record("waf.exclusion.delete", user=g.user, object_type="waf_profile",
+                 object_name=profile.name,
+                 detail=f"rule {rule_id} on {path or 'the whole site'} put back "
+                        f"into force")
+    return _profile_json(profile, _profile_users(g.session, profile.name))
+
+
 @router.get("/catalog/plus")
 async def catalog_plus(request: Request, db: DBSession = Depends(get_db)):
     """
