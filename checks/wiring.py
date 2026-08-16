@@ -200,6 +200,9 @@ PREREQUISITE = {
     "autoindex": {"try_files": "$uri $uri/ =404"},
     "fancyindex_exact_size": {"fancyindex": True},
     "fancyindex_name_length": {"fancyindex": True},
+    # Strictness only means anything once the WAF is checking something, which
+    # the check found on its own and is exactly what it is for.
+    "waf_paranoia": {"waf_mode": "watching"},
 }
 
 # Settings that need the site to be a different shape, not another setting.
