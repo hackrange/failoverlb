@@ -249,12 +249,12 @@
 
 <div class="card">
   <div class="card-head">
-    <h2>Firewall rule set</h2>
+    <h2>WAF rule set</h2>
     <span class="small faint" id="crs-summary">checking the fleet</span>
   </div>
   <div class="card-body">
     <p class="small muted" style="margin-top:0">
-      The OWASP Core Rule Set, which is what the firewall actually checks
+      The OWASP Core Rule Set, which is what the WAF actually checks
       requests against.  Same story as the country database: it is files next
       to nginx on every node, and a node without them refuses the whole config,
       so this puts them on all of them and keeps them current.
@@ -305,7 +305,7 @@
       <div>
         Save the page first, then install: the download follows whichever track
         is saved here.  Having the rules on a node does not switch anything on.
-        A site only gets checked once its own firewall setting is turned on,
+        A site only gets checked once its own WAF setting is turned on,
         and that starts in watching mode.
       </div>
     </div>
@@ -521,7 +521,7 @@ document.addEventListener("DOMContentLoaded", function () {
 
   load();
 
-  // ---- the firewall rule set ------------------------------------------------
+  // ---- the WAF rule set ------------------------------------------------
 
   const crsSummary = document.getElementById("crs-summary");
   const crsNodes = document.getElementById("crs-nodes");

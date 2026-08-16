@@ -2937,7 +2937,7 @@ register(
     Feature(
         key="waf_mode",
         own_screen=True,
-        label="Web application firewall",
+        label="WAF",
         category="security",
         directive="",            # one setting, several lines, so the renderer does it
         contexts=("server",),
@@ -2968,7 +2968,7 @@ register(
                 "things your own application does until you have told it not to, so "
                 "run watching first, exercise the site, and turn the false positives "
                 "into exclusions.  Going straight here is how people end up switching "
-                "a firewall off at two in the morning.\n\n"
+                "a WAF off at two in the morning.\n\n"
                 "Whatever you pick, the rules have to be on every node.  A node "
                 "without them refuses the whole config, so install them from Settings "
                 "first."
@@ -2995,7 +2995,7 @@ register(
     Feature(
         key="waf_paranoia",
         own_screen=True,
-        label="Firewall strictness",
+        label="WAF strictness",
         category="security",
         directive="",
         contexts=("server",),
@@ -3019,7 +3019,7 @@ register(
                 "Raising this is not a way to be more secure for free; it is a "
                 "commitment to spend time on the false positives it produces, and it "
                 "should be done in watching mode first.\n\n"
-                "Only does anything when the firewall above is not off."
+                "Only does anything when the WAF above is not off."
             ),
             use_cases=[
                 "A site holding something worth the tuning time",

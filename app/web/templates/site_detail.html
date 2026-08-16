@@ -63,7 +63,7 @@
   <button class="tab" data-tab="paths" role="tab">Paths</button>
   <button class="tab" data-tab="settings" role="tab">Settings</button>
   <button class="tab" data-tab="geo" role="tab" id="tab-geo" hidden>Geo blocking</button>
-  <button class="tab" data-tab="waf" role="tab" id="tab-waf" hidden>Firewall</button>
+  <button class="tab" data-tab="waf" role="tab" id="tab-waf" hidden>WAF</button>
   <button class="tab" data-tab="config" role="tab">nginx config</button>
 </div>
 
@@ -451,15 +451,15 @@
 <div class="tab-panel" data-panel="waf" hidden>
   <div class="card">
     <div class="card-head">
-      <h2>Firewall for this site</h2>
+      <h2>WAF for this site</h2>
       <span class="small faint" id="waf-state"></span>
     </div>
     <div class="card-body">
       <div id="waf-no-rules" class="notice warn" hidden>
         <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.4 15 14H1z"/></svg>
         <div>
-          There is no rule set on the fleet yet, so the firewall cannot be
-          applied.  Install one under <strong>Settings, Firewall rule set</strong>
+          There is no rule set on the fleet yet, so the WAF cannot be
+          applied.  Install one under <strong>Settings, WAF rule set</strong>
           and it takes a few seconds.
         </div>
       </div>
@@ -1574,14 +1574,14 @@ document.addEventListener("DOMContentLoaded", function () {
     })();
   })();
 
-  // ---- the firewall ----
+  // ---- the WAF ----
   //
   // Two settings on their own tab rather than two lines in the advanced list,
   // and the tab is only there when nginx was built with the module.  The
   // wording under the picker changes with the answer, because the difference
   // between watching and blocking is the whole feature and a hint that says
   // the same thing for all four answers explains none of them.
-  (function firewall() {
+  (function waf() {
     const tab = document.getElementById("tab-waf");
     const mode = document.getElementById("waf-mode");
     if (!tab || !mode) return;
@@ -1603,7 +1603,7 @@ document.addEventListener("DOMContentLoaded", function () {
         "Applies the full rule set.  It will refuse things your own application " +
         "does until you have told it not to, so run watching first and deal with " +
         "what fires.  Going straight here is how people end up switching a " +
-        "firewall off at two in the morning.",
+        "WAF off at two in the morning.",
     };
 
     function refresh() {
@@ -1634,8 +1634,8 @@ document.addEventListener("DOMContentLoaded", function () {
           settings.waf_paranoia = paranoia.value;
         }
         await NFM.api("/hosts/" + HOST_ID, { method: "PUT", body: { settings: settings } });
-        NFM.toast(mode.value === "off" ? "Firewall off for this site"
-                                       : "Firewall set to " + mode.value, "ok");
+        NFM.toast(mode.value === "off" ? "WAF off for this site"
+                                       : "WAF set to " + mode.value, "ok");
       } catch (err) {
         NFM.toast(err.message, "bad");
       }
