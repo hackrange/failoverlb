@@ -121,6 +121,39 @@ CAPS = fleet_capabilities()
 # and comparing is the only way to catch a setting the renderer has simply
 # never heard of, because there is no directive name to search the output for.
 
+# What has to be set before a setting means anything.
+#
+# Each of these was checked in the renderer rather than assumed.  A rate limit
+# only writes when it has a zone to count against (render.py, _limit_lines), and
+# the whole proxy_cache family only writes inside a proxy_cache block.  Filled
+# in from real objects on this node, because a zone name that does not exist
+# renders nothing either.
+with session_scope() as _s:
+    from app.models import CacheZone, ConnLimitZone, RateLimitZone
+
+    _req = _s.query(RateLimitZone).first()
+    _conn = _s.query(ConnLimitZone).first()
+    _cache = _s.query(CacheZone).first()
+    REQ_ZONE = _req.name if _req else None
+    CONN_ZONE = _conn.name if _conn else None
+    CACHE_ZONE = _cache.name if _cache else None
+
+PREREQUISITE = {
+    "limit_req_burst": {"limit_req_zone_name": REQ_ZONE},
+    "limit_req_nodelay": {"limit_req_zone_name": REQ_ZONE},
+    "limit_req_status": {"limit_req_zone_name": REQ_ZONE},
+    "limit_conn_count": {"limit_conn_zone_name": CONN_ZONE},
+    "limit_conn_status": {"limit_conn_zone_name": CONN_ZONE},
+    "proxy_cache_valid": {"proxy_cache": CACHE_ZONE},
+    "proxy_cache_key": {"proxy_cache": CACHE_ZONE},
+    "proxy_cache_bypass": {"proxy_cache": CACHE_ZONE},
+    "proxy_no_cache": {"proxy_cache": CACHE_ZONE},
+    "proxy_cache_use_stale": {"proxy_cache": CACHE_ZONE},
+    "proxy_cache_min_uses": {"proxy_cache": CACHE_ZONE},
+    "proxy_cache_lock": {"proxy_cache": CACHE_ZONE},
+    "proxy_cache": {"proxy_cache": CACHE_ZONE},
+}
+
 print("  every setting changes the config when it is set")
 
 base = rendered(lambda session: None)
@@ -129,6 +162,7 @@ base_text = site_text(base, TARGET)
 dead = []
 unavailable = []
 no_value = []
+needs_companion = []
 
 for feature in all_features().values():
     if "server" not in feature.contexts:
@@ -148,19 +182,37 @@ for feature in all_features().values():
         no_value.append(feature.key)
         continue
 
-    def mutate(session, key=feature.key, val=value):
+    # Some settings only mean anything once another one is set, and testing
+    # them alone would report a long list of settings that are perfectly well
+    # wired.  A check that cries wolf gets ignored, which is worse than not
+    # having it, so the companion goes in first and the setting is judged on
+    # top of that.
+    extra = dict(PREREQUISITE.get(feature.key) or {})
+    if extra and any(v is None for v in extra.values()):
+        needs_companion.append(feature.key)
+        continue
+
+    def mutate(session, key=feature.key, val=value, companions=extra):
         h = session.get(VirtualHost, TARGET_ID)
         cfg = h.setting_map()
+        cfg.update(companions)
         cfg[key] = val
+        h.settings = json_set(cfg)
+
+    def only_companions(session, companions=extra):
+        h = session.get(VirtualHost, TARGET_ID)
+        cfg = h.setting_map()
+        cfg.update(companions)
         h.settings = json_set(cfg)
 
     try:
         after = site_text(rendered(mutate), TARGET)
+        before = site_text(rendered(only_companions), TARGET) if extra else base_text
     except Exception as exc:
         dead.append((feature.key, f"render raised: {exc}"))
         continue
 
-    if after == base_text:
+    if after == before:
         dead.append((feature.key, "the rendered site is byte for byte the same"))
 
 check("no setting renders identically whether it is on or off",
@@ -170,6 +222,8 @@ check("no setting renders identically whether it is on or off",
 
 print(f"          {len(unavailable)} skipped, the fleet has no module for them")
 print(f"          {len(no_value)} skipped, no value worth inventing")
+print(f"          {len(needs_companion)} skipped, their companion object does "
+      f"not exist on this node")
 
 
 # =============================================================================
@@ -252,7 +306,30 @@ from app.core.nginx_parser import DIRECTIVE_TO_KEY
 
 named = {f.directive: f.key for f in all_features().values()
          if getattr(f, "directive", "") and "server" in f.contexts}
-missing = sorted(d for d in named if d not in DIRECTIVE_TO_KEY)
+
+# Directives the importer handles some other way, each checked rather than
+# waved through.  These take several arguments or appear many times, so the
+# importer keeps them as custom config on the way in instead of trying to fold
+# them back into one setting.  That is a deliberate trade and not a gap.
+#
+# Anything not on this list and not in the map is a real hole: it would render
+# happily and come back as raw config on the next import, so the two halves of
+# a round trip would disagree.
+IMPORTED_ANOTHER_WAY = {
+    "error_page",          # many per site, and the templates are their own object
+    "rewrite",             # a regex and a replacement, kept verbatim
+    "sub_filter",          # a pair, and order matters
+    "more_set_headers",    # arbitrary header text
+    "more_clear_headers",
+    "proxy_hide_header",   # appears many times
+    "resolver",            # several addresses and a validity
+    "ssl_conf_command",    # a name and a value
+    "open_file_cache",     # several arguments
+    "proxy_cache",         # names a zone object rather than carrying a value
+}
+
+missing = sorted(d for d in named
+                 if d not in DIRECTIVE_TO_KEY and d not in IMPORTED_ANOTHER_WAY)
 
 check("every directive the catalog names is known to the parser",
       not missing,
@@ -292,13 +369,21 @@ EXEMPT = {
     "/healthz",      # not a page
 }
 
-unswept = sorted(p for p in page_paths
-                 if p not in EXEMPT and f'"{p}"' not in swept)
-
-check("every page route appears in the page sweep",
-      not unswept,
-      "these pages are never swept, so nothing would notice them raising: " +
-      ", ".join(unswept))
+if not swept:
+    # The checks folder is piped in from the host rather than living in the
+    # image, so from inside the container there is nothing to read.  Saying so
+    # beats reporting every page as unswept, which is what the first version
+    # did and would have taught people to ignore this whole file.
+    skip("every page route appears in the page sweep",
+         "checks/page_sweep.py is not readable from inside the container, so "
+         "this pass only works when run against a checkout")
+else:
+    unswept = sorted(p for p in page_paths
+                     if p not in EXEMPT and f'"{p}"' not in swept)
+    check("every page route appears in the page sweep",
+          not unswept,
+          "these pages are never swept, so nothing would notice them raising: " +
+          ", ".join(unswept))
 
 
 print()
