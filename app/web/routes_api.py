@@ -746,6 +746,18 @@ def _cross_check(settings: dict) -> list:
     """
     problems = []
 
+    # Credentials plus any origin is a pair no browser will use.  The help text
+    # on both settings says so, and until now nothing stopped somebody saving
+    # it, which leaves a site that looks configured for cross site calls and
+    # refuses every one of them with a message about the origin.
+    if settings.get("cors_allow_credentials"):
+        origins = settings.get("cors_allow_origin") or ["*"]
+        if any(str(o).strip() == "*" for o in origins):
+            problems.append(
+                "cross site credentials cannot be used with an allowed origin "
+                "of *, because a browser refuses that pair on purpose.  List "
+                "the origins that are allowed instead")
+
     buffer_size = settings.get("proxy_buffer_size")
     buffers = settings.get("proxy_buffers")
 

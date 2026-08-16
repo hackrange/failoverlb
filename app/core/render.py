@@ -290,6 +290,11 @@ class Renderer:
     def __init__(self, capabilities=None, node_addresses=None, settings=None,
                  ignore_health=False):
         self.caps = capabilities
+        # Origin maps built while sites are rendered, written out at the end.
+        # nginx sends one Access-Control-Allow-Origin and the page offers a
+        # list, so the only way to honour a list is to look the caller's origin
+        # up and answer with it when it is on the list.
+        self._cors_maps = []
         # Render as though every enabled backend were healthy.
         #
         # Only used to answer "has a person changed something since the last
@@ -344,6 +349,13 @@ class Renderer:
         self._render_error_pages(hosts, error_templates or [])
         self._render_sites(hosts, certs, access_lists, error_templates or [])
         self._render_streams(streams, certs, access_lists)
+
+        # After the sites, because that is when they are built.  One file, so a
+        # site with no cross site access adds nothing to the config at all.
+        if self._cors_maps:
+            self.files["maps/cors.conf"] = (
+                HEADER.format(detail="Which origins each site answers to.")
+                + "\n" + "\n".join(self._cors_maps))
 
         return self.files
 
@@ -1407,6 +1419,7 @@ map $cookie_{cookie} $sticky_set_{var} {{
         lines.extend(self._limit_lines(cfg, indent=4))
 
         lines.extend(self._serving_lines(cfg, indent=4))
+        lines.extend(self._cors_lines(cfg, indent=4, name=host.name))
 
         # Which resolver nginx uses when it has to look a name up while it is
         # running.  Several arguments, so it goes through the same writer as a
@@ -1528,6 +1541,110 @@ map $cookie_{cookie} $sticky_set_{var} {{
             for line in host.custom_config.splitlines():
                 lines.append(f"    {line}")
 
+        return lines
+
+    def _cors_lines(self, cfg, indent=4, name="site") -> list:
+        """
+        Cross site access, which is five settings and one feature.
+
+        All five have been on the page since the catalog was written and none
+        of them has ever put a header anywhere.  Turning it on, listing your
+        frontend and applying left the browser refusing the call exactly as
+        before, with nothing to say why.
+
+        Three things make this more than an add_header:
+
+        **A list of origins cannot be one header.**  nginx sends a single
+        Access-Control-Allow-Origin, so the only honest way to honour a list is
+        to look the caller's origin up and answer with it when it is on the
+        list, and with nothing when it is not.  That is a map, generated here
+        and written to maps/cors.conf, and it is why Vary: Origin goes out with
+        it: the answer depends on who asked, and a cache that misses that
+        serves one origin's answer to another.
+
+        **The preflight is most of the work.**  A browser sends OPTIONS before
+        anything interesting and expects the headers back on that, not on the
+        real request.  Sending them only on the real request is the classic way
+        to have CORS configured and not working, so OPTIONS is answered here
+        with 204 and never reaches the backend.  The headers are repeated
+        inside, because nginx does not inherit add_header into a block that has
+        its own.
+
+        **Credentials and `*` cannot go together**, which the help text says and
+        the browser enforces.  It is refused on the way in now, and if a saved
+        setting from before still has both, the credentials header is left out
+        rather than writing a combination no browser will use.
+        """
+        if not cfg.get("cors_enabled"):
+            return []
+
+        pad = " " * indent
+        origins = [str(o).strip() for o in (cfg.get("cors_allow_origin") or ["*"])
+                   if str(o).strip()]
+        methods = [str(m).strip() for m in (cfg.get("cors_allow_methods")
+                                            or ["GET", "POST", "OPTIONS"])]
+        headers = [str(h).strip() for h in (cfg.get("cors_allow_headers")
+                                            or ["Authorization", "Content-Type"])]
+        credentials = bool(cfg.get("cors_allow_credentials"))
+
+        if not origins:
+            origins = ["*"]
+
+        # OPTIONS has to be allowed or the preflight the browser sends is not
+        # on the list it is being told about, which reads as a server that
+        # cannot make up its mind.
+        if "OPTIONS" not in [m.upper() for m in methods]:
+            methods = methods + ["OPTIONS"]
+
+        lines = []
+        wildcard = origins == ["*"]
+
+        if wildcard and credentials:
+            credentials = False
+            log.warning("cors: %s allows any origin and credentials, which no "
+                        "browser will use, so credentials are left out", name)
+            lines.append(f"{pad}# Credentials are left out here: they were set "
+                         f"along with an allowed")
+            lines.append(f"{pad}# origin of *, and browsers refuse that pair on "
+                         f"purpose.  List the")
+            lines.append(f"{pad}# real origins to use credentials.")
+
+        if wildcard:
+            origin_value = '"*"'
+        else:
+            var = f"nfm_cors_{_safe_var(name)}"
+            entries = [f'    default "";']
+            for origin in origins:
+                entries.append(f"    {map_value(origin)} $http_origin;")
+            self._cors_maps.append(
+                f"map $http_origin ${var} {{\n" + "\n".join(entries) + "\n}\n")
+            origin_value = f"${var}"
+
+        header_lines = [
+            f"{pad}add_header Access-Control-Allow-Origin {origin_value} always;",
+            f"{pad}add_header Access-Control-Allow-Methods "
+            f"{esc_header_value(', '.join(methods))} always;",
+            f"{pad}add_header Access-Control-Allow-Headers "
+            f"{esc_header_value(', '.join(headers))} always;",
+        ]
+        if credentials:
+            header_lines.append(
+                f'{pad}add_header Access-Control-Allow-Credentials "true" always;')
+        if not wildcard:
+            header_lines.append(f"{pad}add_header Vary Origin always;")
+
+        lines.extend(header_lines)
+
+        # The preflight, answered here rather than at the backend.
+        inner = " " * (indent + 4)
+        lines.append(f"{pad}if ($request_method = OPTIONS) {{")
+        for line in header_lines:
+            lines.append(inner + line.strip())
+        lines.append(f"{inner}add_header Access-Control-Max-Age 86400 always;")
+        lines.append(f'{inner}add_header Content-Type "text/plain" always;')
+        lines.append(f"{inner}add_header Content-Length 0 always;")
+        lines.append(f"{inner}return 204;")
+        lines.append(f"{pad}}}")
         return lines
 
     def _serving_lines(self, cfg, indent=4) -> list:
@@ -1920,6 +2037,8 @@ map $cookie_{cookie} $sticky_set_{var} {{
             lines.extend(self._limit_lines(cfg, indent=8))
 
         lines.extend(self._serving_lines(loc_only, indent=8))
+        lines.extend(self._cors_lines(
+            loc_only, indent=8, name=f"{host.name}_{loc.path}"))
 
         # Only this path's own rules.  Everything else in cfg is inherited from
         # the site, and nginx already inherits those into the location on its
