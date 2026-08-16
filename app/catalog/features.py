@@ -2975,41 +2975,26 @@ register(
         ),
     ),
 
-    Feature(
-        key="secure_link",
-        label="Signed URLs",
-        category="access",
-        directive="secure_link",
-        contexts=("location",),
-        type="bool",
-        default=False,
-        module="http_secure_link_module",
-        advanced=True,
-        help=HelpText(
-            summary="Only serve a file if the URL carries a valid signature that has not expired.",
-            detail=(
-                "Lets you hand somebody a download link that works for an hour and then "
-                "stops, without putting the file behind a login.  Your app builds the "
-                "link with a shared secret, nginx checks it.\n\n"
-                "The file itself never needs to be reachable any other way, so a leaked "
-                "link expires instead of being permanent."
-            ),
-            use_cases=[
-                "Time limited download links for paid content",
-                "Private file shares that expire on their own",
-            ],
-            example="A link valid for one hour, signed with a shared secret",
-            example_config=(
-                "location /downloads/ {\n"
-                "    secure_link $arg_md5,$arg_expires;\n"
-                "    secure_link_md5 \"$secure_link_expires$uri$remote_addr yoursecret\";\n\n"
-                "    if ($secure_link = \"\") { return 403; }\n"
-                "    if ($secure_link = \"0\") { return 410; }\n"
-                "}"
-            ),
-            docs_url=f"{D}/http/ngx_http_secure_link_module.html",
-        ),
-    ),
+# Signed URLs are deliberately not here.
+#
+# nginx only *verifies* a signed link: something else has to generate it, with
+# the same secret and the same formula, and that something is the customer's
+# application.  A tick box that turns verification on for links nobody is
+# signing does not protect a folder, it 403s it for everybody, so as a setting
+# on this page it could only ever mislead.
+#
+# It was on the page for a long time and rendered nothing at all, which is how
+# it came up.  Doing it properly means a secret, the exact formula on screen,
+# and a worked example of building a link; taking it off is the honest version
+# of what it was.  The Custom config box takes the six lines for anybody who
+# wants it, and nginx is still built with the module.
+#
+#     location /downloads/ {
+#         secure_link $arg_md5,$arg_expires;
+#         secure_link_md5 "$secure_link_expires$uri$remote_addr yoursecret";
+#         if ($secure_link = "")  { return 403; }
+#         if ($secure_link = "0") { return 410; }
+#     }
 )
 
 
