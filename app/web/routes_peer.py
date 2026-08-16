@@ -506,6 +506,21 @@ PEER_AGENT_VERBS = {
     # path, only the name of a source the agent already knows.
     "geoip_install",
     "geoip_status",
+    # The firewall rule set, for exactly the same reason as the country
+    # database above: a node without the rules refuses the whole config, so
+    # whichever node somebody clicked on has to be able to put them on the
+    # others.  Neither verb takes a URL or a path either, only the name of a
+    # track the agent already knows.
+    "crs_install",
+    "crs_status",
+    # Loading the module.  Read only in the status case, and the install case
+    # writes one file whose contents this node decides, tests the result and
+    # puts the old state back if nginx refuses it.  It has to be reachable from
+    # a peer because the whole fleet has to agree about whether the module is
+    # loaded: one node with it and one without is a site that works on one box
+    # and fails its config test on the other.
+    "waf_module",
+    "waf_module_status",
 }
 
 
