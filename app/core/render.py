@@ -1566,9 +1566,12 @@ map $cookie_{cookie} $sticky_set_{var} {{
         anything interesting and expects the headers back on that, not on the
         real request.  Sending them only on the real request is the classic way
         to have CORS configured and not working, so OPTIONS is answered here
-        with 204 and never reaches the backend.  The headers are repeated
-        inside, because nginx does not inherit add_header into a block that has
-        its own.
+        with 204 and never reaches the backend.
+
+        The `if` holds nothing but the `return`, which is not tidiness: real
+        nginx refuses `add_header` inside an `if` at the server level, with
+        "directive is not allowed here", and the headers set above it apply to
+        the 204 anyway because they are set in the same block.
 
         **Credentials and `*` cannot go together**, which the help text says and
         the browser enforces.  It is refused on the way in now, and if a saved
@@ -1633,16 +1636,15 @@ map $cookie_{cookie} $sticky_set_{var} {{
         if not wildcard:
             header_lines.append(f"{pad}add_header Vary Origin always;")
 
+        # Only the preflight uses this one.  A browser ignores it on an
+        # ordinary response, and putting it here rather than inside the block
+        # below is what keeps that block to a single return.
+        header_lines.append(f"{pad}add_header Access-Control-Max-Age 86400 always;")
         lines.extend(header_lines)
 
         # The preflight, answered here rather than at the backend.
         inner = " " * (indent + 4)
         lines.append(f"{pad}if ($request_method = OPTIONS) {{")
-        for line in header_lines:
-            lines.append(inner + line.strip())
-        lines.append(f"{inner}add_header Access-Control-Max-Age 86400 always;")
-        lines.append(f'{inner}add_header Content-Type "text/plain" always;')
-        lines.append(f"{inner}add_header Content-Length 0 always;")
         lines.append(f"{inner}return 204;")
         lines.append(f"{pad}}}")
         return lines
