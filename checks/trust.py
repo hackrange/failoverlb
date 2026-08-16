@@ -18,6 +18,7 @@ functions, given good input and bad.
 
     docker exec -i nginx-fleet-manager python < checks/trust.py
 """
+import pathlib
 import sys
 import time
 
@@ -244,6 +245,50 @@ check("every exempt path is under the tunnel and takes a ticket",
       all(p.startswith("/tunnel/") and p.endswith("/") for p in TICKETED_PATHS),
       f"these are checked with startswith, so a prefix that does not end in a "
       f"slash matches more than it looks: {list(TICKETED_PATHS)}")
+
+
+# ---------------------------------------------------------------------------
+# Every verb the manager fans out is one a peer may answer
+#
+# A fleet wide question is asked by whichever node somebody is looking at, and
+# answered by all of them over the peer link.  The peer endpoint has its own
+# allow list, deliberately, because it is a way to drive one node's agent from
+# another and it should carry exactly what it needs and nothing else.
+#
+# **It has been forgotten three times.**  crs_install, then waf_surface, then
+# login_failures.  It fails in a way that looks like the feature working: the
+# node you are looking at answers correctly, the other one comes back 403, and
+# the page shows half the truth without saying so.  For the WAF surface that
+# meant a positive model built from half the walk, where the missing half is
+# refused in production.  For a password spray, which is spread thin across
+# many addresses on purpose, halving the signal can put it under the threshold,
+# so the attack is simply not reported.
+#
+# Mechanical rather than remembered.  Anything the code asks every node for has
+# to be on the list.
+print()
+print("  fleet wide verbs")
+
+import re as _re
+
+_asked = {}
+for _f in pathlib.Path("app").rglob("*.py"):
+    for _m in _re.finditer(r'ask_every_node\(\s*["\']([a-z_]+)["\']', _f.read_text()):
+        _asked.setdefault(_m.group(1), f"{_f}")
+
+from app.web.routes_peer import PEER_AGENT_VERBS  # noqa: E402
+
+_missing = sorted(v for v in _asked if v not in PEER_AGENT_VERBS)
+check("every verb asked of the whole fleet is one a peer may answer",
+      not _missing,
+      f"the node you are looking at would answer and the others would come "
+      f"back 403, so the page shows half the truth without saying so: "
+      f"{[(v, _asked[v]) for v in _missing]}")
+
+check("the fleet actually asks for something",
+      len(_asked) >= 5,
+      "if this drops to nothing the check above is passing for the wrong "
+      "reason, which is the failure this file warns about")
 
 
 print()

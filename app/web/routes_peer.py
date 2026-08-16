@@ -530,6 +530,16 @@ PEER_AGENT_VERBS = {
     "waf_hits",
     "waf_hits_clear",
     "waf_log_status",
+    # The surface, for the same reason as the hits and with the same arguments.
+    # A positive model built from one node's log is built from half the walk,
+    # and the half it missed is refused in production.
+    "waf_surface",
+    # Failed logins.  A password spray is spread thin across many addresses on
+    # purpose, so asking one node halves the signal and can put it under the
+    # threshold, which is the difference between reporting an attack and not.
+    # Takes a site name, some paths and a timestamp; returns counts per
+    # address and never a username, because the access log has none.
+    "login_failures",
     # Rotation runs on a schedule from the active node, for the whole fleet,
     # because a standby filling its disk is a standby that cannot be failed
     # over to, which is found out at the worst moment.
