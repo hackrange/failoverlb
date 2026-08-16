@@ -59,23 +59,58 @@ def skip(name, why):
 
 
 def sample_value(feature):
-    """A value worth setting, of the right type.  Same idea as catalog_sweep."""
-    if feature.default not in (None, "", [], {}):
-        return feature.default
+    """
+    A value that is deliberately **not** the default.
+
+    The first version used the default, which is exactly the wrong choice and
+    produced a page of false alarms: setting gzip to the value gzip already has
+    renders identical config, by definition, so every setting whose default is
+    already applied looked dead.
+
+    What this check asks is whether changing a setting changes the config, so
+    the value has to differ from what the site would do anyway.
+    """
     kind = feature.type
+    default = feature.default
+
     if kind == "bool":
-        return True
-    if kind == "int":
-        return getattr(feature, "min_value", None) or 1
-    if kind == "size":
-        return "16k"
-    if kind == "time":
-        return "30s"
+        return not bool(default)
+
     if kind in ("select", "multiselect", "list"):
-        if feature.options:
-            first = feature.options[0][0]
-            return [first] if kind in ("multiselect", "list") else first
+        options = [o[0] for o in (feature.options or [])]
+        if not options:
+            return None
+        if kind == "select":
+            for option in options:
+                if option != default:
+                    return option
+            return None
+        # A list or multiselect: something other than whatever is default.
+        for option in options:
+            if [option] != (default or []):
+                return [option]
         return None
+
+    if kind == "int":
+        base = default if isinstance(default, int) else 0
+        top = getattr(feature, "max_value", None)
+        candidate = base + 1
+        if top is not None and candidate > top:
+            candidate = base - 1
+        return candidate if candidate >= 0 else None
+
+    if kind == "size":
+        return "3k" if str(default) != "3k" else "7k"
+
+    if kind == "time":
+        return "37s" if str(default) != "37s" else "41s"
+
+    if kind == "string":
+        # Only where a made up string is safe to render.  Anything that becomes
+        # a regex, a path or a list of arguments is left to catalog_sweep,
+        # which has a value invention rule of its own and nginx to judge it.
+        return None
+
     return None
 
 
