@@ -500,6 +500,12 @@ PEER_AGENT_VERBS = {
     # the filesystem, and the whole reason for a fleet view is seeing the other
     # node's numbers on whichever page somebody happens to be on.
     "nginx_metrics",
+    # The country database.  Installing it is a fleet wide job by nature: a node
+    # without the file refuses the whole config, so the node somebody clicked on
+    # has to be able to put it on the others.  Neither verb takes a URL or a
+    # path, only the name of a source the agent already knows.
+    "geoip_install",
+    "geoip_status",
 }
 
 
