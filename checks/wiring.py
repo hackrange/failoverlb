@@ -127,9 +127,18 @@ def rendered(mutate):
 
 
 def site_text(files, name):
-    from app.core.render import _safe_name
+    """
+    Everything the render produced, not just the site's own file.
 
-    return files.get(f"sites/{_safe_name(name)}.conf", "")
+    Comparing only sites/<name>.conf missed any setting whose effect lands
+    somewhere else in the bundle, and several do: the WAF writes a rule file
+    under waf/, cross site access and country blocking write maps, a pool
+    writes an upstream.  waf_paranoia was reported as dead for exactly this
+    reason while it was writing the paranoia level into the rule file all
+    along.
+    """
+    return "\n".join(f"--- {path}\n{text}"
+                     for path, text in sorted(files.items()))
 
 
 print("\n=== Is every setting wired to something ===\n")
