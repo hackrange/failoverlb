@@ -130,7 +130,7 @@ dead = []
 unavailable = []
 no_value = []
 
-for feature in all_features():
+for feature in all_features().values():
     if "server" not in feature.contexts:
         continue
     if getattr(feature, "edition", "oss") != "oss":
@@ -250,7 +250,7 @@ print("\n  the importer knows every directive the catalog writes")
 
 from app.core.nginx_parser import DIRECTIVE_TO_KEY
 
-named = {f.directive: f.key for f in all_features()
+named = {f.directive: f.key for f in all_features().values()
          if getattr(f, "directive", "") and "server" in f.contexts}
 missing = sorted(d for d in named if d not in DIRECTIVE_TO_KEY)
 
