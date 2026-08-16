@@ -558,6 +558,26 @@ async def site_detail(host_id: str, request: Request, db: DBSession = Depends(ge
              if p and p not in host.name_list()), None),
         cert_wildcards=[d for d in (host.cert.domain_list() if host.cert else [])
                         if d.startswith("*.")],
+        # Where traffic for this site's names actually goes while it is not
+        # being served, which is the question somebody is really asking when
+        # they land on a page they did not expect.
+        #
+        # nginx sends a request whose name matches no server block to whichever
+        # block is the default server, so a site that is switched off, or whose
+        # https half cannot be written, quietly shows somebody a different
+        # site.  Looking at another site's page is the single most confusing
+        # answer a load balancer can give, and it is the one nothing said.
+        default_site=next(
+            (h.name for h in db.query(VirtualHost)
+             .filter(VirtualHost.default_server.is_(True)).all()), None),
+        # Whether the certificate this site points at can actually be written.
+        #
+        # A row exists the moment somebody asks for a certificate; the files
+        # arrive later, when it is issued.  Between those two the https block
+        # is deliberately left out, because nginx will not start with an ssl
+        # listener pointing at files that are not there.
+        cert_ready=bool(host.cert and (host.cert.status or "") == "valid"
+                        and host.cert.not_after),
         # What address this request came from, so the page can tell somebody
         # they are about to shut themselves out.  See the note in the template.
         viewer_ip=client_ip(request),
