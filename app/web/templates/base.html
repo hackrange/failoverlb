@@ -8,6 +8,10 @@
 {# The prefix we are served under, so the JavaScript builds API URLs that land
    in the right place when something proxies us at a sub path. #}
 <meta name="nfm-base" content="{{ base }}">
+{# What this page was rendered from.  Compared against the same stamp on every
+   API answer, so a tab left open across an upgrade notices rather than quietly
+   running yesterday's script. #}
+<meta name="nfm-build" content="{{ asset_version }}">
 <link rel="stylesheet" href="{{ base }}/static/app.css?v={{ asset_version }}">
 {# The favicon is drawn inline as an SVG so there is no image file to fetch.
    Keeps the content security policy tight and works with no network. #}

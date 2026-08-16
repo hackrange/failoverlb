@@ -259,6 +259,21 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         # The GUI is https only, so this is safe and worth having.
         response.headers["Strict-Transport-Security"] = "max-age=31536000"
 
+        # What the browser is currently running, on every answer.
+        #
+        # A page already loaded is never re-fetched however good the cache
+        # headers are, and most of this GUI's JavaScript is inline in the
+        # template, so a tab left open across an upgrade keeps running the old
+        # script forever.  Nothing tells it otherwise, and the failures look
+        # like bugs in the feature rather than an old page: a form missing a
+        # field that shipped, a button calling an endpoint that moved.
+        #
+        # Carried on the response rather than polled for.  Every page here
+        # talks to the API, so the comparison is free and needs no timer, no
+        # extra request and nothing to remember to wire up on a new page.
+        from app.web.routes_pages import ASSET_VERSION
+        response.headers["X-NFM-Build"] = ASSET_VERSION
+
         # Management pages should never be cached.  A shared machine with a page
         # of your nginx config sitting in the browser cache is not great.
         if not request.url.path.startswith("/static"):

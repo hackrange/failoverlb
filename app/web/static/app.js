@@ -81,6 +81,21 @@
             throw new Error(formatError(detail) || ("request failed with " + response.status));
         }
 
+        // Is this page still the page the server is serving.
+        //
+        // A tab already open is never re-fetched, however good the cache
+        // headers are, and most of this GUI's JavaScript is inline in the
+        // template.  So a tab left open across an upgrade keeps running the
+        // old script, and the failures look like bugs in the feature rather
+        // than an old page: a form missing a field that shipped, a button
+        // calling an endpoint that moved.  Both of those were reported as
+        // faults before this existed.
+        //
+        // Checked here because every page talks to the API, so it costs one
+        // header comparison and needs no timer, no extra request, and nothing
+        // to remember to wire up on a new page.
+        checkBuild(response.headers.get("X-NFM-Build"));
+
         // Anything that changed something may have made the saved config differ
         // from the running one, so ask again rather than waiting for the timer.
         // Skipped for the status call itself, which would loop forever.
@@ -112,6 +127,36 @@
     }
 
     // ---------------------------------------------------------------- toasts
+    // ------------------------------------------------------- the page is old
+    //
+    // Said once, and left up.  A toast disappears, and the whole problem here
+    // is that somebody carries on for another ten minutes wondering why a
+    // feature is missing.  It does not reload on its own either: the page may
+    // have half filled a form, and taking that away to fix a problem they have
+    // not noticed yet is a worse trade than a line at the top of the screen.
+    let buildWarned = false;
+
+    function checkBuild(serverBuild) {
+        if (!serverBuild || buildWarned) { return; }
+        const meta = document.querySelector('meta[name="nfm-build"]');
+        const mine = meta ? meta.getAttribute("content") : "";
+        if (!mine || mine === serverBuild) { return; }
+
+        buildWarned = true;
+        const bar = document.createElement("div");
+        bar.className = "stale-bar";
+        bar.innerHTML =
+            "<div><strong>This page is out of date.</strong> " +
+            "The manager has been upgraded since you opened it, so what you " +
+            "are looking at is running the old version and may be missing " +
+            "things or calling endpoints that have moved.</div>" +
+            '<button type="button" class="btn sm">Reload</button>';
+        bar.querySelector("button").addEventListener("click", function () {
+            window.location.reload();
+        });
+        document.body.appendChild(bar);
+    }
+
     function toast(message, kind) {
         let holder = document.getElementById("toasts");
         if (!holder) {

@@ -57,25 +57,45 @@ templates = Jinja2Templates(directory=str(TEMPLATE_DIR))
 
 def _asset_version() -> str:
     """
-    A short stamp that changes when the css or js changes.
+    A short stamp that changes whenever anything the browser runs changes.
 
-    Without it a browser keeps running the last version it saw.  Both files are
-    served with an ETag, which lets a browser revalidate, but nothing makes it
-    ask, so after an upgrade people carry on with the old page logic and hit
-    bugs that were fixed hours ago.  There is no worse bug report than one about
-    code that is no longer running.
+    Two jobs, and it grew a second one the hard way.
 
-    Built from what is on disk rather than the release number, so a fix that
-    ships without a version bump still busts the cache.
+    **Busting the cache.**  Without it a browser keeps the css and js it
+    already has.  Both are served with an ETag, which lets a browser
+    revalidate, but nothing makes it ask, so after an upgrade people carry on
+    with the old page logic and hit bugs that were fixed hours ago.
+
+    **Telling an open tab it is out of date.**  A page already loaded is not
+    re-fetched however good the cache headers are, and most of this GUI's
+    JavaScript lives inline in the templates, so a tab left open across an
+    upgrade keeps running the old script forever.  That produced two confusing
+    bug reports in one afternoon: a form missing a field that had shipped, and
+    a page whose buttons called an endpoint that had moved.
+
+    **So the templates are in the stamp too**, which they were not before.
+    That is the whole reason a tab can now notice: the stamp it was rendered
+    with is compared against the one every API response carries, and the two
+    differ the moment anything the browser runs has changed underneath it.
+
+    Built from what is on disk rather than a release number, so a fix that
+    ships without a version bump still counts.
     """
-    stamp = ""
+    parts = []
+    static = Path(__file__).parent / "static"
     for name in ("app.js", "app.css"):
-        path = Path(__file__).parent / "static" / name
         try:
-            stat = path.stat()
-            stamp += f"{stat.st_mtime_ns}-{stat.st_size}"
+            stat = (static / name).stat()
+            parts.append(f"{name}:{stat.st_mtime_ns}-{stat.st_size}")
         except OSError:
             continue
+    for path in sorted(TEMPLATE_DIR.glob("*.html")):
+        try:
+            stat = path.stat()
+            parts.append(f"{path.name}:{stat.st_mtime_ns}-{stat.st_size}")
+        except OSError:
+            continue
+    stamp = "|".join(parts)
     return hashlib.sha256(stamp.encode()).hexdigest()[:12] if stamp else "dev"
 
 

@@ -320,6 +320,44 @@ check("every inline script closes its strings and template literals",
       "renders and then does nothing at all: " + "; ".join(unbalanced))
 
 
+# N. A tab left open across an upgrade can tell.
+#
+#    Most of this GUI's JavaScript is inline in the templates, and a page
+#    already loaded is never re-fetched however good the cache headers are.  So
+#    a tab open across an upgrade keeps running the old script, and the
+#    failures look like bugs in the feature rather than an old page: a form
+#    missing a field that shipped, a button calling an endpoint that moved.
+#    Both were reported as faults in one afternoon.
+#
+#    Three things have to line up for the tab to notice, and any one of them
+#    quietly missing brings the whole thing back.
+print()
+print("  an old tab can tell it is old")
+
+_base = (TEMPLATES / "base.html").read_text()
+check("the layout stamps every page with the build it came from",
+      'name="nfm-build"' in _base and "asset_version" in _base,
+      "without the stamp on the page there is nothing to compare against")
+
+_js = pathlib.Path("app/web/static/app.js").read_text()
+check("the api helper compares that stamp against every answer",
+      "X-NFM-Build" in _js and "checkBuild" in _js,
+      "the comparison rides on requests the page already makes, so if it is "
+      "not here it happens nowhere")
+
+_sec = pathlib.Path("app/web/security.py").read_text()
+check("the server puts the build on every response",
+      "X-NFM-Build" in _sec,
+      "the page can compare all it likes if nothing sends it the answer")
+
+_pages = pathlib.Path("app/web/routes_pages.py").read_text()
+check("the stamp covers the templates, not only the css and the js",
+      "TEMPLATE_DIR.glob" in _pages,
+      "this is the part that makes it work at all.  The inline script lives in "
+      "the template, so a stamp built only from app.js and app.css does not "
+      "change when the thing the browser is actually running changes")
+
+
 print()
 print(f"  {len(problems)} problem(s)")
 sys.exit(1 if problems else 0)

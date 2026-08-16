@@ -836,3 +836,27 @@ label.wafhit input:disabled { cursor: not-allowed; }
   display: grid; gap: .8rem;
   grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
 }
+
+/* The bar that says this page is older than the server.
+ *
+ * Pinned to the bottom rather than the top, because the top is where the
+ * "saved but not applied" banner already lives and two stacked warnings push
+ * the actual page off the screen.  It stays until somebody reloads: a toast
+ * would fade, and the whole problem is that people carry on for ten minutes
+ * wondering why a feature is missing. */
+.stale-bar {
+    position: fixed;
+    left: 0; right: 0; bottom: 0;
+    z-index: 60;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    padding: 10px 16px;
+    background: var(--warn-bg);
+    color: var(--text);
+    border-top: 2px solid var(--warn);
+    font-size: 0.86rem;
+    box-shadow: 0 -2px 10px rgba(0, 0, 0, .12);
+}
+.stale-bar button { flex: 0 0 auto; }
