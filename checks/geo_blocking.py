@@ -26,9 +26,10 @@ import socket
 import sys
 
 from app.core import error_pages
-from app.core.render import GEOIP_DATABASE, render_current
+from app.core.render import GEOIP_DATABASE
 from app.db import session_scope
 from app.models import Certificate, Location, Pool, VirtualHost
+from app.web.routes_api import render_current
 
 SCRATCH = "check-geo.invalid"
 SOCKET = "/run/nginxmgr/agent.sock"
@@ -129,12 +130,16 @@ def main():
           "CN 1;" in maps and "not a country" not in maps and "?? 1;" not in maps,
           maps)
 
-    # And nothing at all when the site blocks nowhere, so a fleet with no
-    # database and no blocking carries no geoip config to fail on.
+    # And nothing for a site that blocks nowhere.  Asked of this site's own map
+    # rather than of the file, because a real site on this fleet may be
+    # blocking, and then the file is there for a good reason.
     files = render_blocking([])
-    check("a site that blocks nowhere writes no geoip config at all",
-          "maps/geoip.conf" not in files,
-          "an empty list still wrote the http level lookup")
+    mine = "$nfm_geo_" + SCRATCH.replace(".", "_").replace("-", "_")
+    check("a site that blocks nowhere gets no map and no test",
+          mine not in files.get("maps/geoip.conf", "")
+          and not any(mine in text for path, text in files.items()
+                      if path.startswith("sites/")),
+          "an empty list still wrote a country test for the site")
 
     # Real nginx, through the agent, on the config with blocking in it.
     files = render_blocking(["CN", "RU"])
