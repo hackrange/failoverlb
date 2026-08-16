@@ -62,6 +62,10 @@ from app.models import (
     StreamServer,
     User,
     VirtualHost,
+    WafExclusion,
+    WafProfile,
+    WafSession,
+    json_set,
     utcnow,
 )
 from app.web.security import (
@@ -210,10 +214,27 @@ def render_current(session, ignore_health: bool = False) -> tuple:
             if addr and entry.get("scope") == "global":
                 node_addresses.append(addr)
 
+    # Read out as plain dictionaries rather than handed to the renderer as
+    # rows.  The renderer outlives this session in some callers, and a row read
+    # after its session closes is a 500 on one path only, which is a bug this
+    # project has already spent an afternoon on.
+    waf_profiles = [
+        {
+            "name": p.name,
+            "exclusions": [
+                {"rule_id": e.rule_id, "path": e.path or "",
+                 "message": e.message or ""}
+                for e in p.exclusions
+            ],
+        }
+        for p in session.query(WafProfile).all()
+    ]
+
     renderer = Renderer(
         ignore_health=ignore_health,
         capabilities=fleet_capabilities(),
         node_addresses=sorted(set(node_addresses)),
+        waf_profiles=waf_profiles,
         settings={
             "node_name": settings.node_name,
             # What an admin typed on the settings page, falling back to the GUI
@@ -593,6 +614,325 @@ async def waf_rules_install(request: Request, g: ObjectGuard = Depends(changing)
             detail="; ".join(f"{node}: {why}"
                              for node, why in (result.get("failed") or {}).items()))
     return result
+
+
+# ==============================================================================
+# Learning sessions, hits and profiles
+# ==============================================================================
+
+def _session_json(s):
+    return {
+        "id": s.id, "host_id": s.host_id,
+        "addresses": s.address_list(),
+        "previous_mode": s.previous_mode,
+        "started_at": s.started_at.isoformat() if s.started_at else None,
+        "started_by": s.started_by,
+        "ended_at": s.ended_at.isoformat() if s.ended_at else None,
+        "running": s.running,
+        "note": s.note,
+    }
+
+
+def _profile_json(p, used_by=None):
+    return {
+        "id": p.id, "name": p.name, "description": p.description or "",
+        "learned_from_site": p.learned_from_site,
+        "learned_from_addresses": p.address_list(),
+        "learned_at": p.learned_at.isoformat() if p.learned_at else None,
+        "exclusions": [
+            {"id": e.id, "rule_id": e.rule_id, "path": e.path or "",
+             "message": e.message or "", "learned_from_ip": e.learned_from_ip,
+             "sample_uri": e.sample_uri, "hits": e.hits,
+             "created_at": e.created_at.isoformat() if e.created_at else None,
+             "created_by": e.created_by}
+            for e in p.exclusions
+        ],
+        "used_by": used_by if used_by is not None else [],
+    }
+
+
+def _profile_users(session, name):
+    """Which sites are pointed at this profile, by name."""
+    return sorted(h.name for h in session.query(VirtualHost).all()
+                  if (h.setting_map().get("waf_paranoia") or "") == f"custom:{name}")
+
+
+@router.get("/waf/sessions/{host_id}")
+async def waf_session_state(host_id: int, request: Request,
+                            db: DBSession = Depends(get_db)):
+    """The learning sessions for one site, newest first."""
+    get_user(request, db)
+
+    rows = (db.query(WafSession).filter(WafSession.host_id == host_id)
+            .order_by(WafSession.started_at.desc()).limit(20).all())
+    return {"sessions": [_session_json(s) for s in rows],
+            "running": next((_session_json(s) for s in rows if s.running), None)}
+
+
+@router.post("/waf/sessions/{host_id}/start")
+async def waf_session_start(host_id: int, request: Request,
+                            g: ObjectGuard = Depends(changing)):
+    """
+    Begin watching, with the addresses that count as testers.
+
+    **Starting a session never lowers protection.**  A site that is blocking
+    keeps blocking: ModSecurity logs every rule that fires whether or not the
+    score reaches the threshold, so there is nothing to gain by weakening it
+    and a great deal to lose.  Only a site with the firewall off is changed,
+    and it is changed to watching, which refuses nothing.
+
+    A button labelled "start watching" that quietly turned a site's firewall
+    off is the sort of thing that gets found out during an incident.
+    """
+    from app.core.waf_hits import parse_addresses
+
+    g.require("manage_sites")
+    host = g.get(VirtualHost, host_id)
+
+    payload = await request.json() if await request.body() else {}
+    networks, bad = parse_addresses(payload.get("addresses"))
+    if bad:
+        raise HTTPException(
+            status_code=400,
+            detail=f"could not read these as addresses: {', '.join(bad)}")
+    if not networks:
+        raise HTTPException(
+            status_code=400,
+            detail="name at least one tester address.  Without one, every hit "
+                   "during the session looks equally trustworthy, including "
+                   "anybody scanning the site while it runs.")
+
+    running = (g.session.query(WafSession)
+               .filter(WafSession.host_id == host_id,
+                       WafSession.ended_at.is_(None)).first())
+    if running:
+        raise HTTPException(status_code=400,
+                            detail="a session is already running on this site")
+
+    cfg = host.setting_map()
+    was = (cfg.get("waf_mode") or "off").strip()
+
+    # Off is the only mode that changes, and it goes up rather than down.
+    if was in ("", "off"):
+        cfg["waf_mode"] = "watching"
+        host.settings = json_set(cfg)
+
+    row = WafSession(host_id=host_id,
+                     addresses=json_set([str(n) for n in networks]),
+                     previous_mode=was, started_by=g.user.username,
+                     note=(payload.get("note") or "").strip()[:500] or None)
+    g.session.add(row)
+    g.session.commit()
+
+    audit.record("waf.session.start", user=g.user, object_type="host",
+                 object_name=host.name,
+                 changes={"addresses": [str(n) for n in networks],
+                          "mode_was": was, "mode_now": cfg.get("waf_mode")})
+    return {"session": _session_json(row),
+            "mode_changed": was in ("", "off"),
+            "mode": cfg.get("waf_mode")}
+
+
+@router.post("/waf/sessions/{session_id}/stop")
+async def waf_session_stop(session_id: int, request: Request,
+                           g: ObjectGuard = Depends(changing)):
+    """
+    Stop watching, and hand back everything the session found.
+
+    Collects and presents; it does not save.  Stopping and whitelisting in one
+    step would rest the whole safeguard on nobody having wandered past during
+    the window, and the point of naming testers is that a person looks at the
+    result before it becomes policy.
+    """
+    from app.core import waf_hits as hits_mod
+
+    g.require("manage_sites")
+    row = g.get(WafSession, session_id)
+    if not row.running:
+        raise HTTPException(status_code=400, detail="that session has already stopped")
+
+    host = g.get(VirtualHost, row.host_id)
+    since = row.started_at.timestamp() if row.started_at else None
+
+    row.ended_at = utcnow()
+    row.ended_by = g.user.username
+
+    # Put the site back where it was, if starting had moved it.
+    restored = None
+    if (row.previous_mode or "off") in ("", "off"):
+        cfg = host.setting_map()
+        if (cfg.get("waf_mode") or "") == "watching":
+            cfg["waf_mode"] = "off"
+            host.settings = json_set(cfg)
+            restored = "off"
+
+    site_name = host.name
+    g.session.commit()
+
+    found = await hits_mod.fleet_hits(site_name, since=since)
+    networks, _bad = hits_mod.parse_addresses(row.address_list())
+    split = hits_mod.split_by_tester(found["groups"], networks)
+
+    audit.record("waf.session.stop", user=g.user, object_type="host",
+                 object_name=site_name,
+                 detail=f"{len(split['candidates'])} candidates, "
+                        f"{len(split['mixed'])} mixed, {len(split['others'])} other")
+
+    return {"session": _session_json(row), "restored_mode": restored,
+            "transactions": found["transactions"], "partial": found["partial"],
+            "nodes": found["nodes"], **split}
+
+
+@router.get("/waf/hits/{host_id}")
+async def waf_hits_for_host(host_id: int, request: Request,
+                            addresses: str = "", since: float = None,
+                            db: DBSession = Depends(get_db)):
+    """What fired for one site, split into what a tester produced and what did not."""
+    from app.core import waf_hits as hits_mod
+
+    get_user(request, db)
+    host = db.get(VirtualHost, host_id)
+    if not host:
+        raise HTTPException(status_code=404, detail="no such site")
+
+    found = await hits_mod.fleet_hits(host.name, since=since)
+    networks, bad = hits_mod.parse_addresses(addresses)
+    split = hits_mod.split_by_tester(found["groups"], networks)
+
+    return {"site": host.name, "transactions": found["transactions"],
+            "partial": found["partial"], "nodes": found["nodes"],
+            "unreadable_addresses": bad, **split}
+
+
+@router.post("/waf/hits/{host_id}/clear")
+async def waf_hits_clear(host_id: int, g: ObjectGuard = Depends(changing)):
+    """
+    Throw away what was learned for one site, on every node.
+
+    Only the evidence.  Exclusions already saved into a profile are decisions
+    taken from that evidence and are left alone, because a clear that quietly
+    removed them would put a site back to refusing traffic somebody had
+    explicitly allowed.
+    """
+    from app.core import waf_hits as hits_mod
+
+    g.require("manage_sites")
+    host = g.get(VirtualHost, host_id)
+    name = host.name
+
+    result = await hits_mod.clear_fleet(name)
+    audit.record("waf.hits.clear", user=g.user, object_type="host",
+                 object_name=name,
+                 result="success" if result.get("ok") else "failed",
+                 detail=f"cleared {sum(result.get('cleared', {}).values())} bytes")
+    if not result.get("ok"):
+        raise HTTPException(status_code=502, detail="; ".join(
+            f"{n}: {w}" for n, w in (result.get("failed") or {}).items()))
+    return result
+
+
+@router.get("/waf/logs")
+async def waf_log_state(request: Request, db: DBSession = Depends(get_db)):
+    """How much disk the audit logs are using, per node."""
+    from app.core import waf_hits as hits_mod
+
+    get_user(request, db)
+    return await hits_mod.log_status()
+
+
+@router.get("/waf/profiles")
+async def waf_profiles(request: Request, db: DBSession = Depends(get_db)):
+    """Every tuned profile, and which sites use it."""
+    get_user(request, db)
+    return {"profiles": [_profile_json(p, _profile_users(db, p.name))
+                         for p in db.query(WafProfile).order_by(WafProfile.name).all()]}
+
+
+@router.post("/waf/profiles")
+async def waf_profile_create(request: Request, g: ObjectGuard = Depends(changing)):
+    """
+    Save a set of ticked hits as a named profile.
+
+    The provenance travels with it — which site, which addresses, which
+    request, what date — because an exclusion nobody can explain is one nobody
+    will dare remove, and a WAF full of those checks nothing.
+    """
+    g.require("manage_sites")
+    payload = await request.json() if await request.body() else {}
+
+    name = (payload.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="give the profile a name")
+    if g.session.query(WafProfile).filter(WafProfile.name == name).first():
+        raise HTTPException(status_code=400,
+                            detail=f"there is already a profile called {name}")
+
+    entries = payload.get("exclusions") or []
+    if not entries:
+        raise HTTPException(status_code=400,
+                            detail="tick at least one entry to put in it")
+
+    profile = WafProfile(
+        name=name,
+        description=(payload.get("description") or "").strip()[:500] or None,
+        learned_from_site=(payload.get("learned_from_site") or "").strip() or None,
+        learned_from_addresses=json_set(payload.get("learned_from_addresses") or []),
+        learned_at=utcnow(),
+        updated_by=g.user.username,
+    )
+    g.session.add(profile)
+    g.session.flush()
+
+    seen = set()
+    for entry in entries:
+        try:
+            rule_id = int(entry.get("rule_id"))
+        except (TypeError, ValueError):
+            continue
+        path = (entry.get("path") or "").strip()
+        if (rule_id, path) in seen:
+            continue
+        seen.add((rule_id, path))
+        g.session.add(WafExclusion(
+            profile_id=profile.id, rule_id=rule_id, path=path or None,
+            message=(entry.get("message") or "")[:300] or None,
+            learned_from_ip=(entry.get("learned_from_ip") or "")[:64] or None,
+            sample_uri=(entry.get("sample_uri") or "")[:500] or None,
+            hits=int(entry.get("hits") or 0),
+            created_by=g.user.username,
+        ))
+
+    g.session.commit()
+    audit.record("waf.profile.create", user=g.user, object_type="waf_profile",
+                 object_name=name, detail=f"{len(seen)} exclusions")
+    return _profile_json(profile, [])
+
+
+@router.delete("/waf/profiles/{profile_id}")
+async def waf_profile_delete(profile_id: int, g: ObjectGuard = Depends(changing)):
+    """
+    Delete a profile, unless a site is using it.
+
+    Refused with the list rather than allowed, the same as deleting a pool a
+    site points at.  A site whose profile vanished would fall back to an
+    untuned rule set and start refusing traffic it was tuned to allow, which is
+    an outage produced by a tidy up.
+    """
+    g.require("manage_sites")
+    profile = g.get(WafProfile, profile_id)
+    users = _profile_users(g.session, profile.name)
+    if users:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{', '.join(users)} still use this profile.  Point them at "
+                   f"something else first.")
+
+    name = profile.name
+    g.session.delete(profile)
+    g.session.commit()
+    audit.record("waf.profile.delete", user=g.user, object_type="waf_profile",
+                 object_name=name)
+    return {"ok": True, "deleted": name}
 
 
 @router.get("/catalog/plus")

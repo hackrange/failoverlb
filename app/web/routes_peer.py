@@ -521,6 +521,14 @@ PEER_AGENT_VERBS = {
     # and fails its config test on the other.
     "waf_module",
     "waf_module_status",
+    # The hits.  A learning session has to see what fired on every node, not
+    # just the one somebody is looking at, because whichever node was active
+    # when the testers ran is the one holding the evidence.  Reading takes a
+    # site name and a timestamp; clearing throws away that site's own log and
+    # nothing else.
+    "waf_hits",
+    "waf_hits_clear",
+    "waf_log_status",
 }
 
 

@@ -721,3 +721,16 @@ input:disabled, select:disabled { background: var(--bg-sunk); color: var(--text-
  * the part worth reading, and a table of bare scores would be an assertion. */
 table.cmp td { vertical-align: top; }
 table.cmp td:nth-child(4) { min-width: 22rem; }
+
+/* One row in the WAF hits list.  The tick box and the detail side by side, so
+ * the rule, the path and the addresses that produced it are all readable
+ * without opening anything: deciding whether a hit is a false positive is
+ * exactly the question of who sent it. */
+label.wafhit {
+    display: flex; gap: 10px; align-items: flex-start;
+    padding: 8px 10px; border-bottom: 1px solid var(--line);
+    cursor: pointer;
+}
+label.wafhit:hover { background: var(--hover, rgba(0,0,0,0.03)); }
+label.wafhit input { margin-top: 3px; }
+label.wafhit input:disabled { cursor: not-allowed; }

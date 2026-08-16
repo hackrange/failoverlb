@@ -305,7 +305,7 @@ class Renderer:
     """
 
     def __init__(self, capabilities=None, node_addresses=None, settings=None,
-                 ignore_health=False):
+                 ignore_health=False, waf_profiles=None):
         self.caps = capabilities
         # Origin maps built while sites are rendered, written out at the end.
         # nginx sends one Access-Control-Allow-Origin and the page offers a
@@ -329,6 +329,11 @@ class Renderer:
         # so our own health checks never get blocked by an ACL somebody wrote.
         self.node_addresses = node_addresses or []
         self.settings = settings or {}
+        # Tuned WAF profiles, as plain dictionaries rather than rows.  Read
+        # once by whoever builds the renderer and passed in, so nothing here
+        # touches a row after the session that loaded it has closed, which this
+        # project has already been bitten by once.
+        self.waf_profiles = waf_profiles or []
         self.files = {}
 
     def has_module(self, module: str) -> bool:
@@ -1722,7 +1727,13 @@ map $cookie_{cookie} $sticky_set_{var} {{
         and it is read too late to change anything, which fails silently: the
         config tests clean and the setting does nothing.
         """
-        paranoia = (cfg.get("waf_paranoia") or "1").strip()
+        # Strictness is a level, or the name of a tuned profile.  A profile
+        # runs at level 1 and gets its strictness from the exclusions somebody
+        # proved were wrong, which is the whole argument for having them: a
+        # tuned level 1 catches more real attacks than an untuned level 3 that
+        # somebody switched off after a bad afternoon.
+        chosen = (cfg.get("waf_paranoia") or "1").strip()
+        paranoia = "1" if chosen.startswith("custom:") else chosen
         if paranoia not in ("1", "2", "3", "4"):
             paranoia = "1"
 
@@ -1797,7 +1808,78 @@ map $cookie_{cookie} $sticky_set_{var} {{
             "",
             f"Include {CRS_ROOT}/rules/*.conf",
             "",
-        ])
+        ] + self._waf_exclusion_lines(cfg))
+
+    def _waf_exclusion_lines(self, cfg) -> list:
+        """
+        The site's tuned exclusions, from the profile it is pointed at.
+
+        **Where these go is not a style choice and getting it wrong is
+        silent.**  ModSecurity has two ways to switch a rule off and they live
+        at opposite ends of the file:
+
+          * `SecRuleRemoveById` is read while the config loads, so the rule has
+            to already exist.  It goes *after* the rules are included.  Put it
+            before and it is a directive about a rule nobody has defined yet,
+            which is not an error, it simply does nothing.
+          * `ctl:ruleRemoveById` inside a phase 1 rule happens at request time,
+            which is how an exclusion is scoped to one path.
+
+        Both are written here, after the include, which is correct for the
+        first and harmless for the second.  A config with either in the wrong
+        place tests clean and quietly keeps refusing the traffic somebody
+        thought they had allowed, which is the worst outcome this feature has:
+        the page says the exclusion is saved and the site still breaks.
+        """
+        profile = self._waf_profile(cfg)
+        if not profile:
+            return []
+
+        lines = ["", f"# Exclusions from the profile {profile['name']}.",
+                 "# Written by the fleet manager.  Do not edit."]
+
+        # Our own rule ids, well below the 900000 block the rule set uses for
+        # its own setup, so nothing here can collide with a CRS rule.
+        next_id = 10000
+
+        for item in profile["exclusions"]:
+            rule_id = int(item["rule_id"])
+            path = (item.get("path") or "").strip()
+            why = (item.get("message") or "").replace("\n", " ")[:120]
+
+            if path:
+                lines.append(f"# {rule_id} off for {path}: {why}")
+                lines.append(
+                    f'SecRule REQUEST_URI "@beginsWith {path}" '
+                    f'"id:{next_id},phase:1,pass,nolog,'
+                    f'ctl:ruleRemoveById={rule_id}"'
+                )
+                next_id += 1
+            else:
+                lines.append(f"# {rule_id} off for the whole site: {why}")
+                lines.append(f"SecRuleRemoveById {rule_id}")
+
+        lines.append("")
+        return lines
+
+    def _waf_profile(self, cfg):
+        """
+        The profile a site is pointed at, as plain data.
+
+        Read through the same objects everything else here uses, and returned
+        as dictionaries so the renderer never holds a row past the session that
+        loaded it.  A row read after its session closes is a 500, and this
+        project has already met that one.
+        """
+        chosen = (cfg.get("waf_paranoia") or "").strip()
+        if not chosen.startswith("custom:"):
+            return None
+
+        name = chosen.split(":", 1)[1]
+        for profile in (self.waf_profiles or []):
+            if profile["name"] == name:
+                return profile
+        return None
 
     def _geo_block_lines(self, cfg, indent=4, name="site") -> list:
         """

@@ -94,6 +94,9 @@ from app.models import (
     User,
     UserRole,
     VirtualHost,
+    WafExclusion,
+    WafProfile,
+    WafSession,
 )
 
 log = logging.getLogger("nfm.snapshot")
@@ -110,10 +113,22 @@ TABLES = [
     ("certificates", Certificate),
     ("error_page_templates", ErrorPageTemplate),
     ("error_page_images", ErrorPageImage),
+    # The tuned firewall profiles, before the sites that point at them.  These
+    # are the expensive thing in the whole system to recreate: somebody
+    # exercised an application, watched what the rules said about it and
+    # decided which of those were wrong.  A restore that quietly dropped them
+    # would leave every site pointing at a profile that no longer exists.
+    ("waf_profiles", WafProfile),
+    ("waf_exclusions", WafExclusion),
     ("pools", Pool),
     ("pool_members", PoolMember),
     ("hosts", VirtualHost),
     ("locations", Location),
+    # After the sites, since a session belongs to one.  Kept rather than
+    # treated as scratch, because a profile's provenance points back at the
+    # session it came from and an exclusion nobody can explain is one nobody
+    # will dare remove.
+    ("waf_sessions", WafSession),
     ("streams", StreamServer),
     # Parents before children, because a restore replays this in order and a
     # record with no zone to hang off is dropped.

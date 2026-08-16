@@ -484,15 +484,10 @@
         <div id="waf-explain-text"></div>
       </div>
 
-      <div class="field" style="max-width:320px">
+      <div class="field" style="max-width:360px">
         <label for="waf-paranoia">Strictness</label>
-        <select id="waf-paranoia">
-          <option value="1">1, the default</option>
-          <option value="2">2, stricter</option>
-          <option value="3">3, stricter still</option>
-          <option value="4">4, refuses ordinary things</option>
-        </select>
-        <div class="hint">
+        <select id="waf-paranoia"></select>
+        <div class="hint" id="waf-paranoia-hint">
           Leave this at 1 unless you are prepared to spend time on what it
           starts refusing.  Raise it in watching first and look at what fires.
         </div>
@@ -501,6 +496,111 @@
       <div class="flex mt">
         <button type="button" class="btn primary" id="waf-save">Save</button>
         <span class="small faint">Applies at the next Apply config, like every other change.</span>
+      </div>
+    </div>
+  </div>
+
+  {#
+    The learning session.
+
+    Its own card because it is an activity rather than a setting: it has a
+    start, an end and a result.  The addresses are asked for before anything
+    starts, which is the whole safeguard — a firewall that whitelists whatever
+    fired while it was learning is a gift to anybody scanning the site at the
+    time.
+  #}
+  <div class="card">
+    <div class="card-head">
+      <h2>Learning session</h2>
+      <span class="small faint" id="waf-session-state"></span>
+    </div>
+    <div class="card-body">
+      <div id="waf-session-idle">
+        <p class="small muted" style="margin-top:0">
+          Name the addresses your testers will come from, start watching,
+          exercise the site properly, then stop.  What fired from those
+          addresses becomes a list you can tick and save as a named profile.
+        </p>
+
+        <div class="field" style="max-width:460px">
+          <label for="waf-addresses">Tester addresses</label>
+          <textarea id="waf-addresses" rows="3"
+                    placeholder="203.0.113.10&#10;198.51.100.0/24"></textarea>
+          <div class="hint">
+            One per line, or comma separated.  Addresses or CIDRs, v4 or v6.
+            More than one is normal: an office, a VPN, a build runner, somebody's
+            laptop.  This is what separates your testing from whoever else turns
+            up while it runs, so it is asked for first and cannot be left empty.
+          </div>
+        </div>
+
+        <div class="field" style="max-width:460px">
+          <label for="waf-session-note">What this round is</label>
+          <input type="text" id="waf-session-note"
+                 placeholder="checkout regression, August release">
+        </div>
+
+        <div class="notice info" id="waf-start-effect">
+          <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 3a.9.9 0 1 1 0 1.8A.9.9 0 0 1 8 4zm1.2 8H6.8v-.9h.7V7.9h-.7V7h2.1v4.1h.3V12z"/></svg>
+          <div id="waf-start-effect-text"></div>
+        </div>
+
+        <div class="flex mt">
+          <button type="button" class="btn primary" id="waf-start">Start watching</button>
+        </div>
+      </div>
+
+      <div id="waf-session-running" hidden>
+        <div class="notice ok">
+          <svg viewBox="0 0 16 16" fill="currentColor"><path d="M13.5 4.5 6 12 2.5 8.5l1-1L6 10l6.5-6.5 1 1z"/></svg>
+          <div id="waf-running-text"></div>
+        </div>
+        <div class="flex mt">
+          <button type="button" class="btn primary" id="waf-stop">Stop watching</button>
+          <button type="button" class="btn" id="waf-refresh">Show what has fired so far</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  {#
+    What fired.  Only shown while a session is running or just after one
+    stopped: a list of hits against a site that is enforcing invites somebody
+    to tick things without the evidence that made ticking safe.
+  #}
+  <div class="card" id="waf-hits-card" hidden>
+    <div class="card-head">
+      <h2>What fired</h2>
+      <span class="small faint" id="waf-hits-summary"></span>
+    </div>
+    <div class="card-body">
+      <div class="notice warn" id="waf-mixed-warn" hidden>
+        <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.4 15 14H1z"/></svg>
+        <div id="waf-mixed-text"></div>
+      </div>
+
+      <div class="flex mb">
+        <input type="search" id="waf-hit-search" placeholder="Find a rule, path or address"
+               style="max-width:300px">
+        <button type="button" class="btn sm" id="waf-check-all">Check all</button>
+        <button type="button" class="btn sm" id="waf-uncheck-all">Uncheck all</button>
+        <span class="small faint" id="waf-hit-scope"></span>
+      </div>
+
+      <div id="waf-hit-list"></div>
+
+      <div class="flex mt">
+        <input type="text" id="waf-profile-name" placeholder="Profile name, e.g. checkout"
+               style="max-width:240px">
+        <button type="button" class="btn primary" id="waf-save-profile">
+          Save ticked as a profile
+        </button>
+        <button type="button" class="btn danger" id="waf-clear">Clear what was learned</button>
+      </div>
+      <div class="hint">
+        Saving creates a named rule set you can apply to this site and any
+        other.  Clearing throws away the evidence on every node and leaves
+        profiles you have already saved alone.
       </div>
     </div>
   </div>
@@ -1606,13 +1706,59 @@ document.addEventListener("DOMContentLoaded", function () {
         "WAF off at two in the morning.",
     };
 
+    let profiles = [];
+    let hits = { candidates: [], mixed: [], others: [] };
+    let running = null;
+
+    function fillParanoia(current) {
+      // The built in levels never go away.  Profiles append to them, so a
+      // fleet with none still gets the full picker and a site can always be
+      // put back on a plain level without deleting anything.
+      const base = [
+        ["1", "1, the default"],
+        ["2", "2, stricter"],
+        ["3", "3, stricter still"],
+        ["4", "4, refuses ordinary things"],
+      ];
+      // "in learning" or "in enforcement" is composed from the mode rather
+      // than stored, so one fact is said once.
+      const where = mode.value === "watching" ? "in learning" : "in enforcement";
+      const custom = profiles.map(p => ["custom:" + p.name,
+                                        "Custom - " + p.name + " (" + where + ")"]);
+      paranoia.innerHTML = base.concat(custom)
+        .map(([v, l]) => '<option value="' + NFM.escapeHtml(v) + '">' +
+                          NFM.escapeHtml(l) + "</option>").join("");
+      paranoia.value = current;
+      if (!paranoia.value) paranoia.value = "1";
+    }
+
     function refresh() {
       explain.textContent = WORDS[mode.value] || "";
-      // Strictness only means anything when something is being checked.
-      paranoia.closest(".field").hidden = mode.value === "off";
+      // Strictness only means anything when something is being checked, and it
+      // is ignored entirely by the locked preset.
+      const wrap = paranoia.closest(".field");
+      wrap.hidden = mode.value === "off" || mode.value === "block_known";
+      document.getElementById("waf-paranoia-hint").textContent =
+        "Leave this at 1 unless you are prepared to spend time on what it " +
+        "starts refusing.  A saved profile runs at 1 with your exclusions, " +
+        "which catches more than an untuned 3.";
       document.getElementById("waf-state").textContent =
         mode.value === "off" ? "" :
         mode.value === "watching" ? "watching" : "blocking";
+
+      const effect = document.getElementById("waf-start-effect-text");
+      if (effect) {
+        // Starting a session must never lower protection, and the page says
+        // which of the two things it is about to do.
+        effect.textContent = (mode.value === "off")
+          ? "This site's firewall is off, so starting will put it into " +
+            "watching.  Nothing gets refused; the rules only report."
+          : "This site is already checking requests, so starting changes " +
+            "nothing about what it refuses.  It records the window and the " +
+            "addresses.  Note that while it is enforcing, a false positive " +
+            "still breaks a real request.";
+      }
+      fillParanoia(paranoia.value || "1");
     }
 
     mode.addEventListener("change", refresh);
@@ -1642,6 +1788,213 @@ document.addEventListener("DOMContentLoaded", function () {
       button.disabled = false;
     });
 
+    // ---- the hits list ----
+
+    function hitRows() {
+      // Candidates first, then mixed, then the rest.  Only candidates can be
+      // ticked: a hit from an address nobody vouched for is not evidence that
+      // it was legitimate, however often it fired.
+      return hits.candidates.map(g => ({ g: g, kind: "candidate" }))
+        .concat(hits.mixed.map(g => ({ g: g, kind: "mixed" })))
+        .concat(hits.others.map(g => ({ g: g, kind: "other" })));
+    }
+
+    function drawHits() {
+      const term = (document.getElementById("waf-hit-search").value || "")
+        .trim().toLowerCase();
+      const list = document.getElementById("waf-hit-list");
+
+      const rows = hitRows().filter(function (r) {
+        if (!term) return true;
+        const clients = (r.g.clients || []).map(c => c[0]).join(" ");
+        return [r.g.rule_id, r.g.path, r.g.message, clients]
+          .some(v => String(v || "").toLowerCase().indexOf(term) !== -1);
+      });
+
+      document.getElementById("waf-hit-scope").textContent =
+        term ? rows.length + " of " + hitRows().length : "";
+
+      if (!rows.length) {
+        list.innerHTML = '<div class="small faint">Nothing fired' +
+          (term ? " matching " + NFM.escapeHtml(term) : " yet") + ".</div>";
+        return;
+      }
+
+      list.innerHTML = rows.map(function (r) {
+        const g = r.g;
+        const key = g.rule_id + "|" + (g.path || "");
+        const clients = (g.clients || []).map(c => c[0] + " (" + c[1] + ")").join(", ");
+        const tick = r.kind === "candidate"
+          ? '<input type="checkbox" class="waf-hit" value="' + NFM.escapeHtml(key) + '">'
+          : '<input type="checkbox" disabled title="only traffic from a tester address can be whitelisted">';
+        const badge = r.kind === "candidate"
+          ? '<span class="badge ok">tester</span>'
+          : (r.kind === "mixed"
+             ? '<span class="badge warn">tester and others</span>'
+             : '<span class="badge neutral">not a tester</span>');
+        return '<label class="wafhit">' + tick +
+          '<span><strong>' + NFM.escapeHtml(g.rule_id) + "</strong> " + badge +
+          '<span class="small faint"> &times;' + g.count +
+          (g.blocked ? ", " + g.blocked + " refused" : "") + "</span>" +
+          '<div class="small">' + NFM.escapeHtml(g.message || "") + "</div>" +
+          '<div class="small faint mono">' + NFM.escapeHtml(g.path || "/") + "</div>" +
+          '<div class="small faint">from ' + NFM.escapeHtml(clients) + "</div>" +
+          "</span></label>";
+      }).join("");
+    }
+
+    function tickedEntries() {
+      const want = new Set(Array.from(
+        document.querySelectorAll(".waf-hit:checked")).map(b => b.value));
+      return hits.candidates.filter(function (g) {
+        return want.has(g.rule_id + "|" + (g.path || ""));
+      }).map(function (g) {
+        return {
+          rule_id: g.rule_id, path: g.path || "",
+          message: g.message || "",
+          learned_from_ip: (g.clients && g.clients[0]) ? g.clients[0][0] : "",
+          sample_uri: g.sample_uri || "", hits: g.count || 0,
+        };
+      });
+    }
+
+    function showHits(payload) {
+      hits = {
+        candidates: payload.candidates || [],
+        mixed: payload.mixed || [],
+        others: payload.others || [],
+      };
+      document.getElementById("waf-hits-card").hidden = false;
+      document.getElementById("waf-hits-summary").textContent =
+        (payload.transactions || 0) + " requests, " +
+        hits.candidates.length + " you can whitelist";
+
+      const warn = document.getElementById("waf-mixed-warn");
+      warn.hidden = !hits.mixed.length;
+      if (hits.mixed.length) {
+        document.getElementById("waf-mixed-text").textContent =
+          hits.mixed.length + " of these fired for a tester and for somebody " +
+          "else.  Those cannot be ticked: a rule that a stranger also tripped " +
+          "during your test window is exactly what this filter exists to " +
+          "catch, and whitelisting it on the strength of the tester's half is " +
+          "how a site goes blind to the attack it was being probed with.";
+      }
+      if (payload.partial) {
+        NFM.toast("The logs were larger than one read, so this is the most " +
+                  "recent part of them", "warn");
+      }
+      drawHits();
+    }
+
+    document.getElementById("waf-hit-search")
+      .addEventListener("input", drawHits);
+
+    // Check all and Uncheck all act on what the search has left on screen, so
+    // filtering to one address and ticking it is two moves.  Same behaviour as
+    // the country list, which people here already know.
+    document.getElementById("waf-check-all").addEventListener("click", function () {
+      document.querySelectorAll(".waf-hit").forEach(b => { b.checked = true; });
+    });
+    document.getElementById("waf-uncheck-all").addEventListener("click", function () {
+      document.querySelectorAll(".waf-hit").forEach(b => { b.checked = false; });
+    });
+
+    // ---- the session ----
+
+    function showSession(s) {
+      running = s;
+      document.getElementById("waf-session-idle").hidden = !!s;
+      document.getElementById("waf-session-running").hidden = !s;
+      document.getElementById("waf-session-state").textContent =
+        s ? "watching since " + (s.started_at || "").replace("T", " ").slice(0, 16) : "";
+      if (s) {
+        document.getElementById("waf-running-text").textContent =
+          "Watching traffic from " + (s.addresses || []).join(", ") +
+          ".  Exercise the site, then stop.";
+      }
+    }
+
+    document.getElementById("waf-start").addEventListener("click", async function () {
+      const button = document.getElementById("waf-start");
+      button.disabled = true;
+      try {
+        const r = await NFM.api("/waf/sessions/" + HOST_ID + "/start", {
+          method: "POST",
+          body: {
+            addresses: document.getElementById("waf-addresses").value,
+            note: document.getElementById("waf-session-note").value.trim(),
+          },
+        });
+        showSession(r.session);
+        if (r.mode_changed) {
+          mode.value = r.mode;
+          refresh();
+          NFM.toast("Watching.  The site was off, so it is now reporting.", "ok");
+        } else {
+          NFM.toast("Watching.  Enforcement is unchanged.", "ok");
+        }
+      } catch (err) { NFM.toast(err.message, "bad"); }
+      button.disabled = false;
+    });
+
+    document.getElementById("waf-stop").addEventListener("click", async function () {
+      const button = document.getElementById("waf-stop");
+      button.disabled = true;
+      try {
+        const r = await NFM.api("/waf/sessions/" + running.id + "/stop",
+                                { method: "POST", body: {} });
+        showSession(null);
+        if (r.restored_mode) { mode.value = r.restored_mode; refresh(); }
+        showHits(r);
+        NFM.toast("Stopped.  " + (r.candidates || []).length +
+                  " entries came from your testers.", "ok");
+      } catch (err) { NFM.toast(err.message, "bad"); }
+      button.disabled = false;
+    });
+
+    document.getElementById("waf-refresh").addEventListener("click", async function () {
+      try {
+        const q = "?addresses=" + encodeURIComponent((running.addresses || []).join(",")) +
+                  (running.started_at ? "&since=" +
+                   (new Date(running.started_at).getTime() / 1000) : "");
+        showHits(await NFM.api("/waf/hits/" + HOST_ID + q));
+      } catch (err) { NFM.toast(err.message, "bad"); }
+    });
+
+    document.getElementById("waf-clear").addEventListener("click", function () {
+      NFM.confirmThen(
+        "Clear what was learned for this site?\n\n" +
+        "This throws away the hits on every node.  Profiles you have already " +
+        "saved are decisions taken from that evidence and are left alone.",
+        async function () {
+          await NFM.api("/waf/hits/" + HOST_ID + "/clear", { method: "POST", body: {} });
+          hits = { candidates: [], mixed: [], others: [] };
+          drawHits();
+          NFM.toast("Cleared on every node", "ok");
+        });
+    });
+
+    document.getElementById("waf-save-profile").addEventListener("click", async function () {
+      const name = document.getElementById("waf-profile-name").value.trim();
+      const entries = tickedEntries();
+      if (!name) { NFM.toast("Give the profile a name", "bad"); return; }
+      if (!entries.length) { NFM.toast("Tick at least one entry", "bad"); return; }
+      try {
+        await NFM.api("/waf/profiles", {
+          method: "POST",
+          body: {
+            name: name,
+            learned_from_site: SITE_NAME,
+            learned_from_addresses: running ? running.addresses : [],
+            exclusions: entries,
+          },
+        });
+        NFM.toast("Saved " + entries.length + " exclusions as " + name, "ok");
+        profiles = (await NFM.api("/waf/profiles")).profiles || [];
+        fillParanoia(paranoia.value);
+      } catch (err) { NFM.toast(err.message, "bad"); }
+    });
+
     (async function start() {
       let host, rules;
       try { host = await NFM.api("/hosts/" + HOST_ID); }
@@ -1663,10 +2016,23 @@ document.addEventListener("DOMContentLoaded", function () {
       catch (err) { rules = {}; }
       document.getElementById("waf-no-rules").hidden = !!rules.everywhere;
 
+      try { profiles = (await NFM.api("/waf/profiles")).profiles || []; }
+      catch (err) { profiles = []; }
+
       const s = host.settings || {};
       mode.value = s.waf_mode || "off";
-      paranoia.value = s.waf_paranoia || "1";
+      fillParanoia(s.waf_paranoia || "1");
       refresh();
+
+      // A running session brings the hits list with it, so somebody who
+      // navigated away mid round comes back to where they were.
+      try {
+        const state = await NFM.api("/waf/sessions/" + HOST_ID);
+        showSession(state.running);
+        if (state.running) {
+          document.getElementById("waf-refresh").click();
+        }
+      } catch (err) { /* the card just stays idle */ }
     })();
   })();
 

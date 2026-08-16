@@ -3009,6 +3009,231 @@ def v_crs_install(req):
             "rules": len(rules), "path": str(CRS_LINK)}
 
 
+# ==============================================================================
+# What the rules actually caught
+# ==============================================================================
+#
+# ModSecurity writes one JSON object per transaction it thought was worth
+# recording.  This reads them back, groups them, and hands the manager
+# something small enough to put on a page.
+#
+# The grouping happens here rather than in the manager on purpose.  A site
+# under a scan writes tens of thousands of these, and shipping them all across
+# the cluster so the far end can count them is a way to make one busy site into
+# a fleet wide problem.
+
+WAF_LOG_DIR = Path("/var/log/nginx")
+
+# How much of the log to read, and how many groups to hand back.  Both are
+# ceilings rather than targets: nearly every read is far smaller.
+WAF_READ_BYTES = 24 * 1024 * 1024
+WAF_MAX_GROUPS = 500
+
+# When the log is big enough to do something about.  A site being scanned in
+# watching mode writes steadily, and filling the disk on a load balancer is a
+# worse outage than anything the firewall prevents.
+WAF_LOG_CAP = 64 * 1024 * 1024
+
+
+def _waf_log(site):
+    """The audit log for one site, with the name checked before it is a path."""
+    name = str(site or "").strip()
+    if not name or not re.fullmatch(r"[A-Za-z0-9._-]{1,190}", name):
+        raise AgentError("that is not a site name", "invalid")
+    path = (WAF_LOG_DIR / f"waf-{name}.log").resolve()
+    if path.parent != WAF_LOG_DIR.resolve():
+        raise AgentError("that is not a site name", "invalid")
+    return path
+
+
+def _waf_when(stamp):
+    """
+    The audit log's timestamp as epoch seconds, or None.
+
+    ModSecurity writes "Sun Aug 16 12:48:04 2026", which sorts alphabetically
+    into nonsense, so it has to be parsed rather than compared as text.
+    """
+    import calendar
+
+    try:
+        return calendar.timegm(time.strptime(str(stamp), "%a %b %d %H:%M:%S %Y"))
+    except (ValueError, TypeError):
+        return None
+
+
+def v_waf_hits(req):
+    """
+    What fired on this node, grouped by rule and path.
+
+    `since` bounds it to a learning session.  Filtering here rather than in the
+    manager means a session that ran for ten minutes does not have to carry a
+    week of unrelated traffic across the wire to be thrown away at the far end.
+
+    Every client address that produced each group comes back with it, because
+    deciding whether a hit is a false positive is exactly the question of who
+    sent it, and a group that mixes a tester with somebody else must be
+    visible as such rather than averaged into looking safe.
+    """
+    payload = req.get("payload") or req
+    path = _waf_log(payload.get("site"))
+    since = payload.get("since")
+    since = float(since) if isinstance(since, (int, float)) else None
+
+    if not path.is_file():
+        return {"ok": True, "present": False, "groups": [], "transactions": 0,
+                "bytes": 0, "path": str(path)}
+
+    size = path.stat().st_size
+
+    # The tail, not the head.  An old log that has grown past the ceiling has
+    # its interesting end at the bottom, and reading the first 24MB of it would
+    # answer with last month.
+    with path.open("rb") as handle:
+        if size > WAF_READ_BYTES:
+            handle.seek(size - WAF_READ_BYTES)
+            handle.readline()          # drop the half line we landed in
+        raw = handle.read()
+
+    groups = {}
+    transactions = 0
+    skipped = 0
+
+    for line in raw.split(b"\n"):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line.decode("utf-8", "replace"))
+        except ValueError:
+            skipped += 1
+            continue
+
+        tx = entry.get("transaction") or entry
+        when = _waf_when(tx.get("time_stamp"))
+        if since is not None and (when is None or when < since):
+            continue
+
+        transactions += 1
+        request = tx.get("request") or {}
+        uri = str(request.get("uri") or "")
+        client = str(tx.get("client_ip") or "")
+        blocked = bool(tx.get("is_interrupted"))
+
+        for message in (tx.get("messages") or entry.get("messages") or []):
+            details = message.get("details") or {}
+            rule_id = str(details.get("ruleId") or "").strip()
+            if not rule_id:
+                continue
+
+            # The path without its query string.  A rule firing on the same
+            # page with fifty different query strings is one false positive,
+            # not fifty, and grouping on the whole uri would bury it.
+            bare = uri.split("?", 1)[0]
+            key = (rule_id, bare)
+
+            group = groups.get(key)
+            if group is None:
+                if len(groups) >= WAF_MAX_GROUPS:
+                    continue
+                group = groups[key] = {
+                    "rule_id": rule_id,
+                    "path": bare,
+                    "message": str(message.get("message") or "")[:300],
+                    "severity": str(details.get("severity") or ""),
+                    "count": 0,
+                    "blocked": 0,
+                    "clients": {},
+                    "first_seen": when,
+                    "last_seen": when,
+                    "sample_uri": uri[:300],
+                }
+            group["count"] += 1
+            if blocked:
+                group["blocked"] += 1
+            if client:
+                group["clients"][client] = group["clients"].get(client, 0) + 1
+            if when is not None:
+                if group["first_seen"] is None or when < group["first_seen"]:
+                    group["first_seen"] = when
+                if group["last_seen"] is None or when > group["last_seen"]:
+                    group["last_seen"] = when
+
+    out = sorted(groups.values(), key=lambda g: g["count"], reverse=True)
+    for group in out:
+        group["clients"] = sorted(group["clients"].items(),
+                                  key=lambda kv: kv[1], reverse=True)[:20]
+
+    return {
+        "ok": True,
+        "present": True,
+        "path": str(path),
+        "bytes": size,
+        "truncated_read": size > WAF_READ_BYTES,
+        "capped_groups": len(groups) >= WAF_MAX_GROUPS,
+        "unreadable_lines": skipped,
+        "transactions": transactions,
+        "groups": out,
+    }
+
+
+def v_waf_hits_clear(req):
+    """
+    Throw away what was learned on this node, for one site.
+
+    Truncated in place rather than removed.  nginx workers are holding this
+    file open, and deleting it leaves them writing to an inode nobody can read
+    any more: the page goes quiet, the disk does not, and the reason is
+    invisible until somebody thinks to check for a deleted file still held
+    open.
+    """
+    payload = req.get("payload") or req
+    path = _waf_log(payload.get("site"))
+
+    if not path.is_file():
+        return {"ok": True, "cleared": 0, "path": str(path)}
+
+    was = path.stat().st_size
+    with path.open("r+b") as handle:
+        handle.truncate(0)
+
+    log.warning("cleared the WAF hits for %s, %d bytes", payload.get("site"), was)
+    return {"ok": True, "cleared": was, "path": str(path)}
+
+
+def v_waf_log_status(req):
+    """
+    How big every site's audit log is, and whether any is past its cap.
+
+    A site under a scan in watching mode writes steadily, and filling the disk
+    on a load balancer is a worse outage than anything the firewall prevents.
+    Nothing is deleted here: this reports, and clearing is somebody's decision.
+    """
+    logs = []
+    total = 0
+    if WAF_LOG_DIR.is_dir():
+        for path in sorted(WAF_LOG_DIR.glob("waf-*.log")):
+            try:
+                size = path.stat().st_size
+            except OSError:
+                continue
+            total += size
+            logs.append({
+                "site": path.name[4:-4],
+                "bytes": size,
+                "over_cap": size >= WAF_LOG_CAP,
+            })
+
+    free = None
+    try:
+        usage = shutil.disk_usage(str(WAF_LOG_DIR))
+        free = usage.free
+    except OSError:
+        pass
+
+    return {"ok": True, "cap": WAF_LOG_CAP, "total": total,
+            "free_bytes": free, "logs": logs}
+
+
 def v_crs_status(req):
     """What rule set this node has, if any."""
     if not CRS_LINK.exists():
@@ -3104,6 +3329,9 @@ VERBS = {
     "waf_module_status": v_waf_module_status,
     "crs_install": v_crs_install,
     "crs_status": v_crs_status,
+    "waf_hits": v_waf_hits,
+    "waf_hits_clear": v_waf_hits_clear,
+    "waf_log_status": v_waf_log_status,
 }
 
 
@@ -3127,6 +3355,8 @@ SERIALIZED_VERBS = {
     # Two of these would be unpacking into the same folder and racing to move
     # the same symlink.
     "crs_install",
+    # Truncating a file two readers are parsing.
+    "waf_hits_clear",
 }
 
 

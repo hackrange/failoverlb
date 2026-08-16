@@ -1406,6 +1406,130 @@ class TunnelPeer(Base):
         return exp is None or exp > utcnow()
 
 
+class WafProfile(Base):
+    """
+    A tuned rule set, named, and applied to any number of sites.
+
+    The exclusions are the expensive part of running a WAF: somebody exercised
+    an application, watched what the rules said about it, and decided which of
+    those were wrong.  Tying that to one site would mean doing it again for
+    every site that runs the same application, which is how a firewall ends up
+    switched off on nineteen of twenty sites.
+
+    So it is an object with a name, like an access list or an error page
+    template, and a site points at it.  Editing one changes every site using
+    it, which is the point and is also why the page has to show that list
+    before somebody saves.
+    """
+
+    __tablename__ = "waf_profiles"
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String(128), unique=True, nullable=False, index=True)
+    description = Column(String(500))
+
+    # Where it came from, kept because an exclusion nobody can explain is one
+    # nobody will dare remove, and a WAF full of those checks nothing.
+    learned_from_site = Column(String(255))
+    learned_from_addresses = Column(Text, default="[]")
+    learned_at = Column(DateTime)
+
+    created_at = Column(DateTime, default=utcnow)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
+    updated_by = Column(String(64))
+
+    exclusions = relationship(
+        "WafExclusion",
+        back_populates="profile",
+        cascade="all, delete-orphan",
+        order_by="WafExclusion.rule_id",
+    )
+
+    def address_list(self):
+        return json_get(self.learned_from_addresses, [])
+
+
+class WafExclusion(Base):
+    """
+    One rule this profile tells the firewall not to apply, and why.
+
+    A blank path means the rule is off for the whole site.  A path means it is
+    off only there, which is nearly always what a false positive deserves: a
+    rule that is wrong about the upload form is usually right everywhere else,
+    and turning it off site wide to fix one page is how a WAF quietly stops
+    checking anything.
+    """
+
+    __tablename__ = "waf_exclusions"
+
+    id = Column(Integer, primary_key=True)
+    profile_id = Column(Integer, ForeignKey("waf_profiles.id", ondelete="CASCADE"),
+                        nullable=False)
+    profile = relationship("WafProfile", back_populates="exclusions")
+
+    rule_id = Column(Integer, nullable=False)
+    path = Column(String(500))
+
+    # What it looked like when somebody decided.  Not decoration: this is the
+    # evidence for the decision, and without it a review a year later is
+    # somebody guessing.
+    message = Column(String(300))
+    learned_from_ip = Column(String(64))
+    sample_uri = Column(String(500))
+    hits = Column(Integer, default=0)
+
+    created_at = Column(DateTime, default=utcnow)
+    created_by = Column(String(64))
+
+    __table_args__ = (
+        UniqueConstraint("profile_id", "rule_id", "path", name="uq_waf_exclusion"),
+    )
+
+
+class WafSession(Base):
+    """
+    One round of watching, with the addresses that count as testers.
+
+    The addresses are the whole safeguard.  A WAF that whitelists whatever
+    fired while it was learning is a gift to anybody scanning the site at the
+    time: their probes become permanent exclusions and nothing in the interface
+    ever says so.  Naming who counts, before the traffic happens, is what turns
+    "it fired a lot" into "somebody vouched for this".
+
+    Bounded on purpose.  Evidence that never expires becomes a whitelist nobody
+    remembers agreeing to.
+    """
+
+    __tablename__ = "waf_sessions"
+
+    id = Column(Integer, primary_key=True)
+    host_id = Column(Integer, ForeignKey("virtual_hosts.id", ondelete="CASCADE"),
+                     nullable=False, index=True)
+    host = relationship("VirtualHost")
+
+    # IPs and CIDRs, as a json list.  A testing round rarely comes from one
+    # address: an office, a VPN, a build runner, somebody's laptop.
+    addresses = Column(Text, nullable=False, default="[]")
+
+    # What the site was enforcing before this started, so stopping can put it
+    # back rather than leaving a site in whatever the session needed.
+    previous_mode = Column(String(20))
+
+    started_at = Column(DateTime, default=utcnow)
+    started_by = Column(String(64))
+    ended_at = Column(DateTime)
+    ended_by = Column(String(64))
+
+    note = Column(String(500))
+
+    def address_list(self):
+        return json_get(self.addresses, [])
+
+    @property
+    def running(self):
+        return self.ended_at is None
+
+
 class CertificateAuthority(Base):
     """
     One authority you buy certificates from, and how to talk to it.
