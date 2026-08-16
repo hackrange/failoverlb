@@ -66,6 +66,7 @@ from app.models import (
     WafExclusion,
     WafProfile,
     WafSession,
+    WafSurfaceEntry,
     json_set,
     utcnow,
 )
@@ -227,15 +228,36 @@ def render_current(session, ignore_health: bool = False) -> tuple:
                  "message": e.message or ""}
                 for e in p.exclusions
             ],
+            # The positive model, if this profile has one.  A profile can carry
+            # exclusions, a surface, or both, because they are two halves of
+            # one policy for one application.
+            "surface": [
+                {"path": e.path, "methods": e.method_list()}
+                for e in p.surface
+            ],
         }
         for p in session.query(WafProfile).all()
     ]
+
+    # Sessions that are recording the surface right now.
+    #
+    # The renderer needs these because a recording session changes the config:
+    # full audit logging is switched on for the tester addresses and for nobody
+    # else, so what the log holds is the shape of the application rather than
+    # the shape of the attacks against it.  It goes off again when the session
+    # ends, which is why this is read per render rather than stored on the site.
+    waf_recording = {}
+    for row in session.query(WafSession).filter(WafSession.ended_at.is_(None)).all():
+        host = session.get(VirtualHost, row.host_id)
+        if host and row.address_list():
+            waf_recording[host.name] = row.address_list()
 
     renderer = Renderer(
         ignore_health=ignore_health,
         capabilities=fleet_capabilities(),
         node_addresses=sorted(set(node_addresses)),
         waf_profiles=waf_profiles,
+        waf_recording=waf_recording,
         settings={
             "node_name": settings.node_name,
             # What an admin typed on the settings page, falling back to the GUI
@@ -680,6 +702,14 @@ def _profile_json(p, used_by=None):
              "created_by": e.created_by}
             for e in p.exclusions
         ],
+        "surface": [
+            {"id": e.id, "path": e.path, "methods": e.method_list(),
+             "sample_uri": e.sample_uri, "learned_from_ip": e.learned_from_ip,
+             "hits": e.hits,
+             "created_at": e.created_at.isoformat() if e.created_at else None,
+             "created_by": e.created_by}
+            for e in p.surface
+        ],
         "used_by": used_by if used_by is not None else [],
     }
 
@@ -842,6 +872,189 @@ async def waf_hits_for_host(host_id: int, request: Request,
     return {"site": host.name, "transactions": found["transactions"],
             "partial": found["partial"], "nodes": found["nodes"],
             "unreadable_addresses": bad, **split}
+
+
+@router.get("/waf/surface/{host_id}")
+async def waf_surface_for_host(host_id: int, request: Request,
+                               addresses: str = "", since: float = None,
+                               until: float = None,
+                               db: DBSession = Depends(get_db)):
+    """
+    The application's own shape, split by who produced it.
+
+    The positive model's version of the hits endpoint.  Same window arguments,
+    same split, and the split matters more here: an exclusion learned from a
+    stranger switches one rule off, while a surface entry learned from a
+    stranger permanently allows a path they found, which is the exact thing a
+    positive model exists to stop.
+    """
+    from app.core import waf_hits as hits_mod
+
+    get_user(request, db)
+    host = db.get(VirtualHost, host_id)
+    if not host:
+        raise HTTPException(status_code=404, detail="no such site")
+
+    found = await hits_mod.fleet_surface(host.name, since=since, until=until)
+    networks, bad = hits_mod.parse_addresses(addresses)
+    split = hits_mod.split_surface_by_tester(found["entries"], networks)
+
+    return {"site": host.name, "transactions": found["transactions"],
+            "partial": found["partial"], "nodes": found["nodes"],
+            "unreadable_addresses": bad, **split}
+
+
+@router.post("/waf/profiles/{profile_id}/surface")
+async def waf_surface_save(profile_id: int, request: Request,
+                           g: ObjectGuard = Depends(changing)):
+    """
+    Put a reviewed surface into a profile.
+
+    Merged rather than replaced, because a walk is rarely done in one sitting.
+    Somebody exercises the admin pages on Tuesday and the reporting pages on
+    Thursday, and a save that replaced would throw Tuesday away without saying
+    so.  Removing a path is its own action on the profiles page, where the
+    consequence is visible.
+    """
+    g.require("edit_sites")
+    profile = g.get(WafProfile, profile_id)
+    payload = await request.json() if await request.body() else {}
+
+    entries = payload.get("entries") or []
+    if not entries:
+        raise HTTPException(status_code=400,
+                            detail="tick at least one path to put in it")
+
+    have = {e.path: e for e in profile.surface}
+    added = updated = 0
+
+    for item in entries:
+        path = (item.get("path") or "").strip()
+        problem = _waf_path_problem(path)
+        if problem or not path:
+            raise HTTPException(status_code=400,
+                                detail=problem or "a surface entry needs a path")
+
+        methods = sorted({str(m).strip().upper() for m in (item.get("methods") or [])
+                          if re.fullmatch(r"[A-Za-z]{3,10}", str(m).strip())})
+        if not methods:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{path} has no methods on it, and a path that allows "
+                       f"every method is a decision to make on purpose rather "
+                       f"than by leaving a box empty")
+
+        existing = have.get(path)
+        if existing:
+            # Methods are added to, never narrowed by a later save.  A second
+            # walk that only did GET must not quietly remove the POST somebody
+            # proved on the first.
+            merged = sorted(set(existing.method_list()) | set(methods))
+            if merged != existing.method_list():
+                existing.methods = json_set(merged)
+                updated += 1
+            continue
+
+        g.session.add(WafSurfaceEntry(
+            profile_id=profile.id, path=path, methods=json_set(methods),
+            sample_uri=(item.get("sample_uri") or "")[:500] or None,
+            learned_from_ip=(item.get("learned_from_ip") or "")[:64] or None,
+            hits=int(item.get("hits") or 0),
+            created_by=g.user.username))
+        added += 1
+
+    g.session.commit()
+    audit.record("waf.surface.save", user=g.user, object_type="waf_profile",
+                 object_name=profile.name,
+                 detail=f"{added} paths added, {updated} widened")
+    return _profile_json(profile, _profile_users(g.session, profile.name))
+
+
+@router.patch("/waf/profiles/{profile_id}/surface/{entry_id}")
+async def waf_surface_edit(profile_id: int, entry_id: int, request: Request,
+                           g: ObjectGuard = Depends(changing)):
+    """
+    Change a surface path or the methods it answers.
+
+    The same job as editing an exclusion path and for the same reason: learning
+    produces one row per object it saw, and the useful rule is the pattern
+    behind them.  On a positive model it matters more, because a path that was
+    never generalised means every object created after the walk is refused.
+    """
+    g.require("edit_sites")
+    profile = g.get(WafProfile, profile_id)
+    payload = await request.json() if await request.body() else {}
+
+    entry = next((e for e in profile.surface if e.id == entry_id), None)
+    if entry is None:
+        raise HTTPException(status_code=404,
+                            detail="that path is not in this profile")
+
+    if "path" in payload:
+        path = (payload.get("path") or "").strip()
+        problem = _waf_path_problem(path)
+        if problem or not path:
+            raise HTTPException(status_code=400,
+                                detail=problem or "a surface entry needs a path")
+        if any(e.id != entry.id and e.path == path for e in profile.surface):
+            raise HTTPException(status_code=400,
+                                detail=f"{path} is already in this profile")
+        entry.path = path
+
+    if "methods" in payload:
+        methods = sorted({str(m).strip().upper() for m in (payload.get("methods") or [])
+                          if re.fullmatch(r"[A-Za-z]{3,10}", str(m).strip())})
+        if not methods:
+            raise HTTPException(
+                status_code=400,
+                detail="a path needs at least one method, because a path that "
+                       "allows every method is most of the protection gone")
+        entry.methods = json_set(methods)
+
+    g.session.commit()
+    audit.record("waf.surface.edit", user=g.user, object_type="waf_profile",
+                 object_name=profile.name,
+                 detail=f"{entry.path}: {', '.join(entry.method_list())}")
+    return _profile_json(profile, _profile_users(g.session, profile.name))
+
+
+@router.delete("/waf/profiles/{profile_id}/surface/{entry_id}")
+async def waf_surface_delete(profile_id: int, entry_id: int,
+                             g: ObjectGuard = Depends(changing)):
+    """
+    Take a path out of the allowed surface.
+
+    Refused when the profile is enforcing on a live site, which is the opposite
+    of how removing an exclusion works, and the difference is which way the
+    risk runs.  Removing an exclusion puts a rule back into force, so the
+    firewall checks more.  Removing a path from a surface **refuses traffic
+    that is currently being served**, and it does it the moment the config is
+    applied.
+    """
+    g.require("edit_sites")
+    profile = g.get(WafProfile, profile_id)
+
+    entry = next((e for e in profile.surface if e.id == entry_id), None)
+    if entry is None:
+        raise HTTPException(status_code=404,
+                            detail="that path is not in this profile")
+
+    enforcing = [h.name for h in g.session.query(VirtualHost).all()
+                 if (h.setting_map().get("waf_paranoia") or "") == f"custom:{profile.name}"
+                 and (h.setting_map().get("waf_positive") or "") == "enforce"]
+    if enforcing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{', '.join(enforcing)} enforce this surface right now, so "
+                   f"removing {entry.path} would start refusing it.  Put those "
+                   f"sites into report mode first if you mean to.")
+
+    path = entry.path
+    g.session.delete(entry)
+    g.session.commit()
+    audit.record("waf.surface.delete", user=g.user, object_type="waf_profile",
+                 object_name=profile.name, detail=f"{path} no longer allowed")
+    return _profile_json(profile, _profile_users(g.session, profile.name))
 
 
 @router.post("/waf/hits/{host_id}/clear")
@@ -1077,7 +1290,11 @@ async def waf_profile_create(request: Request, g: ObjectGuard = Depends(changing
                             detail=f"there is already a profile called {name}")
 
     entries = payload.get("exclusions") or []
-    if not entries:
+    # A profile can start life holding a surface and no exclusions, which is a
+    # perfectly good policy: this application is these paths, and the rules
+    # underneath have never been wrong about it.  The caller says so, because
+    # an empty profile created by accident is still worth refusing.
+    if not entries and not payload.get("allow_empty"):
         raise HTTPException(status_code=400,
                             detail="tick at least one entry to put in it")
 
@@ -1747,6 +1964,33 @@ def _cross_check(settings: dict) -> list:
     Catching it here with an explanation beats letting somebody meet that.
     """
     problems = []
+
+    # A positive model with nothing in it refuses the whole site.
+    #
+    # The renderer already refuses to write that and says so in the config, but
+    # a setting that saves and then quietly does nothing is worse than one that
+    # will not save: somebody ticks enforce, sees no error, and believes the
+    # site is locked down when it is not.  So it is caught here, where there is
+    # a person to tell.
+    positive = (settings.get("waf_positive") or "off").strip()
+    if positive in ("report", "enforce"):
+        chosen = (settings.get("waf_paranoia") or "").strip()
+        if not chosen.startswith("custom:"):
+            problems.append(
+                "the allowed surface comes from a WAF profile, so strictness "
+                "has to be set to one of your profiles rather than a plain "
+                "level.  Record a round on this tab and save what it finds")
+        else:
+            wanted = chosen.split(":", 1)[1]
+            with session_scope() as session:
+                profile = session.query(WafProfile).filter(
+                    WafProfile.name == wanted).first()
+                count = len(profile.surface) if profile else 0
+            if not count:
+                problems.append(
+                    f"the profile {wanted} has no allowed surface in it, and "
+                    f"turning this on with an empty surface would refuse every "
+                    f"request to the site.  Record a round and save what it finds")
 
     # Credentials plus any origin is a pair no browser will use.  The help text
     # on both settings says so, and until now nothing stopped somebody saving

@@ -139,6 +139,106 @@ async def fleet_hits(site: str, since=None, until=None) -> dict:
             "nodes": nodes, "partial": partial}
 
 
+async def fleet_surface(site: str, since=None, until=None) -> dict:
+    """
+    What the application is, as every node saw it, merged.
+
+    The positive model's version of `fleet_hits`.  Both nodes rather than the
+    active one, for the same reason: whichever node was active while the
+    testers worked is the one holding the evidence, and after a failover that
+    is not the node somebody is looking at.
+
+    Merging on the templated path is what makes this useful.  Two nodes each
+    saw a different half of the walk, and without merging somebody would save a
+    surface that only covers the pages that happened to land on one box.
+    """
+    payload = {"site": site}
+    if since is not None:
+        payload["since"] = float(since)
+    if until is not None:
+        payload["until"] = float(until)
+
+    results = await ask_every_node("waf_surface", payload)
+
+    merged = {}
+    nodes = {}
+    total = 0
+    partial = False
+
+    for name, answer in results.items():
+        nodes[name] = {
+            "present": bool(answer.get("present")),
+            "transactions": answer.get("transactions") or 0,
+            "bytes": answer.get("bytes") or 0,
+            "error": answer.get("error"),
+        }
+        if answer.get("truncated_read") or answer.get("capped_groups"):
+            partial = True
+
+        for entry in answer.get("entries") or []:
+            key = entry.get("path") or ""
+            into = merged.get(key)
+            if into is None:
+                into = merged[key] = {
+                    "path": key,
+                    "methods": {},
+                    "count": 0,
+                    "clients": {},
+                    "sample_uri": entry.get("sample_uri") or "",
+                    "first_seen": entry.get("first_seen"),
+                    "last_seen": entry.get("last_seen"),
+                    "nodes": [],
+                }
+            into["count"] += entry.get("count") or 0
+            into["nodes"].append(name)
+            for method, hits in (entry.get("methods") or []):
+                into["methods"][method] = into["methods"].get(method, 0) + hits
+            for client, hits in (entry.get("clients") or []):
+                into["clients"][client] = into["clients"].get(client, 0) + hits
+            for field, pick in (("first_seen", min), ("last_seen", max)):
+                mine, theirs = into.get(field), entry.get(field)
+                if theirs is not None:
+                    into[field] = theirs if mine is None else pick(mine, theirs)
+
+        total += answer.get("transactions") or 0
+
+    entries = sorted(merged.values(), key=lambda e: e["path"])
+    for entry in entries:
+        entry["methods"] = sorted(entry["methods"].items(),
+                                  key=lambda kv: kv[1], reverse=True)
+        entry["clients"] = sorted(entry["clients"].items(),
+                                  key=lambda kv: kv[1], reverse=True)
+        entry["nodes"] = sorted(set(entry["nodes"]))
+
+    return {"site": site, "entries": entries, "transactions": total,
+            "nodes": nodes, "partial": partial}
+
+
+def split_surface_by_tester(entries, networks):
+    """
+    What a tester reached, and what everybody else did, never in one list.
+
+    Same safeguard as the exclusion side and it matters more here.  An
+    exclusion learned from a stranger switches one rule off.  A surface entry
+    learned from a stranger **permanently allows a path they found**, which on
+    a positive model is the one thing the model exists to prevent.  Somebody
+    scanning the site during a round would otherwise get every path they probed
+    written into the allowed list as though a tester had walked it.
+    """
+    mine, mixed, theirs = [], [], []
+    for entry in entries:
+        clients = entry.get("clients") or []
+        from_tester = [c for c, _ in clients if address_matches(c, networks)]
+        from_others = [c for c, _ in clients if not address_matches(c, networks)]
+        if from_tester and not from_others:
+            mine.append(entry)
+        elif from_tester and from_others:
+            mixed.append(entry)
+        else:
+            theirs.append(entry)
+    return {"candidates": mine, "mixed": mixed, "others": theirs}
+
+
 def split_by_tester(groups, networks):
     """
     Candidates and everything else, and never the two in one list.

@@ -362,7 +362,7 @@ class Renderer:
     """
 
     def __init__(self, capabilities=None, node_addresses=None, settings=None,
-                 ignore_health=False, waf_profiles=None):
+                 ignore_health=False, waf_profiles=None, waf_recording=None):
         self.caps = capabilities
         # Origin maps built while sites are rendered, written out at the end.
         # nginx sends one Access-Control-Allow-Origin and the page offers a
@@ -391,6 +391,13 @@ class Renderer:
         # touches a row after the session that loaded it has closed, which this
         # project has already been bitten by once.
         self.waf_profiles = waf_profiles or []
+        # Site name to tester addresses, for sites recording their surface now.
+        # A recording session switches full audit logging on for those
+        # addresses and nobody else, so the log holds the shape of the
+        # application instead of the shape of the attacks on it.  Read per
+        # render rather than stored on the site, because it has to go off again
+        # by itself when the session ends.
+        self.waf_recording = waf_recording or {}
         # Which ports already have a QUIC listener carrying reuseport.  nginx
         # refuses to start if two server blocks both ask for it on the same
         # address and port, so the first site to want HTTP/3 on a port claims
@@ -1850,14 +1857,14 @@ map $cookie_{cookie} $sticky_set_{var} {{
 
         safe = _safe_name(name)
         rules_path = f"{MANAGED_ROOT}/waf/{safe}.conf"
-        self.files[f"waf/{safe}.conf"] = self._waf_rules_file(cfg, mode, safe)
+        self.files[f"waf/{safe}.conf"] = self._waf_rules_file(cfg, mode, safe, name)
 
         return [
             f"{pad}modsecurity on;",
             f"{pad}modsecurity_rules_file {rules_path};",
         ]
 
-    def _waf_rules_file(self, cfg, mode: str, safe: str) -> str:
+    def _waf_rules_file(self, cfg, mode: str, safe: str, name: str = "") -> str:
         """
         The rule file for one site.
 
@@ -1948,7 +1955,145 @@ map $cookie_{cookie} $sticky_set_{var} {{
             "",
             f"Include {CRS_ROOT}/rules/*.conf",
             "",
-        ] + self._waf_exclusion_lines(cfg))
+        ] + self._waf_recorder_lines(name)
+          + self._waf_exclusion_lines(cfg)
+          + self._waf_surface_lines(cfg))
+
+    def _waf_recorder_lines(self, name: str) -> list:
+        """
+        Full audit logging, for the tester addresses, while a round is running.
+
+        The log normally holds only transactions where a rule fired, which is
+        what tuning a negative model needs and is no use at all for building a
+        positive one: it describes the attacks rather than the application.  So
+        a recording round switches the audit engine on, for the named addresses
+        and nobody else.
+
+        **For nobody else** is the whole safeguard and the reason this is not
+        simply left on.  Logging every request to a busy site fills a disk, and
+        it writes the paths every visitor asked for into a file, which is a
+        privacy problem nobody asked for.  Bodies stay out either way: the
+        parts written here are set above and do not include them.
+
+        It goes off on its own when the round ends, because this is rendered
+        from the running session rather than from a setting somebody has to
+        remember to turn back.
+        """
+        addresses = self.waf_recording.get(name) or []
+        if not addresses:
+            return []
+
+        # ipMatch takes a comma separated list and understands CIDR.  Anything
+        # with a quote or a space in it would end the directive early, so the
+        # list is filtered to what an address can actually look like rather
+        # than trusted because it came from our own database.
+        safe = [a for a in (str(x).strip() for x in addresses)
+                if re.fullmatch(r"[0-9a-fA-F:.]{2,45}(?:/\d{1,3})?", a)]
+        if not safe:
+            return []
+
+        return [
+            "",
+            "# Recording the surface for a learning round.",
+            "#",
+            "# Full audit logging, for the tester addresses only, so the log",
+            "# holds what the application is rather than what was attacked.",
+            "# This disappears when the round ends.",
+            f'SecRule REMOTE_ADDR "@ipMatch {",".join(safe)}" '
+            f'"id:19000,phase:1,pass,nolog,ctl:auditEngine=On"',
+            "",
+        ]
+
+    def _waf_surface_lines(self, cfg) -> list:
+        """
+        The positive model: this is the application, refuse everything else.
+
+        Written last, after the rule set and after the exclusions, because it
+        is a different question from everything above it.  The rules ask
+        whether a request looks like an attack.  This asks whether the request
+        is part of the application at all, and a request that is not gets no
+        further whatever the rules think of it.
+
+        Two modes and the difference matters more than anything else on this
+        page.  **report** logs what it would have refused and refuses nothing,
+        which is the only safe way to find out how complete the surface is.
+        **enforce** refuses.  Going straight to enforce means every page the
+        testers did not open returns 403 to real users, and the first anybody
+        hears of it is a phone call.
+
+        Every rule matches on REQUEST_FILENAME, which was checked against a
+        real ModSecurity rather than assumed: it is the path with the query
+        string already off, so /search?q=a and /search?q=b are one entry rather
+        than two, and no rule here has to think about query strings at all.
+        """
+        wanted = (cfg.get("waf_positive") or "off").strip()
+        if wanted not in ("report", "enforce"):
+            return []
+
+        profile = self._waf_profile(cfg)
+        entries = (profile or {}).get("surface") or []
+        if not entries:
+            # A default deny with nothing allowed refuses the entire site, so
+            # this refuses to write itself instead and says why in the config
+            # where somebody reading it will find it.
+            return [
+                "",
+                "# A positive model is switched on for this site and the profile",
+                "# it points at has no surface in it.  Writing it would refuse",
+                "# every request, so it is left out.  Record a round on the",
+                "# site's WAF tab and save what it found.",
+                "",
+            ]
+
+        deny = ('log,auditlog,deny,status:403' if wanted == "enforce"
+                else 'log,auditlog,pass')
+        verb = ("outside the allowed surface" if wanted == "enforce"
+                else "outside the allowed surface, and would have been refused")
+
+        lines = [
+            "",
+            f"# The allowed surface, {len(entries)} "
+            f"{'path' if len(entries) == 1 else 'paths'}, in {wanted} mode.",
+            "# Nothing reaches the application unless a rule below allows it.",
+            'SecAction "id:20000,phase:2,nolog,pass,setvar:tx.fw_allowed=0"',
+            "",
+        ]
+
+        rule_id = 20001
+        for entry in entries:
+            path = str(entry.get("path") or "").strip()
+            if not path:
+                continue
+            methods = [str(m).strip().upper() for m in (entry.get("methods") or [])
+                       if re.fullmatch(r"[A-Z]{3,10}", str(m).strip().upper())]
+
+            # A trailing slash is not a different page.  nginx hands back both
+            # forms depending on how somebody linked it, and a model that
+            # allowed /about and refused /about/ would be reported as broken
+            # within the hour.
+            path_rx = waf_path_to_regex(path.rstrip("/") or "/") + "/?$"
+
+            if methods:
+                method_rx = "^(?:" + "|".join(sorted(set(methods))) + ")$"
+                lines.append(f'SecRule REQUEST_FILENAME "@rx {path_rx}" '
+                             f'"id:{rule_id},phase:2,chain,nolog,pass"')
+                lines.append(f'    SecRule REQUEST_METHOD "@rx {method_rx}" '
+                             f'"t:none,setvar:tx.fw_allowed=1"')
+            else:
+                # No methods means any method, which somebody chose on purpose.
+                lines.append(f'SecRule REQUEST_FILENAME "@rx {path_rx}" '
+                             f'"id:{rule_id},phase:2,nolog,pass,'
+                             f'setvar:tx.fw_allowed=1"')
+            rule_id += 1
+
+        lines += [
+            "",
+            f"SecRule TX:fw_allowed \"@eq 0\" "
+            f"\"id:29999,phase:2,{deny},msg:'{verb}',"
+            f"logdata:'%{{REQUEST_METHOD}} %{{REQUEST_FILENAME}}'\"",
+            "",
+        ]
+        return lines
 
     def _waf_exclusion_lines(self, cfg) -> list:
         """

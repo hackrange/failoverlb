@@ -3066,7 +3066,7 @@ register(
             ("off", "Off"),
             ("watching", "Watching, refuse nothing"),
             ("block_known", "Block known malicious"),
-            ("block", "Block what the rules say"),
+            ("block", "Block what the attack rules catch"),
         ],
         help=HelpText(
             summary="Check requests against the OWASP rules, and choose how much to refuse.",
@@ -3107,6 +3107,65 @@ register(
                 "on rather than finding out under load."
             ),
             docs_url="https://coreruleset.org/docs/",
+        ),
+    ),
+
+    Feature(
+        key="waf_positive",
+        own_screen=True,
+        label="Allowed surface",
+        category="security",
+        directive="",
+        contexts=("server",),
+        type="select",
+        default="off",
+        module="modsecurity",
+        advanced=True,
+        options=[
+            ("off", "Off"),
+            ("report", "Report what would be refused"),
+            ("enforce", "Refuse anything outside the surface"),
+        ],
+        help=HelpText(
+            summary="Allow only the paths this application actually has, and "
+                    "refuse everything else.",
+            detail=(
+                "Everything else in this tab is a negative model: the rules describe "
+                "attacks, and anything they do not recognise is allowed.  This is the "
+                "other way round.  It holds a list of the paths and methods the "
+                "application really has, and refuses anything not on it.\n\n"
+                "You build the list by recording a round.  Testers walk every feature "
+                "of the site from the addresses you named, and what they reached "
+                "becomes a list you review and save into a profile.  Paths that "
+                "contain an id are collapsed to a wildcard, so /user/12345/profile "
+                "covers the user created tomorrow as well.\n\n"
+                "Report first, always.  A positive model is only as complete as the "
+                "walk that built it, and the page nobody thought to open is the page "
+                "that returns 403 to a real customer.  Report mode logs what it would "
+                "have refused and refuses nothing, so you can see the gaps in real "
+                "traffic before they cost anything.\n\n"
+                "It does not learn parameters, only paths and methods.  Learning "
+                "parameter names would mean logging request bodies, and a body is "
+                "where passwords and card numbers are."
+            ),
+            use_cases=[
+                "An admin interface with a small, well known set of pages",
+                "An API where the routes are fixed and anything else is probing",
+                "Any application where you can genuinely walk every feature",
+            ],
+            example="Record a round, review the paths, run in report for a week, "
+                    "then enforce",
+            example_config=(
+                'SecAction "id:20000,phase:2,nolog,pass,setvar:tx.fw_allowed=0"\n'
+                'SecRule REQUEST_FILENAME "@rx ^/about/?$" "id:20001,phase:2,chain,nolog,pass"\n'
+                '    SecRule REQUEST_METHOD "@rx ^(?:GET|HEAD)$" "t:none,setvar:tx.fw_allowed=1"\n'
+                'SecRule TX:fw_allowed "@eq 0" "id:29999,phase:2,log,deny,status:403"'
+            ),
+            warning=(
+                "Enforcing a surface that is missing a page refuses that page to "
+                "everybody.  Run it in report mode until the log is quiet, and read "
+                "the log rather than assuming the walk was complete."
+            ),
         ),
     ),
 

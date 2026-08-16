@@ -3187,6 +3187,172 @@ def v_waf_hits(req):
     }
 
 
+def _surface_template(path):
+    """
+    Collapse the parts of a path that are an identifier into a wildcard.
+
+    Learning sees what somebody exercised.  On an application with a path per
+    object that is /user/12345/profile and nothing at all about the user
+    created tomorrow, so a positive model built from raw paths refuses every
+    object made after the testers went home.  The whole feature is unusable
+    without this.
+
+    Deliberately conservative, because the cost of the two mistakes is not the
+    same.  Collapsing too little leaves extra rows somebody can merge by hand
+    on the profiles page.  Collapsing too much silently widens what is allowed,
+    and nobody reviewing a list of paths would spot it.  So only three shapes
+    are treated as identifiers and everything else stays literal:
+
+      * all digits, which is the common case
+      * a uuid
+      * a long hex string, which is what a hash or a token looks like
+
+    A word is never collapsed, however object-like it looks.  /user/profile
+    and /user/settings are two pages, not one page with a variable in it.
+    """
+    out = []
+    for part in str(path).split("/"):
+        if not part:
+            out.append(part)
+            continue
+        if part.isdigit():
+            out.append("*")
+        elif re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}"
+                          r"-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", part):
+            out.append("*")
+        elif re.fullmatch(r"[0-9a-fA-F]{12,}", part):
+            out.append("*")
+        else:
+            out.append(part)
+    return "/".join(out)
+
+
+def v_waf_surface(req):
+    """
+    What the application actually is, as seen on this node.
+
+    The other question the audit log can answer.  `waf_hits` asks which rules
+    fired, which is what a negative model needs.  This asks which paths and
+    methods were used at all, which is what a positive model needs, and the two
+    read the same file.
+
+    It only sees anything because the renderer switches full audit logging on
+    for the tester addresses while a surface session runs.  Outside that window
+    the log holds only transactions where a rule fired, so this would answer
+    with the shape of the attacks rather than the shape of the application.
+
+    **No request bodies, ever.**  The audit log is written without part I on
+    purpose, because a body is where passwords and card numbers are.  So this
+    learns paths and methods and does not learn parameter names, and the
+    honest version of that limit is written on the page rather than worked
+    around here.
+    """
+    payload = req.get("payload") or req
+    path = _waf_log(payload.get("site"))
+    since = payload.get("since")
+    since = float(since) if isinstance(since, (int, float)) else None
+    until = payload.get("until")
+    until = float(until) if isinstance(until, (int, float)) else None
+
+    if not path.is_file():
+        return {"ok": True, "present": False, "entries": [], "transactions": 0,
+                "bytes": 0, "path": str(path)}
+
+    size = path.stat().st_size
+    with path.open("rb") as handle:
+        if size > WAF_READ_BYTES:
+            handle.seek(size - WAF_READ_BYTES)
+            handle.readline()
+        raw = handle.read()
+
+    entries = {}
+    transactions = 0
+    skipped = 0
+
+    for line in raw.split(b"\n"):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line.decode("utf-8", "replace"))
+        except ValueError:
+            skipped += 1
+            continue
+
+        tx = record.get("transaction") or record
+        when = _waf_when(tx.get("time_stamp"))
+        if since is not None and (when is None or when < since):
+            continue
+        if until is not None and (when is None or when > until):
+            continue
+
+        request = tx.get("request") or {}
+        uri = str(request.get("uri") or "")
+        method = str(request.get("method") or "").upper()
+        client = str(tx.get("client_ip") or "")
+        if not uri or not method:
+            continue
+
+        transactions += 1
+
+        # The path only.  A query string is not part of the surface: /search?q=a
+        # and /search?q=b are one page, and treating them as two would produce a
+        # list nobody can read and a rule set that still refuses the third
+        # search anybody does.
+        bare = uri.split("?", 1)[0].split("#", 1)[0]
+
+        # One trailing slash is not a different page.  nginx hands back both
+        # forms depending on how somebody linked it, and a positive model that
+        # allowed /about and refused /about/ would be reported as broken within
+        # the hour.
+        if len(bare) > 1 and bare.endswith("/"):
+            bare = bare.rstrip("/") or "/"
+
+        template = _surface_template(bare)
+
+        entry = entries.get(template)
+        if entry is None:
+            if len(entries) >= WAF_MAX_GROUPS:
+                continue
+            entry = entries[template] = {
+                "path": template,
+                "methods": {},
+                "count": 0,
+                "clients": {},
+                "sample_uri": bare,
+                "first_seen": when,
+                "last_seen": when,
+            }
+        entry["count"] += 1
+        entry["methods"][method] = entry["methods"].get(method, 0) + 1
+        if client:
+            entry["clients"][client] = entry["clients"].get(client, 0) + 1
+        if when is not None:
+            if entry["first_seen"] is None or when < entry["first_seen"]:
+                entry["first_seen"] = when
+            if entry["last_seen"] is None or when > entry["last_seen"]:
+                entry["last_seen"] = when
+
+    out = sorted(entries.values(), key=lambda e: e["path"])
+    for entry in out:
+        entry["methods"] = sorted(entry["methods"].items(),
+                                  key=lambda kv: kv[1], reverse=True)
+        entry["clients"] = sorted(entry["clients"].items(),
+                                  key=lambda kv: kv[1], reverse=True)[:20]
+
+    return {
+        "ok": True,
+        "present": True,
+        "path": str(path),
+        "bytes": size,
+        "truncated_read": size > WAF_READ_BYTES,
+        "capped_groups": len(entries) >= WAF_MAX_GROUPS,
+        "unreadable_lines": skipped,
+        "transactions": transactions,
+        "entries": out,
+    }
+
+
 def v_waf_hits_clear(req):
     """
     Throw away what was learned on this node, for one site.
@@ -3462,6 +3628,7 @@ VERBS = {
     "crs_status": v_crs_status,
     "crs_rule_ids": v_crs_rule_ids,
     "waf_hits": v_waf_hits,
+    "waf_surface": v_waf_surface,
     "waf_hits_clear": v_waf_hits_clear,
     "waf_log_status": v_waf_log_status,
     "waf_log_rotate": v_waf_log_rotate,
@@ -3490,6 +3657,7 @@ SERIALIZED_VERBS = {
     "crs_install",
     # Truncating a file two readers are parsing.
     "waf_hits_clear",
+    "waf_surface",
     # Copying and truncating the same files a read is walking.
     "waf_log_rotate",
 }

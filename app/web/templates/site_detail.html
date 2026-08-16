@@ -522,12 +522,12 @@
       </p>
 
       <div class="field" style="max-width:460px">
-        <label for="waf-mode">What this site does with the rules</label>
+        <label for="waf-mode">What this site does with the attack rules</label>
         <select id="waf-mode">
           <option value="off">Off</option>
           <option value="watching">Watching, refuse nothing</option>
           <option value="block_known">Block known malicious</option>
-          <option value="block">Block what the rules say</option>
+          <option value="block">Block what the attack rules catch</option>
         </select>
       </div>
 
@@ -545,9 +545,105 @@
         </div>
       </div>
 
+      {#
+        The positive model, and the opposite idea from everything above it.
+
+        Above, the rules describe attacks and anything they do not recognise is
+        allowed.  Here, a list describes the application and anything not on it
+        is refused.  Two settings rather than one because they genuinely
+        compose: knowing a path exists does not mean an attack against that
+        path is welcome, so the strongest answer is both.
+      #}
+      <div class="field" style="max-width:460px">
+        <label for="waf-positive">The allowed surface</label>
+        <select id="waf-positive">
+          <option value="off">Off, the attack rules decide on their own</option>
+          <option value="report">Report what would be refused</option>
+          <option value="enforce">Refuse anything outside the surface</option>
+        </select>
+        <div class="hint" id="waf-positive-hint"></div>
+      </div>
+
+      <div class="notice warn" id="waf-positive-warn" hidden>
+        <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.5 15 14H1L8 1.5zm0 4a.7.7 0 0 0-.7.8l.25 3.2a.45.45 0 0 0 .9 0l.25-3.2A.7.7 0 0 0 8 5.5zm0 5.4a.8.8 0 1 0 0 1.6.8.8 0 0 0 0-1.6z"/></svg>
+        <div id="waf-positive-warn-text"></div>
+      </div>
+
+      {#
+        The two layers together, which is the combination worth having and was
+        invisible because they are two dropdowns.
+
+        A surface says which paths exist.  It says nothing about what is sent
+        to them, so an injection aimed at a page the testers walked is a
+        request to an allowed path and sails straight through.  Block known
+        malicious underneath catches that, and it is the one attack rule
+        setting that needs no tuning, so the pair is safe to switch on together.
+      #}
+      <div class="notice ok" id="waf-layer" hidden>
+        <svg viewBox="0 0 16 16" fill="currentColor"><path d="M13.5 4.5 6 12 2.5 8.5l1-1L6 10l6.5-6.5 1 1z"/></svg>
+        <div>
+          <div id="waf-layer-text"></div>
+          <button type="button" class="btn sm mt" id="waf-layer-add" hidden>
+            Also block known malicious</button>
+        </div>
+      </div>
+
       <div class="flex mt">
         <button type="button" class="btn primary" id="waf-save">Save</button>
         <span class="small faint">Applies at the next Apply config, like every other change.</span>
+      </div>
+    </div>
+  </div>
+
+  {#
+    What the application actually is, as the testers walked it.
+
+    Its own card, next to the hits list rather than inside it, because the two
+    answer opposite questions from the same log.  The hits list is "which rules
+    fired", which tunes a negative model.  This is "which paths exist", which
+    builds a positive one.
+  #}
+  <div class="card" id="waf-surface-card" hidden>
+    <div class="card-head">
+      <h2>What the testers reached</h2>
+      <span class="small faint" id="waf-surface-summary"></span>
+    </div>
+    <div class="card-body">
+      <div class="small muted" id="waf-surface-round"></div>
+
+      <div class="notice warn" id="waf-surface-mixed" hidden>
+        <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.4 15 14H1z"/></svg>
+        <div id="waf-surface-mixed-text"></div>
+      </div>
+
+      <p class="small muted">
+        Paths that hold an id are collapsed to a <code>*</code> already, so
+        <code>/user/*/profile</code> covers the account created tomorrow.  Check
+        those before saving: a <code>*</code> in the wrong place allows more
+        than you meant, and a missing one refuses everything made after today.
+        Only what a tester reached can be ticked, for the same reason as the
+        exclusions above.
+      </p>
+
+      <div class="flex mb">
+        <input type="search" id="waf-surface-search"
+               placeholder="Find a path or a method" style="max-width:300px">
+        <button type="button" class="btn sm" id="waf-surface-all">Check all</button>
+        <button type="button" class="btn sm" id="waf-surface-none">Uncheck all</button>
+      </div>
+
+      <div id="waf-surface-list"></div>
+
+      <div class="flex mt">
+        <input type="text" id="waf-surface-profile" style="max-width:260px"
+               placeholder="Profile to save it into">
+        <button type="button" class="btn primary" id="waf-surface-save">
+          Save the ticked paths</button>
+      </div>
+      <div class="hint">
+        Goes into the same profile as the exclusions, because they are one
+        policy for one application.  Saving adds to what is there rather than
+        replacing it, so a walk done over two afternoons still adds up.
       </div>
     </div>
   </div>
@@ -2028,13 +2124,25 @@ document.addEventListener("DOMContentLoaded", function () {
         if (mode.value === "off") {
           delete settings.waf_mode;
           delete settings.waf_paranoia;
+          // The surface rides on the same module, so switching the firewall
+          // off takes it with it.  Leaving it set would store a site that
+          // claims to be enforcing a surface with nothing enforcing anything.
+          delete settings.waf_positive;
         } else {
           settings.waf_mode = mode.value;
           settings.waf_paranoia = paranoia.value;
+          if (positive.value === "off") {
+            delete settings.waf_positive;
+          } else {
+            settings.waf_positive = positive.value;
+          }
         }
         await NFM.api("/hosts/" + HOST_ID, { method: "PUT", body: { settings: settings } });
-        NFM.toast(mode.value === "off" ? "WAF off for this site"
-                                       : "WAF set to " + mode.value, "ok");
+        NFM.toast(mode.value === "off"
+          ? "WAF off for this site"
+          : "WAF set to " + mode.value +
+            (positive.value === "off" ? ""
+             : ", surface " + positive.value), "ok");
       } catch (err) {
         NFM.toast(err.message, "bad");
       }
@@ -2197,6 +2305,13 @@ document.addEventListener("DOMContentLoaded", function () {
       if (to !== null) { q += "&until=" + to; }
       showHits(await NFM.api("/waf/hits/" + HOST_ID + q));
 
+      // The surface comes from the same window, so it is loaded here rather
+      // than behind a second button.  They are two readings of one round and
+      // splitting them across two clicks only invites somebody to save a
+      // profile from one and forget the other.
+      try { await loadSurface(session); }
+      catch (err) { NFM.toast("The surface would not load: " + err.message, "bad"); }
+
       const note = document.getElementById("waf-hits-round");
       if (note) {
         note.textContent = session.ended_at
@@ -2284,6 +2399,242 @@ document.addEventListener("DOMContentLoaded", function () {
       button.disabled = false;
     });
 
+    // ---- the allowed surface ----
+
+    const positive = document.getElementById("waf-positive");
+    let surface = { candidates: [], mixed: [], others: [] };
+
+    const POSITIVE_WORDS = {
+      off: "The attack rules decide on their own.  Anything they do not " +
+           "recognise reaches the application, which is how nearly every WAF " +
+           "works and is the right default.",
+      report: "Logs every request that is not on the allowed surface and " +
+              "refuses nothing.  Run here first and for longer than feels " +
+              "necessary: the page nobody thought to walk is the page that " +
+              "would have returned 403 to a real customer.",
+      enforce: "Refuses anything not on the allowed surface, before the " +
+               "application sees it.  Only do this once report mode has been " +
+               "quiet on real traffic.",
+    };
+
+    function positiveRefresh() {
+      const hint = document.getElementById("waf-positive-hint");
+      if (hint) hint.textContent = POSITIVE_WORDS[positive.value] || "";
+
+      const warn = document.getElementById("waf-positive-warn");
+      const chosen = paranoia.value || "";
+      const p = chosen.indexOf("custom:") === 0
+        ? profiles.find(x => x.name === chosen.slice(7)) : null;
+      const count = p && p.surface ? p.surface.length : 0;
+
+      if (positive.value === "off") { warn.hidden = true; return; }
+      if (!p) {
+        warn.hidden = false;
+        document.getElementById("waf-positive-warn-text").textContent =
+          "The surface comes from a profile, so strictness has to be set to " +
+          "one of yours rather than a plain level.  Record a round below and " +
+          "save what it finds.";
+      } else if (!count) {
+        warn.hidden = false;
+        document.getElementById("waf-positive-warn-text").textContent =
+          "The profile " + p.name + " has no surface in it.  Turning this on " +
+          "with an empty surface would refuse every request, so it will not save.";
+      } else if (positive.value === "enforce") {
+        warn.hidden = false;
+        document.getElementById("waf-positive-warn-text").textContent =
+          "About to refuse anything outside " + count + " path" +
+          (count === 1 ? "" : "s") + ".  Every part of the application that is " +
+          "not on that list returns 403, including the ones nobody remembered " +
+          "to walk.  Report mode first is not a formality.";
+      } else {
+        warn.hidden = true;
+      }
+
+      layerAdvice();
+    }
+
+    // What the two layers add up to.
+    //
+    // They are separate settings because they genuinely compose, and that was
+    // invisible: a surface says which paths exist and nothing about what is
+    // sent to them, so an injection aimed at a page the testers walked is a
+    // request to an allowed path and goes straight through.  The attack rules
+    // underneath are what catch that.
+    function layerAdvice() {
+      const box = document.getElementById("waf-layer");
+      const add = document.getElementById("waf-layer-add");
+      if (positive.value === "off") { box.hidden = true; return; }
+
+      const words = {
+        off: "The surface would decide on its own.  It says which paths " +
+             "exist and nothing about what is sent to them, so an attack " +
+             "aimed at a page your testers walked reaches the application.",
+        watching: "The surface would decide on its own.  The attack rules are " +
+                  "only watching, so an attack aimed at a page your testers " +
+                  "walked is logged and still reaches the application.",
+        block_known: "Both layers on, which is the pair worth having.  The " +
+                     "surface refuses paths that are not part of the " +
+                     "application, and the known malicious rules catch " +
+                     "attacks aimed at the paths that are.",
+        block: "Both layers on, at full strength.  The surface refuses paths " +
+               "that are not part of the application, and the full rule set " +
+               "checks what is sent to the ones that are.",
+      };
+      document.getElementById("waf-layer-text").textContent = words[mode.value] || "";
+      box.className = (mode.value === "off" || mode.value === "watching")
+        ? "notice warn" : "notice ok";
+      add.hidden = !(mode.value === "off" || mode.value === "watching");
+      box.hidden = false;
+    }
+
+    document.getElementById("waf-layer-add").addEventListener("click", function () {
+      mode.value = "block_known";
+      refresh();
+      positiveRefresh();
+      NFM.toast("Known malicious rules on as well.  Save to apply.", "ok");
+    });
+
+    positive.addEventListener("change", positiveRefresh);
+    paranoia.addEventListener("change", positiveRefresh);
+    mode.addEventListener("change", layerAdvice);
+
+    function surfaceRows() {
+      return surface.candidates.map(e => ({ e: e, kind: "candidate" }))
+        .concat(surface.mixed.map(e => ({ e: e, kind: "mixed" })))
+        .concat(surface.others.map(e => ({ e: e, kind: "other" })));
+    }
+
+    function drawSurface() {
+      const box = document.getElementById("waf-surface-list");
+      const term = (document.getElementById("waf-surface-search").value || "")
+        .toLowerCase().trim();
+
+      const rows = surfaceRows().filter(function (r) {
+        if (!term) return true;
+        const methods = (r.e.methods || []).map(m => m[0]).join(" ");
+        return (r.e.path + " " + methods).toLowerCase().indexOf(term) >= 0;
+      });
+
+      box.innerHTML = rows.length ? rows.map(function (r) {
+        const methods = (r.e.methods || []).map(m => m[0]);
+        const clients = (r.e.clients || []).map(c => c[0] + " (" + c[1] + ")").join(", ");
+        const tick = r.kind === "candidate"
+          ? '<input type="checkbox" class="waf-surf" value="' +
+            NFM.escapeHtml(r.e.path) + '">'
+          : '<input type="checkbox" disabled title="only a path a tester ' +
+            'reached can be allowed">';
+        const badge = r.kind === "candidate"
+          ? '<span class="badge ok">tester</span>'
+          : (r.kind === "mixed"
+             ? '<span class="badge warn">tester and others</span>'
+             : '<span class="badge neutral">not a tester</span>');
+        return '<label class="wafhit">' + tick +
+          '<div><div><strong class="mono">' + NFM.escapeHtml(r.e.path) +
+          "</strong> " + badge + "</div>" +
+          '<div class="small muted">' + NFM.escapeHtml(methods.join(", ")) +
+          "  &middot;  " + (r.e.count || 0) + " request" +
+          ((r.e.count || 0) === 1 ? "" : "s") + "</div>" +
+          '<div class="small faint">from ' + NFM.escapeHtml(clients || "nobody") +
+          (r.e.sample_uri && r.e.sample_uri !== r.e.path
+            ? "  &middot;  seen as " + NFM.escapeHtml(r.e.sample_uri) : "") +
+          "</div></div></label>";
+      }).join("") : '<div class="small faint">Nothing matches that.</div>';
+
+      document.getElementById("waf-surface-summary").textContent =
+        surface.candidates.length + " path" +
+        (surface.candidates.length === 1 ? "" : "s") + " you can allow";
+    }
+
+    function showSurface(payload) {
+      surface = {
+        candidates: payload.candidates || [],
+        mixed: payload.mixed || [],
+        others: payload.others || [],
+      };
+      document.getElementById("waf-surface-card").hidden = false;
+
+      const warn = document.getElementById("waf-surface-mixed");
+      warn.hidden = !surface.mixed.length;
+      if (surface.mixed.length) {
+        document.getElementById("waf-surface-mixed-text").textContent =
+          surface.mixed.length + " of these were reached by a tester and by " +
+          "somebody else.  Those cannot be ticked.  On a positive model this " +
+          "matters more than it does for an exclusion: allowing a path a " +
+          "stranger found is exactly what the model exists to stop.";
+      }
+      drawSurface();
+    }
+
+    document.getElementById("waf-surface-search")
+      .addEventListener("input", drawSurface);
+    document.getElementById("waf-surface-all").addEventListener("click", function () {
+      document.querySelectorAll(".waf-surf").forEach(b => { b.checked = true; });
+    });
+    document.getElementById("waf-surface-none").addEventListener("click", function () {
+      document.querySelectorAll(".waf-surf").forEach(b => { b.checked = false; });
+    });
+
+    document.getElementById("waf-surface-save").addEventListener("click", async function () {
+      const name = document.getElementById("waf-surface-profile").value.trim();
+      const picked = Array.from(document.querySelectorAll(".waf-surf:checked"))
+        .map(b => b.value);
+      if (!name) { NFM.toast("Which profile?", "bad"); return; }
+      if (!picked.length) { NFM.toast("Tick at least one path", "bad"); return; }
+
+      const wanted = surface.candidates.filter(e => picked.indexOf(e.path) >= 0)
+        .map(e => ({
+          path: e.path,
+          methods: (e.methods || []).map(m => m[0]),
+          sample_uri: e.sample_uri || "",
+          learned_from_ip: (e.clients || []).length ? e.clients[0][0] : "",
+          hits: e.count || 0,
+        }));
+
+      try {
+        let profile = profiles.find(x => x.name === name);
+        if (!profile) {
+          // A surface can be the first thing a profile ever holds, so it has
+          // to be able to create one.  The exclusions endpoint refuses an
+          // empty list, which is right for it and wrong here.
+          profile = await NFM.api("/waf/profiles", {
+            method: "POST",
+            body: {
+              name: name,
+              learned_from_site: SITE_NAME,
+              learned_from_addresses: (viewing || running || {}).addresses || [],
+              exclusions: [],
+              allow_empty: true,
+            },
+          });
+        }
+        await NFM.api("/waf/profiles/" + profile.id + "/surface", {
+          method: "POST", body: { entries: wanted },
+        });
+        NFM.toast("Saved " + wanted.length + " paths into " + name, "ok");
+        profiles = (await NFM.api("/waf/profiles")).profiles || [];
+        fillParanoia(paranoia.value);
+        positiveRefresh();
+      } catch (err) { NFM.toast(err.message, "bad"); }
+    });
+
+    async function loadSurface(session) {
+      const from = seconds(session.started_at);
+      const to = session.ended_at ? seconds(session.ended_at) : null;
+      let q = "?addresses=" +
+              encodeURIComponent((session.addresses || []).join(","));
+      if (from !== null) { q += "&since=" + from; }
+      if (to !== null) { q += "&until=" + to; }
+      showSurface(await NFM.api("/waf/surface/" + HOST_ID + q));
+      const note = document.getElementById("waf-surface-round");
+      if (note) {
+        note.textContent = "From the round " +
+          (session.ended_at
+            ? "that ran " + tidy(session.started_at) + " to " + tidy(session.ended_at)
+            : "running since " + tidy(session.started_at)) +
+          ", watching " + (session.addresses || []).join(", ") + ".";
+      }
+    }
+
     document.getElementById("waf-refresh").addEventListener("click", async function () {
       if (!running) { NFM.toast("Nothing is being watched right now", "bad"); return; }
       try { await loadHits(running); }
@@ -2350,8 +2701,10 @@ document.addEventListener("DOMContentLoaded", function () {
 
       const s = host.settings || {};
       mode.value = s.waf_mode || "off";
+      positive.value = s.waf_positive || "off";
       fillParanoia(s.waf_paranoia || "1");
       refresh();
+      positiveRefresh();
 
       // A running session brings the hits list with it, so somebody who
       // navigated away mid round comes back to where they were.

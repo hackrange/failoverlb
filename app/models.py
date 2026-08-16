@@ -1498,6 +1498,24 @@ class WafProfile(Base):
         order_by="WafExclusion.rule_id",
     )
 
+    # The other half of a profile, and the opposite idea.
+    #
+    # Exclusions are a negative model with holes cut in it: the rules describe
+    # attacks, and an exclusion says one of them is wrong about this
+    # application.  Everything the rules do not recognise is allowed.
+    #
+    # The surface is a positive model.  It lists what the application actually
+    # is, and everything not on the list is refused.  The two live on one
+    # profile because they are one policy for one application, and because a
+    # positive model still wants the rules underneath it: knowing a path exists
+    # does not mean an attack against that path is welcome.
+    surface = relationship(
+        "WafSurfaceEntry",
+        back_populates="profile",
+        cascade="all, delete-orphan",
+        order_by="WafSurfaceEntry.path",
+    )
+
     def address_list(self):
         return json_get(self.learned_from_addresses, [])
 
@@ -1537,6 +1555,61 @@ class WafExclusion(Base):
     __table_args__ = (
         UniqueConstraint("profile_id", "rule_id", "path", name="uq_waf_exclusion"),
     )
+
+
+class WafSurfaceEntry(Base):
+    """
+    One path this application is allowed to have, and the methods it answers.
+
+    This is the positive model, and it is the opposite of an exclusion.  An
+    exclusion says "the rules are wrong about this one thing".  A surface entry
+    says "this is part of the application", and the rule written from the whole
+    set says everything else is refused.
+
+    **The path is a template, and it has to be.**  Learning sees what somebody
+    exercised, so a site with a path per object gives back
+    /user/12345/profile and /user/12346/profile and nothing at all about the
+    user created tomorrow.  Stored with `*` in it, translated to a regular
+    expression at render time, the same as an exclusion path, so what somebody
+    reviews is what somebody edits.
+
+    Methods matter as much as the path.  Nearly every application answers GET
+    on a page and nothing else, and the whole point of a positive model is that
+    a POST to a page that only ever served GET is refused before the
+    application sees it.
+    """
+
+    __tablename__ = "waf_surface_entries"
+
+    id = Column(Integer, primary_key=True)
+    profile_id = Column(Integer, ForeignKey("waf_profiles.id", ondelete="CASCADE"),
+                        nullable=False)
+    profile = relationship("WafProfile", back_populates="surface")
+
+    # The template, with * for one path segment and ** for any number.
+    path = Column(String(500), nullable=False)
+
+    # A json list, because one path usually answers more than one.  Empty means
+    # any method, which is a decision somebody has to make on purpose.
+    methods = Column(Text, default='["GET"]')
+
+    # The evidence.  Same reasoning as an exclusion: a rule nobody can explain
+    # is one nobody dares change, and on a positive model that matters more,
+    # because the thing nobody dares change is refusing traffic.
+    sample_uri = Column(String(500))
+    learned_from_ip = Column(String(64))
+    hits = Column(Integer, default=0)
+    note = Column(String(300))
+
+    created_at = Column(DateTime, default=utcnow)
+    created_by = Column(String(64))
+
+    __table_args__ = (
+        UniqueConstraint("profile_id", "path", name="uq_waf_surface"),
+    )
+
+    def method_list(self):
+        return json_get(self.methods, [])
 
 
 class WafSession(Base):

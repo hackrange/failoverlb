@@ -95,6 +95,7 @@ from app.models import (
     UserRole,
     VirtualHost,
     WafExclusion,
+    WafSurfaceEntry,
     WafProfile,
     WafSession,
 )
@@ -120,6 +121,11 @@ TABLES = [
     # would leave every site pointing at a profile that no longer exists.
     ("waf_profiles", WafProfile),
     ("waf_exclusions", WafExclusion),
+    # The positive model, alongside the exclusions and for the same reason.
+    # A standby that inherits the exclusions and not the surface would come up
+    # after a promotion with a site set to enforce and nothing allowed, which
+    # is every request refused.
+    ("waf_surface_entries", WafSurfaceEntry),
     ("pools", Pool),
     ("pool_members", PoolMember),
     ("hosts", VirtualHost),
