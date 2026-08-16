@@ -730,6 +730,29 @@ async def streams_page(request: Request, db: DBSession = Depends(get_db)):
     return response
 
 
+@router.get("/waf-profiles", response_class=HTMLResponse)
+async def waf_profiles_page(request: Request, db: DBSession = Depends(get_db)):
+    """
+    The tuned rule sets, across the fleet.
+
+    They are created from a site's own tab, in the middle of a learning
+    session, which is the right place to make one and the wrong place to live.
+    A profile is applied to any number of sites, so the questions that follow —
+    which sites use this, is it still valid against the rules installed now,
+    can I delete it — are fleet questions and need a page of their own.
+    """
+    from app.models import WafProfile
+
+    user = require_page_user(request, db)
+    token = ensure_csrf_token(request)
+    response = render(
+        request, "waf_profiles.html", user, csrf_token=token,
+        profiles=db.query(WafProfile).order_by(WafProfile.name).all(),
+    )
+    issue_csrf_token(response, token)
+    return response
+
+
 @router.get("/error-pages", response_class=HTMLResponse)
 async def error_pages_page(request: Request, db: DBSession = Depends(get_db)):
     user = require_page_user(request, db)

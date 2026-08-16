@@ -1,0 +1,167 @@
+{% extends "base.html" %}
+{% block title %}WAF Profiles &middot; Failover LB{% endblock %}
+
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <h1>WAF profiles</h1>
+    <div class="sub">
+      Tuned rule sets, made from a learning session and applied to any number of
+      sites.
+    </div>
+  </div>
+</div>
+
+<div class="notice info">
+  <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 3a.9.9 0 1 1 0 1.8A.9.9 0 0 1 8 4zm1.2 8H6.8v-.9h.7V7.9h-.7V7h2.1v4.1h.3V12z"/></svg>
+  <div>
+    A profile is made on a site's own WAF tab, during a learning session, which
+    is where the evidence is.  This is where they live afterwards: what each one
+    excuses, which sites are relying on it, and whether it still matches the
+    rules installed today.
+    <br><br>
+    Editing one changes <strong>every site using it</strong> at the next apply,
+    which is the point of having them and the reason the list of users is on
+    every card.
+  </div>
+</div>
+
+{% if not profiles %}
+  <div class="card">
+    <div class="card-body">
+      <div class="empty">
+        <strong>No profiles yet.</strong>
+        <p class="small muted">
+          Open a site, go to its WAF tab, start a learning session with the
+          addresses your testers work from, exercise the application, then stop
+          and save what fired as a profile.  It will appear here.
+        </p>
+      </div>
+    </div>
+  </div>
+{% endif %}
+
+<div id="profile-list"></div>
+
+{% endblock %}
+
+{% block scripts %}
+<script nonce="{{ csp_nonce }}">
+document.addEventListener("DOMContentLoaded", function () {
+  const holder = document.getElementById("profile-list");
+  const CAN_EDIT = {{ 'true' if can('edit_sites') else 'false' }};
+
+  function when(iso) {
+    if (!iso) return "unknown";
+    return String(iso).replace("T", " ").slice(0, 16);
+  }
+
+  async function load() {
+    let data, rules;
+    try { data = await NFM.api("/waf/profiles"); }
+    catch (err) { holder.textContent = err.message; return; }
+
+    // Which rule ids the installed rule set actually has.  Without this an
+    // exclusion can point at a rule retired by a rule set update: it does
+    // nothing, it is invisible, and nobody dares delete it.  A WAF fills up
+    // with those until it is excusing a list of rules that no longer exist.
+    try { rules = await NFM.api("/waf/rule-ids"); }
+    catch (err) { rules = null; }
+    const known = rules && rules.ids ? new Set(rules.ids.map(String)) : null;
+
+    const profiles = data.profiles || [];
+    if (!profiles.length) { holder.innerHTML = ""; return; }
+
+    holder.innerHTML = profiles.map(function (p) {
+      const orphans = known
+        ? (p.exclusions || []).filter(e => !known.has(String(e.rule_id)))
+        : [];
+
+      const rows = (p.exclusions || []).map(function (e) {
+        const dead = known && !known.has(String(e.rule_id));
+        return "<tr" + (dead ? ' class="faint"' : "") + ">" +
+          "<td><strong>" + NFM.escapeHtml(e.rule_id) + "</strong>" +
+          (dead ? ' <span class="badge warn">not in the rule set</span>' : "") +
+          "</td><td class='mono small'>" +
+          NFM.escapeHtml(e.path || "whole site") + "</td>" +
+          "<td class='small muted'>" + NFM.escapeHtml(e.message || "") + "</td>" +
+          "<td class='small faint'>" + NFM.escapeHtml(e.learned_from_ip || "—") +
+          "</td><td class='small faint'>" + when(e.created_at) + "</td></tr>";
+      }).join("");
+
+      const used = p.used_by || [];
+
+      return '<div class="card">' +
+        '<div class="card-head"><h2>' + NFM.escapeHtml(p.name) + "</h2>" +
+        '<span class="small faint">' + (p.exclusions || []).length +
+        " exclusions</span></div>" +
+        '<div class="card-body">' +
+
+        (p.description
+          ? '<p class="small muted" style="margin-top:0">' +
+            NFM.escapeHtml(p.description) + "</p>" : "") +
+
+        // Provenance.  An exclusion nobody can explain is one nobody will dare
+        // remove, so where it came from travels with it.
+        '<dl class="kv">' +
+        "<dt>Learned from</dt><dd>" +
+        NFM.escapeHtml(p.learned_from_site || "unknown site") +
+        (p.learned_at ? ' <span class="faint small">on ' + when(p.learned_at) + "</span>" : "") +
+        "</dd>" +
+        "<dt>Tester addresses</dt><dd class='mono small'>" +
+        NFM.escapeHtml((p.learned_from_addresses || []).join(", ") || "not recorded") +
+        "</dd>" +
+        "<dt>Used by</dt><dd>" +
+        (used.length
+          ? used.map(n => '<a href="{{ base }}/sites">' + NFM.escapeHtml(n) + "</a>").join(", ")
+          : '<span class="faint">no sites</span>') +
+        "</dd></dl>" +
+
+        (orphans.length
+          ? '<div class="notice warn"><div><strong>' + orphans.length +
+            (orphans.length === 1 ? " exclusion points" : " exclusions point") +
+            " at a rule the installed rule set no longer has.</strong>  " +
+            "A rule set update retires and renumbers rules, so these now do " +
+            "nothing at all.  They are safe to remove and worth removing, " +
+            "because a profile nobody trusts is one nobody prunes." +
+            "</div></div>"
+          : "") +
+
+        '<div class="table-scroll"><table><thead><tr>' +
+        "<th>Rule</th><th>Path</th><th>Why</th><th>From</th><th>Added</th>" +
+        "</tr></thead><tbody>" + rows + "</tbody></table></div>" +
+
+        (CAN_EDIT
+          ? '<div class="flex mt"><button class="btn danger" data-del="' + p.id +
+            '" data-name="' + NFM.escapeHtml(p.name) + '"' +
+            (used.length ? " disabled" : "") + ">Delete</button>" +
+            (used.length
+              ? '<span class="small faint">Point those sites at something else first.</span>'
+              : "") +
+            "</div>"
+          : "") +
+
+        "</div></div>";
+    }).join("");
+  }
+
+  holder.addEventListener("click", function (ev) {
+    const del = ev.target.closest("[data-del]");
+    if (!del) return;
+    NFM.confirmThen(
+      "Delete the profile " + del.dataset.name + "?\n\n" +
+      "Any site using it would fall back to an untuned rule set and start " +
+      "refusing traffic it was tuned to allow, which is why this is refused " +
+      "while a site still points at it.",
+      async function () {
+        await NFM.api("/waf/profiles/" + del.dataset.del, { method: "DELETE" });
+        NFM.toast("Deleted", "ok");
+        load();
+      });
+  });
+
+  load();
+});
+</script>
+{% endblock %}

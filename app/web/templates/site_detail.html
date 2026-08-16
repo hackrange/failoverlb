@@ -567,6 +567,29 @@
   </div>
 
   {#
+    What this site is excusing right now.
+
+    The hits list below correctly hides itself outside a session, and until
+    this existed nothing replaced it: a site enforcing a tuned profile showed
+    no sign at all of which rules it was letting through.  That is the half of
+    a WAF somebody reviewing it actually needs to see.
+  #}
+  <div class="card" id="waf-profile-card" hidden>
+    <div class="card-head">
+      <h2>What this site is excusing</h2>
+      <span class="small faint" id="waf-profile-state"></span>
+    </div>
+    <div class="card-body">
+      <div id="waf-profile-body"></div>
+      <div class="hint mt">
+        These come from the profile this site is set to, so changing them
+        changes every site using it.  Manage them on
+        <a href="{{ base }}/waf-profiles">WAF profiles</a>.
+      </div>
+    </div>
+  </div>
+
+  {#
     What fired.  Only shown while a session is running or just after one
     stopped: a list of hits against a site that is enforcing invites somebody
     to tick things without the evidence that made ticking safe.
@@ -1815,6 +1838,31 @@ document.addEventListener("DOMContentLoaded", function () {
       if (!paranoia.value) paranoia.value = "1";
     }
 
+    function drawProfileInForce() {
+      const card = document.getElementById("waf-profile-card");
+      if (!card) return;
+      const chosen = paranoia.value || "";
+      const p = chosen.indexOf("custom:") === 0
+        ? profiles.find(x => x.name === chosen.slice(7))
+        : null;
+
+      if (!p || mode.value === "off") { card.hidden = true; return; }
+      card.hidden = false;
+      document.getElementById("waf-profile-state").textContent =
+        p.name + ", " + (p.exclusions || []).length + " exclusions";
+      document.getElementById("waf-profile-body").innerHTML =
+        (p.exclusions || []).length
+          ? '<div class="table-scroll"><table><thead><tr><th>Rule</th>' +
+            "<th>Path</th><th>Why</th><th>Learned from</th></tr></thead><tbody>" +
+            p.exclusions.map(e => "<tr><td><strong>" +
+              NFM.escapeHtml(e.rule_id) + "</strong></td><td class='mono small'>" +
+              NFM.escapeHtml(e.path || "whole site") + "</td><td class='small muted'>" +
+              NFM.escapeHtml(e.message || "") + "</td><td class='small faint'>" +
+              NFM.escapeHtml(e.learned_from_ip || "—") + "</td></tr>").join("") +
+            "</tbody></table></div>"
+          : '<div class="small faint">This profile excuses nothing yet.</div>';
+    }
+
     function refresh() {
       explain.textContent = WORDS[mode.value] || "";
       // Strictness only means anything when something is being checked, and it
@@ -1842,9 +1890,11 @@ document.addEventListener("DOMContentLoaded", function () {
             "still breaks a real request.";
       }
       fillParanoia(paranoia.value || "1");
+      drawProfileInForce();
     }
 
     mode.addEventListener("change", refresh);
+    paranoia.addEventListener("change", drawProfileInForce);
 
     document.getElementById("waf-save").addEventListener("click", async function () {
       const button = document.getElementById("waf-save");

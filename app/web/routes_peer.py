@@ -513,6 +513,7 @@ PEER_AGENT_VERBS = {
     # track the agent already knows.
     "crs_install",
     "crs_status",
+    "crs_rule_ids",
     # Loading the module.  Read only in the status case, and the install case
     # writes one file whose contents this node decides, tests the result and
     # puts the old state back if nginx refuses it.  It has to be reachable from

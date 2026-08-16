@@ -3323,6 +3323,37 @@ def v_waf_log_status(req):
             "free_bytes": free, "logs": logs}
 
 
+def v_crs_rule_ids(req):
+    """
+    Every rule id the installed rule set defines.
+
+    So an exclusion can be checked against the rules that are actually there.
+    A rule set update retires and renumbers rules, and an exclusion pointing at
+    one that no longer exists does nothing, says nothing, and sits in the
+    profile forever because nobody dares remove what they cannot explain.
+
+    Read from the files rather than from the engine, because there is no way to
+    ask libmodsecurity what it loaded, and the files are the same thing nginx
+    parses.
+    """
+    if not CRS_LINK.exists():
+        return {"ok": True, "present": False, "ids": []}
+
+    ids = set()
+    pattern = re.compile(r"\bid\s*:\s*'?(\d{3,9})'?")
+    try:
+        for path in sorted((CRS_LINK / "rules").glob("*.conf")):
+            try:
+                ids.update(pattern.findall(path.read_text(errors="replace")))
+            except OSError:
+                continue
+    except OSError:
+        return {"ok": True, "present": False, "ids": []}
+
+    return {"ok": True, "present": True, "ids": sorted(ids, key=int),
+            "count": len(ids)}
+
+
 def v_crs_status(req):
     """What rule set this node has, if any."""
     if not CRS_LINK.exists():
@@ -3418,6 +3449,7 @@ VERBS = {
     "waf_module_status": v_waf_module_status,
     "crs_install": v_crs_install,
     "crs_status": v_crs_status,
+    "crs_rule_ids": v_crs_rule_ids,
     "waf_hits": v_waf_hits,
     "waf_hits_clear": v_waf_hits_clear,
     "waf_log_status": v_waf_log_status,

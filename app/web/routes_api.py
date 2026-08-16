@@ -840,6 +840,26 @@ async def waf_log_state(request: Request, db: DBSession = Depends(get_db)):
     return await hits_mod.log_status()
 
 
+@router.get("/waf/rule-ids")
+async def waf_rule_ids(request: Request, db: DBSession = Depends(get_db)):
+    """
+    Every rule id the installed rule set defines, so exclusions can be checked.
+
+    Asked of this node only.  The rule set is installed identically on every
+    node and the settings page already says loudly when they disagree, so
+    asking the whole fleet for a list that should be the same everywhere would
+    cost a round trip per node to answer the same question.
+    """
+    from app.core.agent_client import get_agent
+
+    get_user(request, db)
+    try:
+        answer = await get_agent().call("crs_rule_ids")
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    return answer
+
+
 @router.get("/waf/profiles")
 async def waf_profiles(request: Request, db: DBSession = Depends(get_db)):
     """Every tuned profile, and which sites use it."""
