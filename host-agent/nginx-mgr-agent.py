@@ -3370,6 +3370,156 @@ def v_waf_surface(req):
     }
 
 
+# One access log line in the format the renderer writes.
+#
+#   1.2.3.4 - - [16/Aug/2026:21:14:59 +0000] "POST /users/sign_in HTTP/2.0" 200 42 "..." "..."
+#
+# Parsed with a regular expression rather than split(), because the request and
+# the user agent are quoted fields that contain spaces, and a split on
+# whitespace puts the method, the path and the protocol in different places
+# depending on what somebody sent.
+_ACCESS_LINE = re.compile(
+    r'^(?P<addr>\S+) \S+ \S+ \[(?P<when>[^\]]+)\] '
+    r'"(?P<method>[A-Z]+) (?P<path>[^ "]*)[^"]*" (?P<status>\d{3}) '
+)
+
+LOGIN_READ_BYTES = 32 * 1024 * 1024
+LOGIN_MAX_ADDRESSES = 5000
+
+
+def _access_log(site):
+    """The access log for one site, with the name checked before it is a path."""
+    name = str(site or "").strip()
+    if not name or not re.fullmatch(r"[A-Za-z0-9._-]{1,190}", name):
+        raise AgentError("that is not a site name", "invalid")
+    path = (WAF_LOG_DIR / f"{name}.access.log").resolve()
+    if path.parent != WAF_LOG_DIR.resolve():
+        raise AgentError("that is not a site name", "invalid")
+    return path
+
+
+def _access_when(stamp):
+    """
+    The timestamp on an access log line, as a unix time.
+
+    nginx writes local time with an offset, and the offset is the part that
+    matters: a box on anything but UTC would otherwise report every failure as
+    hours old and fall outside every window this feature has.
+    """
+    try:
+        return datetime.strptime(
+            str(stamp).strip(), "%d/%b/%Y:%H:%M:%S %z").timestamp()
+    except (ValueError, TypeError):
+        return None
+
+
+def v_login_failures(req):
+    """
+    Failed logins for one site, grouped by the address that made them.
+
+    Reads the access log rather than anything the application tells us, which
+    fixes what this can and cannot see.  It gets the address, the path, the
+    method and the status.  **It never sees a username or a password**, so it
+    cannot say which accounts were targeted, and that limit is worth stating
+    rather than working around: making it see usernames would mean reading
+    request bodies, which is where the passwords are.
+
+    Which statuses count as a failure comes from the caller, because there is
+    no universal answer.  A form that re-renders itself with "wrong password"
+    answers 200 and answers 302 when the login worked, so for that application
+    200 is the failure.  An API answers 401.  Guessing here would report every
+    successful login on half the world's applications as an attack.
+    """
+    payload = req.get("payload") or req
+    path = _access_log(payload.get("site"))
+
+    since = payload.get("since")
+    since = float(since) if isinstance(since, (int, float)) else None
+
+    wanted_paths = [str(p) for p in (payload.get("paths") or []) if str(p).strip()]
+    wanted_methods = {str(m).upper() for m in (payload.get("methods") or ["POST"])}
+    fail_statuses = {int(s) for s in (payload.get("fail_statuses") or [401, 403])
+                     if str(s).isdigit()}
+
+    if not wanted_paths:
+        return {"ok": True, "present": True, "addresses": [], "failures": 0,
+                "note": "no login paths were given, so nothing was looked at"}
+
+    if not path.is_file():
+        return {"ok": True, "present": False, "addresses": [], "failures": 0,
+                "path": str(path)}
+
+    size = path.stat().st_size
+    with path.open("rb") as handle:
+        if size > LOGIN_READ_BYTES:
+            handle.seek(size - LOGIN_READ_BYTES)
+            handle.readline()
+        raw = handle.read()
+
+    addresses = {}
+    failures = 0
+    successes = 0
+    scanned = 0
+
+    for line in raw.split(b"\n"):
+        if not line:
+            continue
+        scanned += 1
+        match = _ACCESS_LINE.match(line.decode("utf-8", "replace"))
+        if not match:
+            continue
+
+        got = match.group("path").split("?", 1)[0]
+        if not any(got == p or got.startswith(p.rstrip("*")) for p in wanted_paths):
+            continue
+        if match.group("method").upper() not in wanted_methods:
+            continue
+
+        when = _access_when(match.group("when"))
+        if since is not None and (when is None or when < since):
+            continue
+
+        status = int(match.group("status"))
+        if status not in fail_statuses:
+            successes += 1
+            continue
+
+        failures += 1
+        addr = match.group("addr")
+        entry = addresses.get(addr)
+        if entry is None:
+            if len(addresses) >= LOGIN_MAX_ADDRESSES:
+                continue
+            entry = addresses[addr] = {"address": addr, "count": 0,
+                                       "first_seen": when, "last_seen": when,
+                                       "paths": {}}
+        entry["count"] += 1
+        entry["paths"][got] = entry["paths"].get(got, 0) + 1
+        if when is not None:
+            if entry["first_seen"] is None or when < entry["first_seen"]:
+                entry["first_seen"] = when
+            if entry["last_seen"] is None or when > entry["last_seen"]:
+                entry["last_seen"] = when
+
+    out = sorted(addresses.values(), key=lambda a: a["count"], reverse=True)
+    for entry in out:
+        entry["paths"] = sorted(entry["paths"].items(),
+                                key=lambda kv: kv[1], reverse=True)[:5]
+
+    return {
+        "ok": True,
+        "present": True,
+        "path": str(path),
+        "bytes": size,
+        "truncated_read": size > LOGIN_READ_BYTES,
+        "capped_addresses": len(addresses) >= LOGIN_MAX_ADDRESSES,
+        "lines_scanned": scanned,
+        "failures": failures,
+        "successes": successes,
+        "addresses": out,
+    }
+
+
 def v_waf_hits_clear(req):
     """
     Throw away what was learned on this node, for one site.
@@ -3646,6 +3796,7 @@ VERBS = {
     "crs_rule_ids": v_crs_rule_ids,
     "waf_hits": v_waf_hits,
     "waf_surface": v_waf_surface,
+    "login_failures": v_login_failures,
     "waf_hits_clear": v_waf_hits_clear,
     "waf_log_status": v_waf_log_status,
     "waf_log_rotate": v_waf_log_rotate,
@@ -3675,6 +3826,7 @@ SERIALIZED_VERBS = {
     # Truncating a file two readers are parsing.
     "waf_hits_clear",
     "waf_surface",
+    "login_failures",
     # Copying and truncating the same files a read is walking.
     "waf_log_rotate",
 }

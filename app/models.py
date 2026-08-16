@@ -1589,6 +1589,90 @@ class WafExclusion(Base):
     )
 
 
+class LoginWatch(Base):
+    """
+    Watching one site's login for guessing, and the two shapes it takes.
+
+    **Brute force** is one address trying many times.  Every lockout ever
+    written stops it, including ours, and it is the one everybody thinks of.
+
+    **Password spraying** is the opposite shape and is the reason this exists.
+    One password, tried once against a hundred accounts, from a hundred
+    addresses.  Each account sees a single failed attempt, so no per account
+    lockout ever fires, and each address makes a handful of requests, so no
+    rate limit does either.  It is invisible to both of the defences people
+    already have, and it is how accounts are actually taken these days.
+
+    The signal is only visible in the aggregate: a lot of failures, spread thin
+    across a lot of addresses, in a short window.  Nothing looking at one
+    account or one address can see it, which is exactly why it needs its own
+    thing looking at the whole site at once.
+
+    What this reads is the site's access log, so it sees the address, the path,
+    the method and the status and never a username or a password.  That is a
+    real limit, not a design flourish: it cannot tell you which accounts were
+    targeted.  It can tell you the shape is there, which is the part that
+    decides whether somebody should be woken up.
+    """
+
+    __tablename__ = "login_watches"
+
+    id = Column(Integer, primary_key=True)
+    host_id = Column(Integer, ForeignKey("virtual_hosts.id", ondelete="CASCADE"),
+                     unique=True, nullable=False)
+
+    enabled = Column(Boolean, default=True)
+
+    # Where the login is.  A json list, because an application often has more
+    # than one: a form, an API token endpoint, a mobile path.
+    paths = Column(Text, default='[]')
+    methods = Column(Text, default='["POST"]')
+
+    # **What a failure looks like, and this is per application.**
+    #
+    # There is no universal answer and pretending otherwise is how a detector
+    # ends up reporting every successful login as an attack.  A form that
+    # re-renders itself with "wrong password" answers 200, and the same
+    # application answers 302 when the login worked, so for that one a 200 is
+    # the failure and the redirect is the success.  An API answers 401.  The
+    # page says this plainly and asks rather than guessing.
+    fail_statuses = Column(Text, default='[401, 403]')
+
+    # How far back a burst is measured over.  Five minutes is short enough that
+    # a slow spray spread over a day will not trip it, which is a real gap and
+    # is written down rather than hidden: see the long window below.
+    window_seconds = Column(Integer, default=300)
+
+    # One address, many tries.
+    brute_threshold = Column(Integer, default=10)
+
+    # Many addresses, few tries each.  All three have to hold at once or a busy
+    # login page on a Monday morning is an incident.
+    spray_min_addresses = Column(Integer, default=12)
+    spray_min_failures = Column(Integer, default=20)
+    spray_max_per_address = Column(Integer, default=3)
+
+    # The slow version of the same attack, measured over hours rather than
+    # minutes, because an attacker who knows about five minute windows simply
+    # waits six.
+    slow_window_seconds = Column(Integer, default=21600)
+    slow_min_addresses = Column(Integer, default=25)
+    slow_min_failures = Column(Integer, default=60)
+
+    created_at = Column(DateTime, default=utcnow)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
+    updated_by = Column(String(64))
+
+    def path_list(self):
+        return json_get(self.paths, [])
+
+    def method_list(self):
+        return json_get(self.methods, ["POST"])
+
+    def fail_status_list(self):
+        return json_get(self.fail_statuses, [401, 403])
+
+
 class WafSurfaceEntry(Base):
     """
     One path this application is allowed to have, and the methods it answers.

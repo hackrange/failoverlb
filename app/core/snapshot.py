@@ -84,6 +84,7 @@ from app.models import (
     GslbRecord,
     GslbZone,
     Location,
+    LoginWatch,
     MapBlock,
     Pool,
     PoolMember,
@@ -130,6 +131,11 @@ TABLES = [
     ("pool_members", PoolMember),
     ("hosts", VirtualHost),
     ("locations", Location),
+    # After the sites, since a watch belongs to one.  It travels because a
+    # standby that inherited the sites and not the thresholds would come up
+    # after a promotion watching nothing, and nobody would notice until the
+    # week nothing was reported.
+    ("login_watches", LoginWatch),
     # After the sites, since a session belongs to one.  Kept rather than
     # treated as scratch, because a profile's provenance points back at the
     # session it came from and an exclusion nobody can explain is one nobody

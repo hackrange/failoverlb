@@ -116,6 +116,7 @@
   <button class="tab" data-tab="settings" role="tab">Settings</button>
   <button class="tab" data-tab="geo" role="tab" id="tab-geo" hidden>Geo blocking</button>
   <button class="tab" data-tab="waf" role="tab" id="tab-waf" hidden>WAF</button>
+  <button class="tab" data-tab="login" role="tab">Login watch</button>
   <button class="tab" data-tab="config" role="tab">nginx config</button>
 </div>
 
@@ -811,6 +812,135 @@
 </div>
 
 {# ============================ raw config ============================ #}
+<div class="tab-panel" data-panel="login" hidden>
+
+  {#
+    Watching the login for guessing.
+
+    Its own tab rather than a line in the settings list, because the thing it
+    is looking for is not a setting: it is a pattern across the whole site over
+    a window, and the numbers only make sense next to what they are currently
+    finding.
+  #}
+  <div class="card">
+    <div class="card-head"><h2>Watching this site's login</h2></div>
+    <div class="card-body">
+      <p class="small muted" style="margin-top:0">
+        Two shapes, and the second is the reason this exists.
+        <strong>Brute force</strong> is one address trying many times, which
+        every lockout ever written already stops.
+        <strong>Password spraying</strong> is one password tried once against a
+        hundred accounts from a hundred addresses: each account sees a single
+        failure so no lockout fires, and each address makes a handful of
+        requests so no rate limit fires.  It is invisible to both of the
+        defences you already have.
+      </p>
+      <p class="small muted">
+        This reads the access log, so it sees the address, the path and the
+        status and <strong>never a username or a password</strong>.  It cannot
+        tell you which accounts were targeted, only that the shape is there.
+        Seeing usernames would mean reading request bodies, which is where the
+        passwords are.
+      </p>
+
+      <div class="checkline">
+        <input type="checkbox" id="lw-enabled">
+        <label for="lw-enabled">Watch this site's login</label>
+      </div>
+
+      <div class="field" style="max-width:460px">
+        <label for="lw-paths">Login paths</label>
+        <textarea id="lw-paths" rows="3"
+                  placeholder="/users/sign_in&#10;/api/v1/token"></textarea>
+        <div class="hint">
+          One per line.  A path matches itself and anything under it, and
+          <code>*</code> works the same way it does in a WAF exclusion.
+        </div>
+      </div>
+
+      <div class="grid-3">
+        <div class="field">
+          <label for="lw-methods">Methods</label>
+          <input type="text" id="lw-methods" placeholder="POST">
+          <div class="hint">Comma separated.</div>
+        </div>
+        <div class="field">
+          <label for="lw-fail">Status codes that mean a failure</label>
+          <input type="text" id="lw-fail" placeholder="401, 403">
+          <div class="hint">
+            <strong>Per application, and there is no universal answer.</strong>
+            A form that re-renders with "wrong password" answers 200 and
+            answers 302 when it worked, so for that one 200 is the failure.
+            An API answers 401.  Get this wrong in the other direction and
+            every successful login is reported as an attack.
+          </div>
+        </div>
+        <div class="field">
+          <label for="lw-window">Window, in minutes</label>
+          <input type="text" id="lw-window" placeholder="5">
+          <div class="hint">How far back a burst is measured over.</div>
+        </div>
+      </div>
+
+      <h3>When to call it</h3>
+      <div class="grid-3">
+        <div class="field">
+          <label for="lw-brute">Brute force: failures from one address</label>
+          <input type="text" id="lw-brute" placeholder="10">
+        </div>
+        <div class="field">
+          <label for="lw-spray-addr">Spray: at least this many addresses</label>
+          <input type="text" id="lw-spray-addr" placeholder="12">
+        </div>
+        <div class="field">
+          <label for="lw-spray-fail">Spray: at least this many failures</label>
+          <input type="text" id="lw-spray-fail" placeholder="20">
+        </div>
+      </div>
+      <div class="grid-3">
+        <div class="field">
+          <label for="lw-spray-per">Spray: no more than this per address</label>
+          <input type="text" id="lw-spray-per" placeholder="3">
+        </div>
+        <div class="field">
+          <label for="lw-slow-window">Slow window, in minutes</label>
+          <input type="text" id="lw-slow-window" placeholder="360">
+        </div>
+        <div class="field">
+          <label for="lw-slow-fail">Slow: at least this many failures</label>
+          <input type="text" id="lw-slow-fail" placeholder="60">
+        </div>
+      </div>
+      <p class="small muted">
+        All three spray rules have to hold at once, because any one alone is an
+        ordinary Monday morning: a busy login page has plenty of failures, a
+        big office has plenty of addresses, and everybody typing their password
+        wrong once is exactly "few per address".  It is the combination that
+        does not happen by accident.
+      </p>
+      <p class="small muted">
+        The slow window runs the same test over hours instead of minutes,
+        because somebody who knows detectors use five minute windows waits six.
+      </p>
+
+      <div class="flex mt">
+        <button type="button" class="btn primary" id="lw-save">Save</button>
+        <button type="button" class="btn" id="lw-check">Look at the log now</button>
+        <span class="small faint" id="lw-state"></span>
+      </div>
+    </div>
+  </div>
+
+  <div class="card" id="lw-results-card" hidden>
+    <div class="card-head">
+      <h2>What the log says</h2>
+      <span class="small faint" id="lw-results-summary"></span>
+    </div>
+    <div class="card-body" id="lw-results"></div>
+  </div>
+
+</div>
+
 <div class="tab-panel" data-panel="config" hidden>
   <div class="card">
     <div class="card-head">
@@ -1013,6 +1143,7 @@ document.addEventListener("DOMContentLoaded", function () {
       });
       if (want === "config") loadConfig();
       if (want === "settings" && !catalog) loadSettings();
+      if (want === "login") loadLoginWatch();
     });
   });
 
@@ -2731,6 +2862,138 @@ document.addEventListener("DOMContentLoaded", function () {
         }
       }
     })();
+  })();
+
+  // ---- watching the login ----
+  //
+  // Kept apart from the WAF, which answers a different question.  The WAF asks
+  // whether a request looks like an attack.  This asks whether a lot of
+  // ordinary looking requests add up to somebody working through a password
+  // list, and no single one of them looks like anything at all.
+  (function loginWatchTab() {
+    const idEl = document.getElementById("lw-enabled");
+    if (!idEl) return;
+
+    function el(id) { return document.getElementById(id); }
+    function mins(seconds) { return Math.round((seconds || 0) / 60); }
+
+    function fill(w) {
+      el("lw-enabled").checked = !!w.enabled;
+      el("lw-paths").value = (w.paths || []).join("\n");
+      el("lw-methods").value = (w.methods || ["POST"]).join(", ");
+      el("lw-fail").value = (w.fail_statuses || []).join(", ");
+      el("lw-window").value = mins(w.window_seconds);
+      el("lw-brute").value = w.brute_threshold;
+      el("lw-spray-addr").value = w.spray_min_addresses;
+      el("lw-spray-fail").value = w.spray_min_failures;
+      el("lw-spray-per").value = w.spray_max_per_address;
+      el("lw-slow-window").value = mins(w.slow_window_seconds);
+      el("lw-slow-fail").value = w.slow_min_failures;
+      el("lw-state").textContent = w.configured
+        ? (w.enabled ? "watching" : "saved, but switched off")
+        : "not set up yet";
+    }
+
+    function body() {
+      const list = s => String(s || "").split(/[\s,]+/).filter(Boolean);
+      return {
+        enabled: el("lw-enabled").checked,
+        paths: list(el("lw-paths").value),
+        methods: list(el("lw-methods").value),
+        fail_statuses: list(el("lw-fail").value),
+        window_seconds: (parseInt(el("lw-window").value, 10) || 5) * 60,
+        brute_threshold: parseInt(el("lw-brute").value, 10) || 10,
+        spray_min_addresses: parseInt(el("lw-spray-addr").value, 10) || 12,
+        spray_min_failures: parseInt(el("lw-spray-fail").value, 10) || 20,
+        spray_max_per_address: parseInt(el("lw-spray-per").value, 10) || 3,
+        slow_window_seconds: (parseInt(el("lw-slow-window").value, 10) || 360) * 60,
+        slow_min_addresses: parseInt(el("lw-spray-addr").value, 10) * 2 || 25,
+        slow_min_failures: parseInt(el("lw-slow-fail").value, 10) || 60,
+      };
+    }
+
+    window.loadLoginWatch = async function () {
+      try {
+        const r = await NFM.api("/login-watch/" + HOST_ID);
+        fill(r.watch || {});
+      } catch (err) { NFM.toast(err.message, "bad"); }
+    };
+
+    el("lw-save").addEventListener("click", async function () {
+      try {
+        const r = await NFM.api("/login-watch/" + HOST_ID,
+                                { method: "PUT", body: body() });
+        fill(r.watch || {});
+        NFM.toast("Saved", "ok");
+      } catch (err) { NFM.toast(err.message, "bad"); }
+    });
+
+    el("lw-check").addEventListener("click", async function () {
+      const button = el("lw-check");
+      button.disabled = true;
+      el("lw-state").textContent = "reading the log on every node";
+      try {
+        const r = await NFM.api("/login-watch/" + HOST_ID + "/findings");
+        draw(r);
+      } catch (err) { NFM.toast(err.message, "bad"); }
+      el("lw-state").textContent = "";
+      button.disabled = false;
+    });
+
+    function draw(r) {
+      const card = document.getElementById("lw-results-card");
+      const box = document.getElementById("lw-results");
+      card.hidden = false;
+
+      if (!r.configured) {
+        box.innerHTML = '<div class="small faint">Give it a login path and ' +
+          "save, then look again.</div>";
+        return;
+      }
+
+      const all = [].concat.apply([], (r.windows || []).map(w => w.findings || []));
+      document.getElementById("lw-results-summary").textContent =
+        all.length ? (all.length === 1 ? "1 finding" : all.length + " findings")
+                   : "nothing that looks like guessing";
+
+      box.innerHTML = (r.windows || []).map(function (w) {
+        const rows = (w.addresses || []).slice(0, 25).map(a =>
+          "<tr><td class='mono'>" + NFM.escapeHtml(a.address) + "</td><td>" +
+          a.count + "</td><td class='small faint'>" +
+          NFM.escapeHtml((a.paths || []).map(p => p[0]).join(", ")) +
+          "</td></tr>").join("");
+
+        return '<div class="mt"><h3>' +
+          (w.slow ? "The slow window" : "The short window") + ", " +
+          Math.round(w.window_seconds / 60) + " minutes</h3>" +
+          '<div class="small muted">' + w.failures + " failed, " +
+          w.successes + " succeeded, from " + w.addresses_seen +
+          " address" + (w.addresses_seen === 1 ? "" : "es") +
+          (w.partial ? ".  The log was larger than one read, so this is the "
+                     + "most recent part of it." : "") + "</div>" +
+
+          ((w.findings || []).length
+            ? (w.findings || []).map(f =>
+                '<div class="notice bad mt"><div><strong>' +
+                (f.kind === "brute_force" ? "Brute force"
+                  : (f.kind === "slow_spray" ? "Slow password spray"
+                                             : "Password spray")) +
+                "</strong>" +
+                (f.address ? " from <span class='mono'>" +
+                  NFM.escapeHtml(f.address) + "</span>" : "") +
+                "<div class='small'>" + NFM.escapeHtml(f.why) + "</div>" +
+                "</div></div>").join("")
+            : '<div class="notice ok mt"><div>Nothing over the thresholds in ' +
+              "this window.</div></div>") +
+
+          (rows
+            ? '<div class="table-scroll mt"><table><thead><tr><th>Address</th>' +
+              "<th>Failures</th><th>Paths</th></tr></thead><tbody>" + rows +
+              "</tbody></table></div>"
+            : "") +
+          "</div>";
+      }).join("");
+    }
   })();
 
   // ---- geo blocking ----

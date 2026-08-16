@@ -65,6 +65,7 @@ from app.models import (
     VirtualHost,
     WafExclusion,
     WafProfile,
+    LoginWatch,
     WafSession,
     WafSurfaceEntry,
     json_set,
@@ -872,6 +873,177 @@ async def waf_hits_for_host(host_id: int, request: Request,
     return {"site": host.name, "transactions": found["transactions"],
             "partial": found["partial"], "nodes": found["nodes"],
             "unreadable_addresses": bad, **split}
+
+
+@router.get("/login-watch/{host_id}")
+async def login_watch_get(host_id: int, request: Request,
+                          db: DBSession = Depends(get_db)):
+    """The login watch settings for one site, and what they would find now."""
+    get_user(request, db)
+    host = db.get(VirtualHost, host_id)
+    if not host:
+        raise HTTPException(status_code=404, detail="no such site")
+
+    watch = db.query(LoginWatch).filter(LoginWatch.host_id == host_id).first()
+    return {"site": host.name, "watch": _login_watch_json(watch)}
+
+
+def _login_watch_json(watch):
+    if watch is None:
+        # The defaults, so the form has something to draw before anybody saves.
+        # 401 and 403 rather than 200, because guessing that a 200 is a failure
+        # would report every successful login on a form based application as an
+        # attack, and a detector that cries wolf on day one is switched off on
+        # day one.
+        return {"configured": False, "enabled": False, "paths": [],
+                "methods": ["POST"], "fail_statuses": [401, 403],
+                "window_seconds": 300, "brute_threshold": 10,
+                "spray_min_addresses": 12, "spray_min_failures": 20,
+                "spray_max_per_address": 3, "slow_window_seconds": 21600,
+                "slow_min_addresses": 25, "slow_min_failures": 60}
+    return {
+        "configured": True,
+        "enabled": bool(watch.enabled),
+        "paths": watch.path_list(),
+        "methods": watch.method_list(),
+        "fail_statuses": watch.fail_status_list(),
+        "window_seconds": watch.window_seconds,
+        "brute_threshold": watch.brute_threshold,
+        "spray_min_addresses": watch.spray_min_addresses,
+        "spray_min_failures": watch.spray_min_failures,
+        "spray_max_per_address": watch.spray_max_per_address,
+        "slow_window_seconds": watch.slow_window_seconds,
+        "slow_min_addresses": watch.slow_min_addresses,
+        "slow_min_failures": watch.slow_min_failures,
+    }
+
+
+@router.put("/login-watch/{host_id}")
+async def login_watch_save(host_id: int, request: Request,
+                           g: ObjectGuard = Depends(changing)):
+    """
+    Save what counts as a login on this site, and what counts as too many.
+
+    The paths are checked the same way an exclusion path is, because they end
+    up in a comparison rather than in config, and a value nobody validated
+    reaching a comparison is only ever one refactor away from reaching
+    somewhere worse.
+    """
+    g.require("edit_sites")
+    host = g.get(VirtualHost, host_id)
+    payload = await request.json() if await request.body() else {}
+
+    paths = [str(p).strip() for p in (payload.get("paths") or []) if str(p).strip()]
+    for path in paths:
+        problem = _waf_path_problem(path)
+        if problem:
+            raise HTTPException(status_code=400, detail=f"{path}: {problem}")
+
+    enabled = bool(payload.get("enabled"))
+    if enabled and not paths:
+        raise HTTPException(
+            status_code=400,
+            detail="give it at least one login path, or it has nothing to "
+                   "watch and would report nothing forever while looking on")
+
+    methods = sorted({str(m).strip().upper() for m in (payload.get("methods") or ["POST"])
+                      if re.fullmatch(r"[A-Za-z]{3,10}", str(m).strip())})
+    if not methods:
+        raise HTTPException(status_code=400, detail="give it at least one method")
+
+    statuses = sorted({int(s) for s in (payload.get("fail_statuses") or [])
+                       if str(s).isdigit() and 100 <= int(s) <= 599})
+    if not statuses:
+        raise HTTPException(
+            status_code=400,
+            detail="say which status codes mean a failed login on this "
+                   "application.  There is no universal answer: a form that "
+                   "re-renders with an error answers 200, an API answers 401")
+
+    def number(key, low, high, fallback):
+        try:
+            value = int(payload.get(key, fallback))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail=f"{key} has to be a number")
+        if not low <= value <= high:
+            raise HTTPException(status_code=400,
+                                detail=f"{key} has to be between {low} and {high}")
+        return value
+
+    watch = g.session.query(LoginWatch).filter(
+        LoginWatch.host_id == host.id).first()
+    if watch is None:
+        watch = LoginWatch(host_id=host.id)
+        g.session.add(watch)
+
+    watch.enabled = enabled
+    watch.paths = json_set(paths)
+    watch.methods = json_set(methods)
+    watch.fail_statuses = json_set(statuses)
+    watch.window_seconds = number("window_seconds", 60, 3600, 300)
+    watch.brute_threshold = number("brute_threshold", 3, 1000, 10)
+    watch.spray_min_addresses = number("spray_min_addresses", 3, 10000, 12)
+    watch.spray_min_failures = number("spray_min_failures", 3, 100000, 20)
+    watch.spray_max_per_address = number("spray_max_per_address", 1, 100, 3)
+    watch.slow_window_seconds = number("slow_window_seconds", 600, 604800, 21600)
+    watch.slow_min_addresses = number("slow_min_addresses", 3, 10000, 25)
+    watch.slow_min_failures = number("slow_min_failures", 3, 100000, 60)
+    watch.updated_by = g.user.username
+    g.session.commit()
+
+    audit.record("login_watch.save", user=g.user, object_type="host",
+                 object_name=host.name,
+                 detail=f"{'on' if enabled else 'off'}, {len(paths)} paths")
+    return {"site": host.name, "watch": _login_watch_json(watch)}
+
+
+@router.get("/login-watch/{host_id}/findings")
+async def login_watch_findings(host_id: int, request: Request,
+                               db: DBSession = Depends(get_db)):
+    """
+    What the log says right now, over both windows.
+
+    Two windows on purpose.  The short one catches a burst.  The long one
+    catches the same attack run slowly, which is what somebody does once they
+    know detectors use five minute windows, and it is the one most likely to be
+    quietly missing from anybody else's.
+    """
+    import time as _time
+
+    from app.core import login_watch as watch_mod
+
+    get_user(request, db)
+    host = db.get(VirtualHost, host_id)
+    if not host:
+        raise HTTPException(status_code=404, detail="no such site")
+
+    watch = db.query(LoginWatch).filter(LoginWatch.host_id == host_id).first()
+    if watch is None or not watch.path_list():
+        return {"site": host.name, "configured": False, "windows": []}
+
+    now = _time.time()
+    out = []
+    for slow, seconds in ((False, watch.window_seconds),
+                          (True, watch.slow_window_seconds)):
+        found = await watch_mod.fleet_failures(
+            host.name, watch.path_list(), watch.method_list(),
+            watch.fail_status_list(), since=now - seconds)
+        verdict = watch_mod.judge(found["addresses"], found["failures"],
+                                  watch, seconds, slow=slow)
+        out.append({
+            "slow": slow,
+            "window_seconds": seconds,
+            "failures": found["failures"],
+            "successes": found["successes"],
+            "addresses": found["addresses"][:100],
+            "addresses_seen": len(found["addresses"]),
+            "partial": found["partial"],
+            "nodes": found["nodes"],
+            "findings": verdict["findings"],
+        })
+
+    return {"site": host.name, "configured": True,
+            "enabled": bool(watch.enabled), "windows": out}
 
 
 @router.get("/waf/surface/{host_id}")
