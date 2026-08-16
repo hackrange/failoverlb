@@ -506,7 +506,17 @@ def _read_server(block, pools_by_raw_name: dict, index: int) -> dict:
         # Everything else that location did, which is where the WebSocket
         # headers and the buffering live.  Dropped, these come back as a
         # console that connects and dies, or a page that arrives in bursts.
-        leftover = _verbatim(chosen[2], {}, extra_drop=(
+        #
+        # Anything the catalog models is lifted into the site's settings first,
+        # so it lands as a setting somebody can see and change rather than as
+        # opaque text.  Without this pass the same directive came out twice,
+        # once as a setting and once verbatim, which nginx accepts and nobody
+        # can reason about.
+        lifted = extract_settings(chosen[2]) or {}
+        if lifted:
+            site.setdefault("settings_seed", {}).update(lifted)
+
+        leftover = _verbatim(chosen[2], lifted, extra_drop=(
             "proxy_pass", "proxy_set_header", "proxy_http_version", "root",
             "alias", "return",
         ))
