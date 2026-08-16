@@ -82,7 +82,7 @@ def with_waf(mode, paranoia=None):
     code.
     """
     def mutate(session):
-        host = session.query(VirtualHost).get(TARGET_ID)
+        host = session.get(VirtualHost, TARGET_ID)
         cfg = host.setting_map()
         cfg["waf_mode"] = mode
         if paranoia:
