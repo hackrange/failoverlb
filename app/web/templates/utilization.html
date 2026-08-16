@@ -87,7 +87,6 @@
 <script nonce="{{ csp_nonce }}">
 // Waits for app.js, which the layout loads after this block.
 document.addEventListener("DOMContentLoaded", function () {
- try {
 
   // Two lines is all this page ever draws at once, one per node, so the
   // palette is small on purpose.  Chosen to stay apart for the common kinds of
@@ -472,44 +471,7 @@ document.addEventListener("DOMContentLoaded", function () {
     }
 
     try {
-      let payload = await NFM.api(url);
-
-      // Fall back to what was written down when memory does not cover the
-      // window.  This is the restart case and it is the whole reason the
-      // history exists: the in memory samples start again from nothing when
-      // the manager restarts, so a minute after a restart the page was drawing
-      // one minute and announcing that it could not cover the hour asked for,
-      // while the hour sat on disk unread.
-      //
-      // Live is still preferred while it does cover the window, because its
-      // fifteen second samples are finer than the one minute buckets and that
-      // detail is exactly what somebody watching a deploy wants.
-      if (!stored) {
-        let oldest = Infinity;
-        const ns = payload.nodes || {};
-        Object.keys(ns).forEach(function (n) {
-          const s2 = ((ns[n] || {}).series || {}).cpu_percent || [];
-          if (s2.length) oldest = Math.min(oldest, s2[0].at);
-        });
-        const covered = oldest === Infinity
-          ? 0 : (Date.now() / 1000 - oldest) / 60;
-        if (covered < minutes * 0.8) {
-          const now = Math.floor(Date.now() / 1000);
-          try {
-            const fromDisk = await NFM.api(
-              "/metrics/history?start=" + (now - minutes * 60) + "&end=" + now);
-            let best = 0;
-            Object.keys(fromDisk.nodes || {}).forEach(function (n) {
-              const s3 = ((fromDisk.nodes[n] || {}).series || {}).cpu_percent || [];
-              if (s3.length) best = Math.max(best, s3.length);
-            });
-            // Only swap when the disk genuinely has more to say, so a fresh
-            // install does not trade a short live chart for an empty one.
-            if (best > 1) payload = fromDisk;
-          } catch (err) { /* keep the live payload */ }
-        }
-      }
-
+      const payload = await NFM.api(url);
       draw(payload);
       const note = el("drawn-range");
       if (note) {
@@ -575,84 +537,36 @@ document.addEventListener("DOMContentLoaded", function () {
   // seeing that a request rate spike and a memory climb happened at the same
   // moment, and that comparison is destroyed the instant each chart carries its
   // own window.
-  //
-  // **Nothing here holds on to the SVG it started on.**  The first version kept
-  // the rect from mousedown and measured it again at mouseup, and the fifteen
-  // second refresh replaces every chart, so a drag that spanned a refresh was
-  // measuring a node that had been thrown away: getBoundingClientRect on a
-  // detached element returns zeros, the arithmetic came out NaN, and the guard
-  // below rejected it without a word.  It looked like the drag did nothing,
-  // which is exactly what it did.
-  //
-  // So the numbers are read once, at mousedown, and the refresh is held off
-  // while a drag is in progress.
-  let dragging = null;
-
   (function dragToZoom() {
     const area = el("charts");
     if (!area) return;
+    let dragging = null;
 
-    function timeAt(clientX) {
-      const frac = Math.max(0, Math.min(1,
-        (clientX - dragging.left) / dragging.width));
-      return dragging.from + frac * (dragging.to - dragging.from);
-    }
-
-    function marker() {
-      let box = document.getElementById("zoom-marker");
-      if (!box) {
-        box = document.createElement("div");
-        box.id = "zoom-marker";
-        document.body.appendChild(box);
-      }
-      return box;
+    function atFrom(ev, hit) {
+      const box = hit.getBoundingClientRect();
+      const frac = Math.max(0, Math.min(1, (ev.clientX - box.left) / box.width));
+      const from = parseFloat(hit.dataset.from), to = parseFloat(hit.dataset.to);
+      return from + frac * (to - from);
     }
 
     area.addEventListener("mousedown", function (ev) {
       const hit = ev.target.closest(".hit");
       if (!hit) return;
-      const box = hit.getBoundingClientRect();
-      if (!box.width) return;
-      dragging = {
-        left: box.left, width: box.width,
-        top: box.top, height: box.height,
-        from: parseFloat(hit.dataset.from),
-        to: parseFloat(hit.dataset.to),
-        startX: ev.clientX,
-      };
-      dragging.start = timeAt(ev.clientX);
+      dragging = { hit: hit, start: atFrom(ev, hit) };
       ev.preventDefault();
-    });
-
-    // The selection, drawn while the pointer moves.  Without it there is no
-    // sign anything is happening, and a control that gives no feedback is one
-    // people conclude is broken before it has had a chance to work.
-    window.addEventListener("mousemove", function (ev) {
-      if (!dragging) return;
-      const box = marker();
-      const a = Math.min(dragging.startX, ev.clientX);
-      const b = Math.max(dragging.startX, ev.clientX);
-      box.style.display = "block";
-      box.style.left = a + "px";
-      box.style.width = (b - a) + "px";
-      box.style.top = dragging.top + window.scrollY + "px";
-      box.style.height = dragging.height + "px";
     });
 
     window.addEventListener("mouseup", function (ev) {
       if (!dragging) return;
-      const end = timeAt(ev.clientX);
-      const from = Math.min(dragging.start, end);
-      const to = Math.max(dragging.start, end);
+      const end = atFrom(ev, dragging.hit);
+      const from = Math.min(dragging.start, end), to = Math.max(dragging.start, end);
       dragging = null;
-      const box = document.getElementById("zoom-marker");
-      if (box) box.style.display = "none";
 
       // A click is a drag of nothing.  Below a minute there is no finer data to
       // fetch, so zooming in would magnify one bucket rather than reveal
       // anything, and the reset would be the only way out of a chart showing a
       // single point.
-      if (!isFinite(from) || !isFinite(to) || !(to - from > 60)) return;
+      if (!(to - from > 60)) return;
 
       zoom = { from: from, to: to };
       load();
@@ -664,27 +578,7 @@ document.addEventListener("DOMContentLoaded", function () {
   // Only keep refreshing while looking at the present.  A zoomed range is a
   // fixed window somebody is reading, and refetching it every fifteen seconds
   // redraws the same picture and fights the pointer.
-  setInterval(function () { if (!zoom && !dragging) load(); }, 15000);
-
- } catch (err) {
-   // Say what went wrong, in the page.
-   //
-   // Everything on this page is drawn by this one handler, so anything that
-   // throws leaves an empty page and nothing else: no charts, no tiles, no
-   // message.  That is indistinguishable from "there is no data", which sent
-   // three rounds of looking in the wrong place.  An error somebody can read
-   // and quote is worth more than a tidy blank page.
-   var box = document.getElementById("charts");
-   if (box) {
-     box.innerHTML = '<div class="notice bad"><div><strong>' +
-       "This page could not draw.</strong><br>" +
-       String(err && err.message ? err.message : err) +
-       "<br><span class='small faint'>" +
-       String((err && err.stack ? err.stack : "")).split("\n").slice(0, 3).join(" ") +
-       "</span></div></div>";
-   }
-   throw err;
- }
+  setInterval(function () { if (!zoom) load(); }, 15000);
 });
 </script>
 
