@@ -338,8 +338,13 @@ document.addEventListener("DOMContentLoaded", function () {
     }, 3000);
   }
 
-  // How many workloads it takes before a search box earns its place.
-  const SEARCH_FROM = 4;
+  // The search is always there.
+  //
+  // It was gated to four workloads on the grounds that a search box above
+  // three rows is furniture.  That was wrong in the way that matters: the
+  // owner went looking for it with two and could not find it, and a control
+  // nobody can find is worse than one that is occasionally unnecessary.
+  const SEARCH_FROM = 0;
 
   function drawWorkloads() {
     const all = STATE.peers || [];
@@ -354,7 +359,7 @@ document.addEventListener("DOMContentLoaded", function () {
 
     el("wl-count").textContent = all.length === 1 ? "1 workload"
                                                   : all.length + " workloads";
-    el("wl-search-row").hidden = all.length < SEARCH_FROM;
+    el("wl-search-row").hidden = all.length <= SEARCH_FROM;
 
     const term = (el("wl-search").value || "").trim().toLowerCase();
     const rows = !term ? all : all.filter(function (p) {
@@ -380,6 +385,16 @@ document.addEventListener("DOMContentLoaded", function () {
         '<span class="dot ' + state + '"></span><strong>' + esc(p.name) + "</strong> " +
         '<span class="mono small faint">' + esc(p.address) + "</span>" +
         '<div class="small faint">' + words + "</div>" +
+        // What breaks if this goes away.  Sites rather than pools, because a
+        // pool nothing serves from breaks nothing and that is not the question
+        // anybody is asking before they press Remove.
+        (function () {
+          const sites = p.sites_using || [];
+          if (!sites.length) return '<div class="small faint">no sites use it</div>';
+          return '<div class="small"><span class="badge ok">' + sites.length +
+            (sites.length === 1 ? " site" : " sites") + "</span> " +
+            '<span class="faint">' + esc(sites.join(", ")) + "</span></div>";
+        })() +
         (p.description ? "<div class='small faint'>" + esc(p.description) + "</div>" : "") +
         "</div><div>" +
         (CAN_EDIT && !p.enrolled

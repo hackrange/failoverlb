@@ -57,11 +57,17 @@ CAPABILITIES = [
         "key": "least_time",
         "label": "Least time balancing",
         "category": "Load balancing",
-        "plus": 5, "lb": 3,
-        "note": "Plus picks the backend answering fastest right now.  We use "
-                "least connections, which tracks response time closely in "
-                "practice because a slow server piles up connections, but it "
-                "is a proxy for the measurement rather than the measurement.",
+        "plus": 5, "lb": 4,
+        "note": "Also understated until the code was read.  Plus picks the "
+                "fastest backend per request.  We time every health check "
+                "already, so a pool can be set to lean weights toward the "
+                "quicker boxes, with two rails: weights move one step at a "
+                "time between a floor and a ceiling so one slow check cannot "
+                "pull a server out, and if everything is slow it leaves them "
+                "alone, because that means the problem is downstream and "
+                "shuffling weights would pile load onto whichever box is least "
+                "broken.  Four, not five: ours reacts per check interval, "
+                "Plus per request.",
     },
     {
         "key": "sticky",
@@ -78,11 +84,17 @@ CAPABILITIES = [
         "key": "slow_start",
         "label": "Slow start after recovery",
         "category": "Load balancing",
-        "plus": 5, "lb": 2,
-        "note": "Plus eases traffic back onto a server that just came back.  "
-                "We have no equivalent: the working method is to return the "
-                "backend at a low weight and raise it once it is warm, which "
-                "is two deliberate steps by a person.",
+        "plus": 5, "lb": 4,
+        "note": "This row said two until somebody read the code.  It is built "
+                "and has been for a while: turn it on for a pool, and a member "
+                "that comes back returns at weight 1 and climbs to its real "
+                "weight in five steps over a window you choose.  The reason it "
+                "matters is a JVM with a cold JIT and an empty connection pool "
+                "being handed a third of the traffic the instant it answers a "
+                "health check, falling over again, and flapping — which is "
+                "worse than it having stayed down.  Four rather than five "
+                "because each step is a reload, where Plus ramps inside the "
+                "worker.",
     },
     {
         "key": "queueing",

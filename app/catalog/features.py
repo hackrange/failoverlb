@@ -2935,6 +2935,51 @@ register(
     ),
 
     Feature(
+        key="http3_enabled",
+        label="HTTP/3 (QUIC)",
+        category="tls",
+        directive="",
+        contexts=("server",),
+        type="bool",
+        default=False,
+        module="http_v3_module",
+        help=HelpText(
+            summary="Offer HTTP/3 over QUIC as well as HTTP/2, on the same port.",
+            detail=(
+                "QUIC runs over UDP rather than TCP, which removes a round trip "
+                "from the handshake and stops one lost packet stalling every "
+                "stream on the connection.  On a slow or lossy network that is "
+                "the difference people actually notice.\n\n"
+                "Nothing is taken away by turning it on.  A browser still "
+                "connects over TCP first and only moves to QUIC because the "
+                "response advertised it, so anything that cannot speak HTTP/3 "
+                "carries on exactly as before.\n\n"
+                "It matters here for a second reason.  The post quantum key "
+                "exchange is a TLS 1.3 feature, and a QUIC handshake is TLS 1.3 "
+                "by definition, so this is the path where a captured handshake "
+                "is hardest to decrypt later."
+            ),
+            use_cases=[
+                "A site with visitors on mobile networks",
+                "Anywhere latency matters more than throughput",
+            ],
+            example="on",
+            example_config=(
+                "listen 443 quic reuseport;\n"
+                "http3 on;\n"
+                "add_header Alt-Svc 'h3=\":443\"; ma=86400' always;"
+            ),
+            warning=(
+                "UDP on this port has to be open.  QUIC is UDP, and a firewall "
+                "that allows TCP 443 and nothing else will let the site keep "
+                "working over HTTP/2 while HTTP/3 silently never connects, "
+                "which looks like the setting doing nothing."
+            ),
+            docs_url=f"{D}/http/ngx_http_v3_module.html",
+        ),
+    ),
+
+    Feature(
         key="waf_mode",
         own_screen=True,
         label="WAF",

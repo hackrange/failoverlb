@@ -96,6 +96,40 @@ def _pools_pointing_at(p):
     return sorted(name for (name,) in rows)
 
 
+def _sites_using(p):
+    """
+    Which sites actually depend on this workload, by name.
+
+    Pools are the mechanism and sites are the thing people care about.  "Two
+    pools point at this" does not answer the question somebody is asking before
+    they remove it, which is always "what breaks".  A pool nothing serves from
+    breaks nothing; a pool behind three sites breaks three.
+
+    Counts the sites' own pools and their paths' pools, because a site with one
+    backend on the Basics tab and another on a path depends on both, and the
+    second is the one that gets forgotten.
+    """
+    from sqlalchemy.orm import object_session
+
+    from app.models import Location, PoolMember, VirtualHost
+
+    session = object_session(p)
+    if session is None or not p.address:
+        return []
+
+    pool_ids = {m.pool_id for m in session.query(PoolMember)
+                .filter(PoolMember.address == p.address).all()}
+    if not pool_ids:
+        return []
+
+    names = {h.name for h in session.query(VirtualHost)
+             .filter(VirtualHost.pool_id.in_(pool_ids)).all()}
+    for loc in session.query(Location).filter(Location.pool_id.in_(pool_ids)).all():
+        if loc.host:
+            names.add(loc.host.name)
+    return sorted(names)
+
+
 def _peer_json(p):
     return {
         "id": p.id,
@@ -108,6 +142,7 @@ def _peer_json(p):
         "waiting_for_enrolment": bool(p.enrol_token_hash and not p.public_key),
         "unenrol_command": UNENROL_COMMAND,
         "used_by": _pools_pointing_at(p),
+        "sites_using": _sites_using(p),
     }
 
 

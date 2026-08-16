@@ -334,6 +334,12 @@ class Renderer:
         # touches a row after the session that loaded it has closed, which this
         # project has already been bitten by once.
         self.waf_profiles = waf_profiles or []
+        # Which ports already have a QUIC listener carrying reuseport.  nginx
+        # refuses to start if two server blocks both ask for it on the same
+        # address and port, so the first site to want HTTP/3 on a port claims
+        # it and the rest do without.  Per render, because the whole config is
+        # written in one pass.
+        self._quic_ports = set()
         self.files = {}
 
     def has_module(self, module: str) -> bool:
@@ -1294,6 +1300,7 @@ map $cookie_{cookie} $sticky_set_{var} {{
         lines.append(f"    listen [::]:{host.https_port} ssl{http2}{default};")
         if host.http2 and use_new_http2:
             lines.append("    http2 on;")
+        lines.extend(self._http3_lines(cfg, host))
         lines.append(f"    server_name {names};")
         lines.append("")
 
@@ -1684,6 +1691,51 @@ map $cookie_{cookie} $sticky_set_{var} {{
                      f"$scheme$host$1;")
         lines.append(f"{pad}}}")
         return lines
+
+    def _http3_lines(self, cfg, host) -> list:
+        """
+        A QUIC listener for this site, and the header that advertises it.
+
+        HTTP/3 is not something a browser tries first.  It connects over TCP
+        like always, and only moves to QUIC because the response told it to
+        with an Alt-Svc header.  Write the listener without the header and
+        nothing ever uses it, which is the quiet failure worth naming: the
+        config is right, the port is open, and every request is still HTTP/2.
+
+        **reuseport goes on exactly one listener in the whole config.**  nginx
+        refuses to start with "duplicate listen options" if two server blocks
+        both ask for it on the same address and port, so a second site turning
+        HTTP/3 on would take the fleet's config down rather than just its own.
+        The first QUIC site in a render claims it and the rest do without,
+        which is all nginx wants: the option belongs to the socket, not to the
+        site.
+        """
+        if not cfg.get("http3_enabled"):
+            return []
+
+        # nginx will not parse a quic listener without the module, so this
+        # degrades to a comment rather than failing the apply for every site on
+        # the node.
+        if not self.has_module("http_v3_module"):
+            return [
+                "    # HTTP/3 is switched on for this site and this nginx was",
+                "    # built without the http_v3 module, so it cannot be written.",
+            ]
+
+        port = host.https_port or 443
+        first = port not in self._quic_ports
+        self._quic_ports.add(port)
+        reuseport = " reuseport" if first else ""
+
+        return [
+            f"    listen {port} quic{reuseport};",
+            f"    listen [::]:{port} quic;",
+            "    http3 on;",
+            # Without this a browser never tries QUIC at all.  always, so it is
+            # sent on error responses too, since a client that only ever sees a
+            # 404 should still learn the site speaks HTTP/3.
+            f"    add_header Alt-Svc 'h3=\":{port}\"; ma=86400' always;",
+        ]
 
     def _waf_lines(self, cfg, indent=4, name="site") -> list:
         """
