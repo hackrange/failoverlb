@@ -444,7 +444,11 @@ def restore_fleet(rows) -> int:
     if not rows:
         return 0
 
-    allowed = set(FLEET_KEYS)
+    # A set literal, not set().  This module defines its own `set` a hundred
+    # lines up, so the builtin is not the builtin in here.  The check caught
+    # this, which is the only reason it is not still sitting in the one code
+    # path that runs during a failover and nowhere else.
+    allowed = {*FLEET_KEYS}
     written = 0
     with session_scope() as session:
         for row in rows:
