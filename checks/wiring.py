@@ -230,6 +230,13 @@ NEEDS_A_DIFFERENT_SITE = {
     "autoindex": "only meaningful on a site serving files",
     "fancyindex": "only meaningful on a site serving files",
     "server_header_mode": "written into the http level file, not the site",
+    # The positive model refuses to write itself when the profile it points at
+    # has no allowed surface, because a default deny with nothing allowed
+    # refuses every request to the site.  So setting it alone correctly renders
+    # nothing, and proving it renders needs a profile with a surface in it,
+    # which is what checks/waf.py builds and asserts against real nginx.
+    "waf_positive": "renders nothing until the profile it points at has a "
+                    "surface, which checks/waf.py covers properly",
 }
 
 print("  every setting changes the config when it is set")
