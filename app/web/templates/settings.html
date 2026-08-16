@@ -206,7 +206,7 @@
       <div class="field" style="max-width:420px">
         <label for="geoip_license_key">MaxMind licence key</label>
         <input type="password" id="geoip_license_key" name="geoip_license_key"
-               placeholder="{{ 'set, leave blank to keep it' if values.geoip_license_key.set else 'from your MaxMind account' }}">
+               placeholder="{{ 'saved, leave blank to keep it' if values.geoip_license_key.is_set else 'from your MaxMind account' }}">
         <div class="hint">
           Stored encrypted and never sent back to this page.  Leave it blank to
           keep the one already saved.

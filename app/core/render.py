@@ -382,6 +382,16 @@ class Renderer:
                 + "    auto_reload 5m;\n"
                 + "    $nfm_geoip2_country country iso_code;\n"
                 + "}\n\n"
+                # While nginx is fetching one of our error pages the request is
+                # an internal redirect back through the server rewrite phase,
+                # so every site's country test would run a second time on the
+                # page meant to explain the first refusal.  This says so, and
+                # each site's map is keyed on it.
+                + "map $uri $nfm_geo_scope {\n"
+                + "    volatile;\n"
+                + "    default \"\";\n"
+                + f"    \"~^{error_pages.URI_PREFIX}/\" \"skip\";\n"
+                + "}\n\n"
                 + "\n".join(self._geo_maps))
 
         return self.files
@@ -1691,9 +1701,28 @@ map $cookie_{cookie} $sticky_set_{var} {{
             return lines
 
         var = f"nfm_geo_{_safe_var(name)}"
-        entries = ["    default 0;"] + [f"    {code} 1;" for code in codes]
+        # Keyed on the scope and the country together, not the country alone.
+        #
+        # A 403 with an error page on it is an internal redirect, and nginx
+        # restarts an internal request at the server rewrite phase, which is
+        # where this test lives.  So the error page request was tested again,
+        # refused again, and nginx, which will not recurse into an error page,
+        # gave up and served its own stock 403 instead of the site's template.
+        # Somebody with a template applied saw the plain nginx page and nothing
+        # in the log to say why.
+        #
+        # The scope map answers "skip" while nginx is fetching one of our error
+        # pages, so the key becomes skipCN, which matches nothing here and
+        # leaves the page to be served.  Cheaper than an if, and it cannot be
+        # got at from outside: the error locations are internal.
+        #
+        # volatile, or none of that works.  nginx remembers what a map came out
+        # as for the rest of the request, and the whole point here is that the
+        # answer has to be different the second time round.
+        entries = ["    volatile;", "    default 0;"] + [f"    {code} 1;" for code in codes]
         self._geo_maps.append(
-            f"map $nfm_geoip2_country ${var} {{\n" + "\n".join(entries) + "\n}\n")
+            f"map \"$nfm_geo_scope$nfm_geoip2_country\" ${var} {{\n"
+            + "\n".join(entries) + "\n}\n")
 
         lines.append(f"{pad}# Refused: {', '.join(codes)}.  A VPN defeats this in one")
         lines.append(f"{pad}# click, so it is for cutting scanner noise and meeting a")
