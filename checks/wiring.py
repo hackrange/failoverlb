@@ -203,9 +203,7 @@ PREREQUISITE = {
     "proxy_cache_min_uses": {"proxy_cache_zone": CACHE_ZONE},
     "proxy_cache_lock": {"proxy_cache_zone": CACHE_ZONE},
     "proxy_cache_background_update": {"proxy_cache_zone": CACHE_ZONE},
-    # The header saying whether a response came from cache is only written
-    # when there is a cache to come from.
-    "cache_status_header": {"proxy_cache_zone": CACHE_ZONE},
+
     "cache_status_header": {"proxy_cache": CACHE_ZONE},
 
     # Read out of the renderer the same way as the rest, by finding what it
@@ -246,6 +244,13 @@ NEEDS_A_DIFFERENT_SITE = {
     # which is what checks/waf.py builds and asserts against real nginx.
     "waf_positive": "renders nothing until the profile it points at has a "
                     "surface, which checks/waf.py covers properly",
+    # Everything cache related is written inside the proxy block, so on a site
+    # that serves its own files there is nowhere for it to go.  Proven wired by
+    # hand against a site with a cache zone: unset and on both write the
+    # header, off removes it.  The other cache settings only look wired here
+    # because their prerequisite happens to write a directive of its own.
+    "cache_status_header": "only written inside a proxy block, and the site "
+                           "this runs against does not proxy",
 }
 
 print("  every setting changes the config when it is set")
