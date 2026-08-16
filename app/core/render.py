@@ -2712,6 +2712,23 @@ map $cookie_{cookie} $sticky_set_{var} {{
                 text = emit(feature, value) if feature else esc(value)
                 lines.append(f"{pad}{key} {text};")
 
+        # Rewriting what the backend says about itself.  Both take two
+        # arguments, so they go through the same writer as a rewrite rule
+        # rather than being quoted whole, which would turn "/guacamole/ /" into
+        # a single nonsense argument.
+        #
+        # These only mean anything while proxying, which is why they are here
+        # rather than in the general settings pass.
+        for key in ("proxy_cookie_path", "proxy_redirect"):
+            value = (cfg.get(key) or "").strip()
+            if not value:
+                continue
+            try:
+                lines.append(f"{pad}{key} {directive_args(value, key)};")
+            except ValueError as exc:
+                log.warning("dropping %s: %s", key, exc)
+                lines.append(f"{pad}# {key} left out, {exc}")
+
         for key in ("proxy_buffering", "proxy_request_buffering", "proxy_intercept_errors",
                     "proxy_ssl_verify", "proxy_ssl_server_name"):
             # The pool already settled the two TLS ones, and writing them twice
