@@ -219,6 +219,99 @@ def check_totp(user: User, code: str) -> bool:
     return _consume_recovery_code(user, code)
 
 
+# Logins that have passed the password and not yet the code.
+#
+# The second stage used to carry the password back through the browser in a
+# hidden field and post it again with the code.  Autoescaping meant that was
+# not an injection point, but it put the credential in the page's DOM and in
+# the tab's history for the length of the login, and sent it twice instead of
+# once.  A credential that only needs to exist for one request should not
+# outlive it.
+#
+# In memory rather than in the database, because it is worth nothing after a
+# few minutes and there is no reason to write a half authenticated state to
+# disk.  A restart loses it, which costs somebody one retype.
+_HALF_AUTH = {}
+_HALF_AUTH_SECONDS = 300
+
+
+def begin_totp(user: User, source_ip: str = None) -> str:
+    """
+    Remember that this account got its password right, and hand back a ticket.
+
+    Bound to the address it was issued to.  A ticket that works from anywhere
+    would be a password equivalent for five minutes, which is most of what this
+    change was meant to remove.
+    """
+    _expire_half_auth()
+    token = new_token(32)
+    _HALF_AUTH[token] = {
+        "user_id": user.id,
+        "expires": time.time() + _HALF_AUTH_SECONDS,
+        "source_ip": source_ip,
+    }
+    return token
+
+
+def resume_totp(session, token: str, code: str, source_ip: str = None):
+    """
+    Finish a login that already got the password right.
+
+    Runs the same checks the one shot path does, in the same order and against
+    the same counter, so nothing is weaker for having been split in two: the
+    account has to still exist, still be enabled and not be locked, and a wrong
+    code still climbs toward the lockout.
+
+    The ticket survives a wrong code on purpose.  Burning it would mean typing
+    the password again after every mistyped digit, and the lockout already
+    bounds how many guesses anybody gets.  It is burned the moment one works.
+    """
+    _expire_half_auth()
+    generic = "that sign in attempt expired, start again"
+
+    entry = _HALF_AUTH.get(token or "")
+    if not entry:
+        return AuthResult(False, reason=generic)
+    if entry["source_ip"] and source_ip and entry["source_ip"] != source_ip:
+        log.warning("a half finished login was resumed from %s, issued to %s",
+                    source_ip, entry["source_ip"])
+        _HALF_AUTH.pop(token, None)
+        return AuthResult(False, reason=generic)
+
+    user = session.query(User).filter(User.id == entry["user_id"]).first()
+    if not user or not user.enabled:
+        _HALF_AUTH.pop(token, None)
+        return AuthResult(False, reason=generic)
+
+    if user.is_locked:
+        return AuthResult(
+            False,
+            reason=f"that account is locked until {user.locked_until:%H:%M UTC} "
+                   f"after too many bad attempts",
+        )
+
+    if not check_totp(user, code):
+        user.failed_attempts = (user.failed_attempts or 0) + 1
+        if user.failed_attempts >= get_settings().max_login_attempts:
+            user.locked_until = utcnow() + timedelta(
+                minutes=get_settings().lockout_minutes)
+        return AuthResult(False, reason="that code is not right",
+                          needs_totp=True)
+
+    _HALF_AUTH.pop(token, None)
+    user.failed_attempts = 0
+    user.locked_until = None
+    user.last_login_at = utcnow()
+    user.last_login_ip = source_ip
+    return AuthResult(True, user=user)
+
+
+def _expire_half_auth():
+    now = time.time()
+    for token in [t for t, e in _HALF_AUTH.items() if e["expires"] < now]:
+        _HALF_AUTH.pop(token, None)
+
+
 def _consume_recovery_code(user: User, code: str) -> bool:
     try:
         stored = json.loads(user.recovery_codes or "[]")

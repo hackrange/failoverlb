@@ -722,10 +722,14 @@ def _profile_users(session, name):
 
 
 @router.get("/waf/sessions/{host_id}")
-async def waf_session_state(host_id: int, request: Request,
-                            db: DBSession = Depends(get_db)):
+async def waf_session_state(host_id: int, g: ObjectGuard = Depends(guard)):
     """The learning sessions for one site, newest first."""
-    get_user(request, db)
+    # Through the guard, which checks the permission and answers 404 rather
+    # than 403, so an id cannot be probed for existence.  This used to fetch
+    # the row itself behind get_user, which only asks whether somebody is
+    # signed in.
+    g.get(VirtualHost, host_id)
+    db = g.session
 
     rows = (db.query(WafSession).filter(WafSession.host_id == host_id)
             .order_by(WafSession.started_at.desc()).limit(20).all())
@@ -848,10 +852,9 @@ async def waf_session_stop(session_id: int, request: Request,
 
 
 @router.get("/waf/hits/{host_id}")
-async def waf_hits_for_host(host_id: int, request: Request,
-                            addresses: str = "", since: float = None,
-                            until: float = None,
-                            db: DBSession = Depends(get_db)):
+async def waf_hits_for_host(host_id: int, addresses: str = "",
+                            since: float = None, until: float = None,
+                            g: ObjectGuard = Depends(guard)):
     """
     What fired for one site, split into what a tester produced and what did not.
 
@@ -861,11 +864,7 @@ async def waf_hits_for_host(host_id: int, request: Request,
     """
     from app.core import waf_hits as hits_mod
 
-    get_user(request, db)
-    host = db.get(VirtualHost, host_id)
-    if not host:
-        raise HTTPException(status_code=404, detail="no such site")
-
+    host = g.get(VirtualHost, host_id)
     found = await hits_mod.fleet_hits(host.name, since=since, until=until)
     networks, bad = hits_mod.parse_addresses(addresses)
     split = hits_mod.split_by_tester(found["groups"], networks)
@@ -876,15 +875,11 @@ async def waf_hits_for_host(host_id: int, request: Request,
 
 
 @router.get("/login-watch/{host_id}")
-async def login_watch_get(host_id: int, request: Request,
-                          db: DBSession = Depends(get_db)):
+async def login_watch_get(host_id: int, g: ObjectGuard = Depends(guard)):
     """The login watch settings for one site, and what they would find now."""
-    get_user(request, db)
-    host = db.get(VirtualHost, host_id)
-    if not host:
-        raise HTTPException(status_code=404, detail="no such site")
-
-    watch = db.query(LoginWatch).filter(LoginWatch.host_id == host_id).first()
+    host = g.get(VirtualHost, host_id)
+    watch = g.session.query(LoginWatch).filter(
+        LoginWatch.host_id == host_id).first()
     return {"site": host.name, "watch": _login_watch_json(watch)}
 
 
@@ -998,8 +993,7 @@ async def login_watch_save(host_id: int, request: Request,
 
 
 @router.get("/login-watch/{host_id}/findings")
-async def login_watch_findings(host_id: int, request: Request,
-                               db: DBSession = Depends(get_db)):
+async def login_watch_findings(host_id: int, g: ObjectGuard = Depends(guard)):
     """
     What the log says right now, over both windows.
 
@@ -1012,12 +1006,9 @@ async def login_watch_findings(host_id: int, request: Request,
 
     from app.core import login_watch as watch_mod
 
-    get_user(request, db)
-    host = db.get(VirtualHost, host_id)
-    if not host:
-        raise HTTPException(status_code=404, detail="no such site")
-
-    watch = db.query(LoginWatch).filter(LoginWatch.host_id == host_id).first()
+    host = g.get(VirtualHost, host_id)
+    watch = g.session.query(LoginWatch).filter(
+        LoginWatch.host_id == host_id).first()
     if watch is None or not watch.path_list():
         return {"site": host.name, "configured": False, "windows": []}
 
@@ -1047,10 +1038,9 @@ async def login_watch_findings(host_id: int, request: Request,
 
 
 @router.get("/waf/surface/{host_id}")
-async def waf_surface_for_host(host_id: int, request: Request,
-                               addresses: str = "", since: float = None,
-                               until: float = None,
-                               db: DBSession = Depends(get_db)):
+async def waf_surface_for_host(host_id: int, addresses: str = "",
+                               since: float = None, until: float = None,
+                               g: ObjectGuard = Depends(guard)):
     """
     The application's own shape, split by who produced it.
 
@@ -1062,11 +1052,7 @@ async def waf_surface_for_host(host_id: int, request: Request,
     """
     from app.core import waf_hits as hits_mod
 
-    get_user(request, db)
-    host = db.get(VirtualHost, host_id)
-    if not host:
-        raise HTTPException(status_code=404, detail="no such site")
-
+    host = g.get(VirtualHost, host_id)
     found = await hits_mod.fleet_surface(host.name, since=since, until=until)
     networks, bad = hits_mod.parse_addresses(addresses)
     split = hits_mod.split_surface_by_tester(found["entries"], networks)
@@ -1384,8 +1370,19 @@ async def oidc_test(request: Request, g: ObjectGuard = Depends(changing)):
                             detail="save a discovery URL first, then test it")
 
     try:
-        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+        # Redirects are not followed.  This reflects what it fetched back to
+        # the caller, so following one turns any open redirect on a permitted
+        # host into a way to reach one that is not.  Reporting the redirect is
+        # also more useful to whoever is configuring the provider than quietly
+        # following it and describing somewhere else.
+        async with httpx.AsyncClient(timeout=15, follow_redirects=False) as client:
             response = await client.get(url)
+            if response.is_redirect:
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"that address redirects to "
+                           f"{response.headers.get('location', 'somewhere else')}.  "
+                           f"Put the address it ends at in the box instead.")
             response.raise_for_status()
             doc = response.json()
     except Exception as exc:
@@ -2795,6 +2792,21 @@ def _validate_pool_settings(raw) -> dict:
                             "http://{host}:9100/metrics"))
             if len(text) > 300:
                 raise HTTPException(status_code=400, detail="that URL is too long")
+
+            # Where it points, as well as what scheme it uses.  The manager
+            # fetches this on a timer from a load balancer, so an address only
+            # it can reach is a request forgery primitive rather than a metrics
+            # endpoint.
+            #
+            # Only checkable here when the host is written out.  A template
+            # using {host} becomes a different address per member, so that case
+            # is checked again where the URL is actually built, in metrics.py.
+            from app.core.exporters import unsafe_fetch_target
+
+            bad_target = unsafe_fetch_target(text)
+            if bad_target:
+                raise HTTPException(status_code=400, detail=bad_target)
+
             cleaned[key] = text
         else:
             text = str(value)

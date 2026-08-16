@@ -354,6 +354,16 @@ class MetricsCollector:
                                      follow_redirects=False) as client:
             for pool_name, label, url in wanted:
                 history = self._member(pool_name, label)
+
+                # Checked again here, because a template using {host} is only a
+                # real address once a member's address has been put in it.  The
+                # save time check cannot see that, so a backend whose address is
+                # loopback would otherwise reach this untouched.
+                bad = exporters.unsafe_fetch_target(url)
+                if bad:
+                    history.error = bad
+                    continue
+
                 try:
                     response = await client.get(url)
                     if response.status_code != 200:

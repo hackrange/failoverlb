@@ -30,15 +30,21 @@
     {% endif %}
 
     {% if stage == 'totp' %}
-      {# Second stage.  The password already checked out, so we carry it
-         through in hidden fields rather than making them type it again. #}
+      {# Second stage.  The password already checked out, and what is carried
+         forward is a ticket that says so rather than the password itself. #}
       <form method="post" action="{{ base }}/auth/login">
         {# Posted back with the form and compared against the cookie.  A form on
            somebody else's site can carry your cookie but cannot read it to fill
            this in, which is what stops a cross site post. #}
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <input type="hidden" name="username" value="{{ username }}">
-        <input type="hidden" name="password" value="{{ password }}">
+        {# A ticket, not the password.
+           The password used to be carried back through the browser here and
+           posted a second time.  Autoescaping meant it was never an injection
+           point, but it sat in the page's DOM and in the tab's history for the
+           length of the login.  This stands for "this address got the password
+           right a moment ago", expires in five minutes, is bound to the address
+           it was issued to, and is thrown away the moment a code works. #}
+        <input type="hidden" name="half" value="{{ half }}">
 
         <div class="field">
           <label for="totp">Code from your authenticator app</label>

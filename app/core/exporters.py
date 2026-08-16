@@ -192,6 +192,61 @@ def cpu_percent(older: dict, newer: dict, cpu_count: int = None):
     return None
 
 
+def unsafe_fetch_target(url: str) -> str:
+    """
+    Why this URL should not be fetched by the manager, or empty when it may be.
+
+    The manager runs on a load balancer, which is one of the best connected
+    hosts on the network, so anything that makes it fetch a URL somebody typed
+    is a request forgery primitive.  The scheme is already restricted where
+    these are saved, which closes file: and gopher: and is the important half.
+    This closes the other half: where it may point.
+
+    Refused are the addresses that are only ever interesting to an attacker.
+    Loopback and link local, because 169.254.169.254 is the cloud metadata
+    service and 127.0.0.1 is every service that thought it was private.
+    Multicast and unspecified, because nothing legitimate is there.
+
+    **Private ranges are allowed on purpose.**  A backend exporter on
+    10.0.0.0/8 is the ordinary case and the whole reason the setting exists,
+    so refusing RFC1918 would break the feature to close a hole that is mostly
+    already inside the trust boundary.  The line is drawn at the addresses that
+    reach *this* machine or its metadata rather than at private space in
+    general.
+
+    A name is left alone.  Resolving it here and checking the answer invites
+    the rebind: the name resolves to something allowed now and to loopback when
+    the fetch happens a moment later.  The honest answer is that a name cannot
+    be checked at save time, so this checks what it can and the caller keeps
+    redirects switched off.
+    """
+    import ipaddress
+    from urllib.parse import urlsplit
+
+    try:
+        host = urlsplit(str(url or "")).hostname
+    except ValueError:
+        return "that is not a URL we can read"
+    if not host:
+        return ""
+
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return ""            # a name, see above
+
+    if address.is_loopback:
+        return (f"{address} is this machine.  Pointing the manager at its own "
+                f"loopback is how an internal service ends up readable from a "
+                f"settings box.")
+    if address.is_link_local:
+        return (f"{address} is link local, which is where cloud instance "
+                f"metadata lives.  That is not somewhere this should reach.")
+    if address.is_multicast or address.is_unspecified or address.is_reserved:
+        return f"{address} is not an address anything legitimate answers on"
+    return ""
+
+
 def build_url(template: str, address: str, port: int = None) -> str:
     """
     Turn a per pool template into the URL for one member.

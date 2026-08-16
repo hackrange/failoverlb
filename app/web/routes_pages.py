@@ -21,12 +21,14 @@ from app.auth import oidc
 from app.core import settings_store
 from app.auth.service import (
     authenticate_local,
+    begin_totp,
     can,
     create_session,
     current_user,
     enroll_totp,
     hash_password,
     password_problems,
+    resume_totp,
     revoke_session,
     save_totp,
 )
@@ -229,19 +231,66 @@ async def login_page(request: Request, db: DBSession = Depends(get_db),
     return response
 
 
+def _totp_page(request: Request, half: str, error: str = None):
+    """
+    The second stage of signing in.
+
+    Carries a ticket rather than the password.  Same CSRF treatment as the
+    first stage: rendered into the page and set as the cookie, both the same
+    value.  Missing it here only affects people who already have an
+    authenticator, which is everybody from their second login onwards.
+    """
+    csrf = ensure_csrf_token(request)
+    response = templates.TemplateResponse(
+        request,
+        "login.html",
+        {
+            "stage": "totp",
+            "half": half,
+            "error": error,
+            "oidc_enabled": oidc.is_configured(),
+            "local_enabled": settings_store.local_passwords_allowed(),
+            "node_name": get_settings().node_name,
+            "csp_nonce": getattr(request.state, "csp_nonce", ""),
+            "base": get_settings().root_path.rstrip("/"),
+            "csrf_token": csrf,
+        },
+    )
+    issue_csrf_token(response, csrf)
+    return response
+
+
 @router.post("/auth/login", response_class=HTMLResponse)
 async def do_login(request: Request, db: DBSession = Depends(get_db),
-                   username: str = Form(...), password: str = Form(...),
-                   totp: str = Form(None)):
+                   username: str = Form(None), password: str = Form(None),
+                   totp: str = Form(None), half: str = Form(None)):
     await check_csrf(request)
     ip = client_ip(request)
 
-    result = authenticate_local(db, username.strip(), password, totp, ip)
+    # Two ways in here, and which one it is depends on whether the password has
+    # already been accepted.
+    #
+    # The second stage used to post the password again out of a hidden field.
+    # It now posts a ticket that stands for "this address got the password
+    # right a moment ago", so the credential leaves the browser after one
+    # request instead of living in the page for the length of the login.
+    if half:
+        result = resume_totp(db, half, totp, ip)
+        username = (result.user.username if result.user else username) or ""
+    else:
+        if not username or password is None:
+            raise HTTPException(status_code=400, detail="username and password please")
+        result = authenticate_local(db, username.strip(), password, totp, ip)
     db.commit()
 
     if not result.ok:
         audit.record("auth.login", user=username, source_ip=ip,
                      result="failed", detail=result.reason)
+        if result.needs_totp and half:
+            # Still on the second stage, so keep the ticket on the form.  The
+            # alternative is retyping the password after every mistyped digit,
+            # and the lockout already bounds how many guesses anybody gets.
+            return _totp_page(request, half, error=result.reason)
         return await login_page(
             request, db,
             error=result.reason,
@@ -272,24 +321,7 @@ async def do_login(request: Request, db: DBSession = Depends(get_db),
         # value.  Miss it here and only people who already have an authenticator
         # set up are affected, which is everybody from their second login
         # onwards.
-        csrf = ensure_csrf_token(request)
-        response = templates.TemplateResponse(
-            request,
-            "login.html",
-            {
-                "stage": "totp",
-                "username": username,
-                "password": password,
-                "oidc_enabled": oidc.is_configured(),
-                "local_enabled": settings_store.local_passwords_allowed(),
-                "node_name": get_settings().node_name,
-                "csp_nonce": getattr(request.state, "csp_nonce", ""),
-                "base": get_settings().root_path.rstrip("/"),
-                "csrf_token": csrf,
-            },
-        )
-        issue_csrf_token(response, csrf)
-        return response
+        return _totp_page(request, begin_totp(result.user, ip))
 
     token = create_session(db, result.user, ip, request.headers.get("user-agent"))
     db.commit()

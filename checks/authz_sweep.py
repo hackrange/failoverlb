@@ -17,6 +17,7 @@ moment somebody uses the GUI.
 
     docker exec -i nginx-fleet-manager python < checks/authz_sweep.py
 """
+import pathlib
 import sys
 
 from fastapi.testclient import TestClient
@@ -152,6 +153,69 @@ def main():
               f"a forged token was accepted: {response.text[:160]}")
 
     print()
+    # -----------------------------------------------------------------------
+    # Nothing fetches a row by id outside the guard
+    #
+    # ObjectGuard is this project's answer to BOLA, and its whole value is
+    # being the only way in.  Its docstring says so: "There is no path where a
+    # route fetches a row itself and forgets the check, because routes do not
+    # have a way to fetch rows by id at all."
+    #
+    # That was a claim rather than a fact, and by the time the security review
+    # looked, five endpoints had gone around it.  Each took a host id from the
+    # URL and fetched the row behind get_user(), which establishes that
+    # somebody is signed in and nothing else, so the view permission was never
+    # checked and the 404 rather than 403 behaviour was lost with it.  Nothing
+    # noticed, because a route that skips the guard looks exactly like one that
+    # uses it.
+    #
+    # So the claim is enforced here instead.  The allowed exceptions are named
+    # and each one has a reason; anything else is a finding.
+    print()
+    print("  the object guard is the only way to a row by id")
+
+    import re as _re
+
+    # Legitimate, and why.
+    ALLOWED = {
+        # Administering an account is not an object lookup in the guard's
+        # sense: these check can(actor, "manage_users") themselves, on the line
+        # before, and the object they fetch is the account being administered.
+        ("routes_account.py", "User"),
+        # Not a route.  Building the renderer's input, looking a host up by a
+        # foreign key it already read from another row.
+        ("routes_api.py", "VirtualHost.row"),
+        # Not a route either.  Looping over peer ids this function enumerated
+        # itself a few lines earlier.
+        ("routes_api.py", "Node.peer"),
+    }
+
+    LOOKUP = _re.compile(
+        r"(?:db|session)\.get\(\s*(\w+)|\.filter\(\s*(\w+)\.id\s*==")
+
+    stray = []
+    for path in sorted(pathlib.Path("app/web").glob("*.py")):
+        if path.name == "security.py":
+            continue                      # where the guard itself lives
+        for n, line in enumerate(path.read_text().split("\n"), 1):
+            if "g.get(" in line or "g.session" in line:
+                continue
+            m = LOOKUP.search(line)
+            if not m:
+                continue
+            model = m.group(1) or m.group(2)
+            keys = {(path.name, model), (path.name, f"{model}.row"),
+                    (path.name, f"{model}.peer")}
+            if keys & ALLOWED:
+                continue
+            stray.append(f"{path.name}:{n} fetches {model} by id")
+
+    check("no route fetches a row by id without going through ObjectGuard",
+          not stray,
+          "the guard checks the permission and answers 404 rather than 403 so "
+          "ids cannot be probed.  A route that goes around it has neither: "
+          + "; ".join(stray))
+
     failed = [name for name, ok, _ in results if not ok]
     print(f"  {len(results) - len(failed)} of {len(results)} were refused as they should be")
     # Every permission a route asks for has to be one that exists.
