@@ -280,8 +280,16 @@ CAPABILITIES = [
         "label": "Allow and deny lists, basic auth",
         "category": "Security",
         "plus": 5, "lb": 5,
-        "note": "Free nginx.  Ours are reusable objects attached to sites "
-                "rather than lines repeated per server block.",
+        "note": "Free nginx, and equal on capability, which is why this stays "
+                "five and five however tempting the alternative is.  allow and "
+                "deny per location is plain nginx; both products have it.\n\n"
+                "Ours are reusable objects rather than lines repeated per "
+                "server block, and they attach to a single path as readily as "
+                "to a whole site, so locking a login page to nine addresses is "
+                "a list and a tick.  That is a real difference and it is "
+                "already counted, one row down, as managing the thing from a "
+                "browser.  Counting it twice is how a table written by one of "
+                "the two products stops being worth reading.",
     },
     {
         "key": "admin_security",
@@ -309,11 +317,18 @@ CAPABILITIES = [
         "key": "utilization",
         "label": "CPU, memory and load over time",
         "category": "Observability",
-        "plus": 2, "lb": 4,
+        "plus": 2, "lb": 5,
         "note": "Plus reports on nginx; the box it runs on is somebody else's "
-                "problem.  We chart both load balancers over time on their own "
-                "page.  Four rather than five because the history is a couple "
-                "of hours in memory and goes when the manager restarts.",
+                "problem, and its dashboard is the present tense.  We chart "
+                "both load balancers on their own page and now keep it: one "
+                "minute detail for 48 hours, five minute buckets for thirty "
+                "days, and drag across any chart to zoom every chart to that "
+                "range.  This was four while the history was two hours in "
+                "memory that went on restart, which was the whole of the "
+                "reason, so it is five now that reason is gone.  Every bucket "
+                "keeps min, mean and max, because a five minute average alone "
+                "is where a spike goes to die.  Measured on a real fleet at "
+                "27 MB for four nodes across both tiers.",
     },
     {
         "key": "backend_metrics",
@@ -429,10 +444,14 @@ CAPABILITIES = [
         "key": "http3",
         "label": "HTTP/3 and QUIC",
         "category": "Content and protocols",
-        "plus": 5, "lb": 4,
-        "note": "Free in nginx now.  Four because our installer does not turn "
-                "it on by default, so it is a build flag and a rebuild away "
-                "rather than already there.",
+        "plus": 5, "lb": 5,
+        "note": "Free in nginx now, and no longer a rebuild away: the installer "
+                "builds it by default against the OpenSSL 3.5 it already pins, "
+                "and a site turns it on from its own settings.  Four while the "
+                "flag was missing, which was the whole of the reason.  Worth "
+                "more here than the version number suggests, because a QUIC "
+                "handshake is TLS 1.3 by definition and is therefore where the "
+                "post quantum key exchange actually lands.",
     },
     {
         "key": "streaming",
