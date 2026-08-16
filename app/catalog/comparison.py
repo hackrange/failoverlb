@@ -365,11 +365,15 @@ CAPABILITIES = [
     {
         "key": "support",
         "label": "Somebody to call",
-        "category": "Operations",
+        "category": "Support",
         "plus": 5, "lb": 0,
-        "note": "The honest bottom of the table.  Plus comes with F5 support "
-                "and an SLA.  This is a project on a box.  If that matters "
-                "where you work, it matters more than most of the rows above.",
+        "note": "First row on the page, and the one we lose worst.  Plus comes "
+                "with F5 support and an SLA: a number to ring at three in the "
+                "morning and somebody contractually obliged to answer.  This is "
+                "a project on a box, and when it breaks the person fixing it is "
+                "you.  If that matters where you work it matters more than "
+                "every other row put together, and no amount of features below "
+                "changes it.",
     },
 
     # --------------------------------------------------------------- protocols
@@ -419,6 +423,11 @@ CAPABILITIES = [
 ]
 
 CATEGORIES = [
+    # Support goes first on purpose.  It is the row we lose worst, and a
+    # comparison written by one of the two products that buries its weakest
+    # answer near the bottom has told you something about itself before you
+    # reach any of the numbers.
+    "Support",
     "Load balancing",
     "Health and resilience",
     "TLS and certificates",
