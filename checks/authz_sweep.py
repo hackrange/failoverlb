@@ -234,7 +234,9 @@ def main():
     from app.config import get_settings as _settings
 
     prefix = _settings().root_path.rstrip("/")
-    burst = TestClient(create_gui_app(), base_url="https://testserver",
+    from app.main import create_gui_app as _make_app
+
+    burst = TestClient(_make_app(), base_url="https://testserver",
                        raise_server_exceptions=False)
     burst.get(prefix + "/login")
 
