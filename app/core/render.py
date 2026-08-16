@@ -2157,8 +2157,36 @@ map $cookie_{cookie} $sticky_set_{var} {{
         setting and the first real map both caused.
         """
         pad = " " * indent
+        rules = cfg.get("rewrite_rules") or []
+        if not rules:
+            return []
+
         lines = []
-        for rule in cfg.get("rewrite_rules") or []:
+
+        # Step around the certificate challenge, at server level only.
+        #
+        # nginx runs server level rewrites in the rewrite phase, which is
+        # before it picks a location.  So a rule like ^/(.*)$ /app/$1 rewrites
+        # /.well-known/acme-challenge/TOKEN into /app/.well-known/... and the
+        # ^~ location that serves the challenge never matches it any more.  The
+        # request then falls through to whatever else is there, which on a site
+        # blocking dotfiles is a 403.
+        #
+        # That is a very expensive way to find out.  Issuing a certificate
+        # fails with "Invalid response ... 403" and nothing in the site looks
+        # wrong, and worse, a site that already has a certificate keeps working
+        # until it silently fails to renew sixty days later, unattended, at
+        # whatever hour the timer runs.
+        #
+        # break here stops the rewrite module for this request only, so the
+        # rules below never see the challenge and everything else is untouched.
+        if indent == 4:
+            lines.append(f"{pad}# Keep the certificate challenge out of the rewrites below.")
+            lines.append(f"{pad}if ($request_uri ~ ^/\\.well-known/acme-challenge/) {{")
+            lines.append(f"{pad}    break;")
+            lines.append(f"{pad}}}")
+
+        for rule in rules:
             try:
                 lines.append(f"{pad}rewrite {directive_args(rule, 'rewrite rule')};")
             except ValueError as exc:
