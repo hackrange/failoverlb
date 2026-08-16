@@ -118,7 +118,18 @@ document.addEventListener("DOMContentLoaded", function () {
       const d = nodes[name] || {};
       const l = d.latest || {};
       const r = d.rates || {};
+
+      // Stored history hands back the last bucket in the range, which on a
+      // zoom into last Tuesday is last Tuesday's number.  Say so, or a tile
+      // reads as the present tense while somebody is looking at the past.
+      let when = "";
+      if (d.as_of && Date.now() / 1000 - d.as_of > 150) {
+        const t = new Date(d.as_of * 1000);
+        when = " at " + String(t.getHours()).padStart(2, "0") + ":" +
+               String(t.getMinutes()).padStart(2, "0");
+      }
       function tile(who, big, unit, sub) {
+        sub = (sub || "") + (big === null || big === undefined ? "" : when);
         return '<div class="util-tile"><div class="who">' +
           NFM.escapeHtml(who) + '</div><div class="big">' +
           (big === null || big === undefined

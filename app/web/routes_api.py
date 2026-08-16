@@ -894,7 +894,31 @@ async def metrics_history(request: Request, start: int = None, end: int = None,
                     "min": stat.get("min"),
                     "max": stat.get("max"),
                 })
-        nodes[node] = {"series": series}
+
+        # The tiles above the charts read `latest` and `rates`, not `series`.
+        #
+        # They were left out of this answer when it was written, so every
+        # window drawn from stored history showed three tiles reading "no data"
+        # while the charts underneath drew correctly.  It looked like CPU,
+        # memory and requests had stopped being collected, and it only looked
+        # right on the shortest window, which is the one served from memory.
+        #
+        # The numbers come from the last bucket in the range, so on a zoom into
+        # last Tuesday the tiles say what it was at the end of last Tuesday
+        # rather than what it is now.  `as_of` carries that timestamp so the
+        # page can say which, because a tile that reads as the present tense
+        # while somebody is looking at the past is the same bug wearing a
+        # different hat.
+        latest, rates, as_of = {}, {}, None
+        for key, points_for_key in series.items():
+            if not points_for_key:
+                continue
+            last = points_for_key[-1]
+            (rates if key.endswith("_per_sec") else latest)[key] = last["value"]
+            as_of = max(as_of or 0, last["at"] or 0)
+
+        nodes[node] = {"series": series, "latest": latest, "rates": rates,
+                       "as_of": as_of, "samples": len(points)}
 
     return {
         "nodes": nodes,
