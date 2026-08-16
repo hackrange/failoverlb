@@ -1427,7 +1427,16 @@ async def waf_rule_ids(request: Request, db: DBSession = Depends(get_db)):
     try:
         answer = await get_agent().call("crs_rule_ids")
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
+        # The only place here that hands an unclassified exception's text to a
+        # caller.  Everything else in this file catches a named type whose
+        # message was written for a person; this catches anything at all, so
+        # its text can carry absolute paths and internal state.  Logged in full
+        # and summarised out, the same way the agent already does it.
+        log.exception("could not read the rule ids from the agent")
+        raise HTTPException(
+            status_code=502,
+            detail=f"could not read the rule set from this node "
+                   f"({type(exc).__name__}).  The manager log has the detail.")
     return answer
 
 

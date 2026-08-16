@@ -216,6 +216,51 @@ def main():
           "ids cannot be probed.  A route that goes around it has neither: "
           + "; ".join(stray))
 
+    # -----------------------------------------------------------------------
+    # The login rate limiter actually fires
+    #
+    # It did not, for the life of this fleet.  The middleware compared the
+    # request path against "/auth/login" while the install is served under
+    # /lb, so the comparison never matched, the body never ran, and fourteen
+    # consecutive login attempts from one address were accepted.
+    #
+    # A middleware whose body never executes is indistinguishable from one that
+    # is working: no error, no log line, nothing to see.  So this asserts the
+    # refusal rather than the presence of the code, and it does it through a
+    # prefixed path, because the un-prefixed one worked the whole time.
+    print()
+    print("  the login rate limiter refuses a burst")
+
+    from app.config import get_settings as _settings
+
+    prefix = _settings().root_path.rstrip("/")
+    burst = TestClient(create_gui_app(), base_url="https://testserver",
+                       raise_server_exceptions=False)
+    burst.get(prefix + "/login")
+
+    seen = []
+    for _ in range(14):
+        token = burst.cookies.get("nfm_csrf") or ""
+        reply = burst.post(
+            prefix + "/auth/login",
+            data={"csrf_token": token,
+                  "username": "check-rate-limit-nobody",
+                  "password": "wrong"},
+            headers={"X-CSRF-Token": token},
+            follow_redirects=False)
+        seen.append(reply.status_code)
+
+    check("a burst of logins is refused before it gets far",
+          429 in seen,
+          f"fourteen attempts from one address and not one refusal: {seen}.  "
+          f"The prefix in use is {prefix!r}, and the usual cause is a path "
+          f"comparison that does not account for it.")
+    if 429 in seen:
+        check("and it refuses at roughly the configured ceiling",
+              seen.index(429) <= 11,
+              f"first refusal at attempt {seen.index(429) + 1}, which is later "
+              f"than the ten the middleware is configured for")
+
     failed = [name for name, ok, _ in results if not ok]
     print(f"  {len(results) - len(failed)} of {len(results)} were refused as they should be")
     # Every permission a route asks for has to be one that exists.

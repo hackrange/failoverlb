@@ -4,6 +4,26 @@
 # so a surprise version bump from a rebuild six months from now is not a thing
 # we want to chase down at 3am.  Bump these when you mean to, then rebuild and
 # run the smoke tests.
+#
+# Pinning without a review date is how a fleet ends up years behind on the
+# libraries that parse untrusted input, so the date is here and it is part of
+# the deal:
+#
+#     Last reviewed: 16 August 2026
+#     Review again:  quarterly, and immediately for an advisory in any of the
+#                    six below that touch untrusted input
+#
+# Those six, and why they are the ones to watch rather than the whole list:
+#
+#     starlette      every request goes through it
+#     fastapi        the same, one layer up
+#     Jinja2         renders every page, and the nginx config
+#     PyJWT          parses tokens an identity provider sends us
+#     cryptography   the cluster CA and every peer certificate
+#     SQLAlchemy     every query
+#
+# The bill of materials work in the plan will list these versions anyway, so
+# that is the natural place to hang the check.
 
 # Web framework and the server that runs it
 fastapi==0.115.6
