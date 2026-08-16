@@ -1372,7 +1372,7 @@ document.addEventListener("DOMContentLoaded", function () {
         <div class="grow">
           <strong class="mono">${NFM.escapeHtml(l.path)}</strong>
           <span class="small faint">${NFM.escapeHtml(MATCH_LABEL[l.match_type] || l.match_type)}
-          &middot; ${NFM.escapeHtml(describeTarget(l))}${l.enabled ? "" : " &middot; disabled"}${errorPageNote(l)}</span>
+          &middot; ${NFM.escapeHtml(describeTarget(l))}${l.enabled ? "" : " &middot; disabled"}${aclNote(l)}${errorPageNote(l)}</span>
         </div>
         <div class="flex">
           <button class="btn sm" data-edit-path="${l.id}">Edit</button>
@@ -1410,12 +1410,25 @@ document.addEventListener("DOMContentLoaded", function () {
     return " &middot; errors: " + NFM.escapeHtml(t ? t.name : "its own");
   }
 
+  // A path with its own access list, on the row rather than only inside the
+  // editor.  Who may reach something is the sort of fact that should be
+  // visible while scanning, not one you have to open each path to find, and a
+  // restriction nobody can see is one somebody removes by accident.
+  function aclNote(l) {
+    if (!l.access_list_id) { return ""; }
+    const a = ACLS.find(x => String(x.id) === String(l.access_list_id));
+    return ' &middot; <span class="badge warn">restricted</span> ' +
+           NFM.escapeHtml(a ? a.name : "an access list");
+  }
+
   function pathForm(l) {
     l = l || { match_type: "prefix", mode: "proxy", enabled: true, redirect_code: 301 };
     const poolOpts = POOLS.map((id, i) =>
       `<option value="${id}" ${l.pool_id === id ? "selected" : ""}>${NFM.escapeHtml(POOL_NAMES[i])}</option>`).join("");
     const errOpts = ERROR_TEMPLATES.map(t =>
       `<option value="${t.id}" ${l.error_page_template_id === t.id ? "selected" : ""}>${NFM.escapeHtml(t.name)}</option>`).join("");
+    const aclOpts = ACLS.map(a =>
+      `<option value="${a.id}" ${String(l.access_list_id) === String(a.id) ? "selected" : ""}>${NFM.escapeHtml(a.name)}</option>`).join("");
 
     // Worth saying, because nginx's own rule here surprises people and we work
     // around it: a location with any error_page of its own throws away every
@@ -1473,6 +1486,14 @@ document.addEventListener("DOMContentLoaded", function () {
           <option value="301" ${l.redirect_code === 301 ? "selected" : ""}>301 permanent</option>
           <option value="302" ${l.redirect_code === 302 ? "selected" : ""}>302 temporary</option>
         </select></div>
+      <div class="field"><label for="l-acl">Who may reach this path</label>
+        <select id="l-acl"><option value="">Anyone the site allows</option>${aclOpts}</select>
+        <div class="hint">
+          A list here <strong>replaces</strong> the site's rather than adding to
+          it, because nginx does not inherit allow and deny into a path that has
+          any of its own.  The management addresses go in either way, so
+          restricting a path cannot lock you out of the path itself.
+        </div></div>
       <div class="field"><label for="l-errorpage">Error pages for this path</label>
         <select id="l-errorpage"><option value="">Whatever the site uses</option>${errOpts}</select>
         <div class="hint">${errHint}</div></div>
@@ -1527,6 +1548,8 @@ document.addEventListener("DOMContentLoaded", function () {
     };
     const pool = v("l-pool");
     body.pool_id = pool ? parseInt(pool, 10) : null;
+    const lacl = v("l-acl");
+    body.access_list_id = lacl ? parseInt(lacl, 10) : null;
     const lerr = v("l-errorpage");
     body.error_page_template_id = lerr ? parseInt(lerr, 10) : null;
     body.document_root = v("l-root").trim() || null;
