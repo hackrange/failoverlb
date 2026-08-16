@@ -125,9 +125,9 @@
       the standby can sign people in the day it is promoted.
     </p>
 
-    <div class="field" style="max-width:560px">
+    <div class="field" style="max-width:420px">
       <label for="oidc_discovery_url">Discovery URL</label>
-      <input type="url" id="oidc_discovery_url" name="oidc_discovery_url"
+      <input type="text" id="oidc_discovery_url" name="oidc_discovery_url"
              value="{{ auth.values.oidc_discovery_url }}"
              placeholder="https://login.example.com/.well-known/openid-configuration">
       <div class="hint">
@@ -157,9 +157,9 @@
       </div>
     </div>
 
-    <div class="field" style="max-width:560px">
+    <div class="field" style="max-width:420px">
       <label for="oidc_redirect_base">Address the provider sends people back to</label>
-      <input type="url" id="oidc_redirect_base" name="oidc_redirect_base"
+      <input type="text" id="oidc_redirect_base" name="oidc_redirect_base"
              value="{{ auth.values.oidc_redirect_base }}"
              placeholder="https://{{ env.node_name }}{{ env.root_path or '' }}">
       <div class="hint">
