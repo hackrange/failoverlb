@@ -224,6 +224,61 @@ else:
           detail)
 
 
+# =============================================================================
+# A tuned profile, where the ordering fails silently
+# =============================================================================
+
+if not built:
+    skip("a custom profile renders and loads", "the module is not in this build")
+elif not crs.get("version"):
+    skip("a custom profile renders and loads", "no rule set is installed")
+else:
+    from app.models import WafExclusion, WafProfile
+
+    def with_profile(session):
+        profile = WafProfile(name="_check_probe", learned_from_site=TARGET_NAME)
+        session.add(profile)
+        session.flush()
+        session.add(WafExclusion(profile_id=profile.id, rule_id=942100,
+                                 path=None, message="site wide"))
+        session.add(WafExclusion(profile_id=profile.id, rule_id=930110,
+                                 path="/upload", message="one path"))
+        host = session.get(VirtualHost, TARGET_ID)
+        cfg = host.setting_map()
+        cfg["waf_mode"] = "block"
+        cfg["waf_paranoia"] = "custom:_check_probe"
+        host.settings = json_set(cfg)
+
+    profiled = rendered_with(with_profile)
+    text = profiled.get(TARGET_FILE, "")
+
+    include = text.find(f"Include {CRS_ROOT}/rules/")
+    remove = text.find("SecRuleRemoveById 942100")
+
+    # This is the assertion worth having.  SecRuleRemoveById is read while the
+    # config loads and needs the rule to exist already, so before the include
+    # it is a directive about nothing: no error, no warning, and the rule stays
+    # on.  The config tests clean and the site keeps refusing the traffic
+    # somebody thought they had allowed.
+    check("a site wide exclusion is written after the rules, where it works",
+          include != -1 and remove != -1 and remove > include,
+          f"include at {include}, removal at {remove}")
+
+    check("a path scoped exclusion is scoped to the path",
+          'ctl:ruleRemoveById=930110' in text and "@beginsWith /upload" in text,
+          "the path exclusion was not written as a scoped control")
+
+    check("a profile runs at strictness 1 and gets its strictness from tuning",
+          "blocking_paranoia_level=1" in text,
+          "a custom profile did not fall back to level 1")
+
+    ok = agent({"verb": "write_staging", "files": profiled}).get("ok")
+    out = agent({"verb": "test_staging"}).get("data", {})
+    check("nginx loads a site with a tuned profile on it",
+          bool(ok) and bool(out.get("ok")),
+          (out.get("output") or "").strip())
+
+
 print()
 failed = [r for r in results if not r[1]]
 print(f"    {len(results) - len(failed)} passed, {len(failed)} failed, "
