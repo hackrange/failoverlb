@@ -23,6 +23,7 @@
     </select>
     <button class="btn" id="zoom-out" hidden>Back to the whole window</button>
     <button class="btn" id="refresh">Refresh</button>
+    <span class="small faint" id="updated-at"></span>
   </div>
 </div>
 
@@ -281,6 +282,14 @@ document.addEventListener("DOMContentLoaded", function () {
 
   function draw(data) {
     lastPayload = data;
+    const stamp = el("updated-at");
+    if (stamp) {
+      const now = new Date();
+      stamp.textContent = "updated " +
+        String(now.getHours()).padStart(2, "0") + ":" +
+        String(now.getMinutes()).padStart(2, "0") + ":" +
+        String(now.getSeconds()).padStart(2, "0");
+    }
     const nodes = data.nodes || {};
     LAST = nodes;
     tiles(nodes);
@@ -564,7 +573,26 @@ document.addEventListener("DOMContentLoaded", function () {
   });
 
   el("window").addEventListener("change", function () { zoom = null; load(); });
-  el("refresh").addEventListener("click", load);
+
+  // Refresh says when it last fetched.
+  //
+  // The button always worked and looked broken, which is a fair conclusion:
+  // it redraws the same window, and over fifteen seconds the numbers barely
+  // move, so pressing it changed nothing anybody could see.  Changing the
+  // window looked like it worked only because the chart obviously changed.
+  //
+  // So the page now says when the numbers were last fetched, which is worth
+  // knowing on a monitoring page anyway, and the button greys out while it is
+  // working so a slow fetch is visible rather than looking like a dead click.
+  el("refresh").addEventListener("click", async function () {
+    const button = el("refresh");
+    button.disabled = true;
+    try {
+      await load();
+    } finally {
+      button.disabled = false;
+    }
+  });
 
   const zoomOut = el("zoom-out");
   if (zoomOut) {
