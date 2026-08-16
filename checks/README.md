@@ -58,6 +58,7 @@ docker exec -i nginx-fleet-manager python < checks/catalog_sweep.py
 | `tunnel_addresses.py` | A tunnel address is handed out once and never to two machines, including after a workload is removed. |
 | `waf.py` | The WAF from the setting through to config nginx will load, with the exclusions in the order the rules need them. |
 | `wiring.py` | Every setting reaches the rendered config, by walking the model fields rather than by anybody remembering to check. |
+| `auth_modes.py` | The three ways in, the refusal path when local passwords are off, and that the sign in settings travel in the config snapshot. |
 | `comparison.py` | The feature comparison holds together and has not turned into a brochure: every row scores every product, the totals match the data, and we still lose the rows we lose. |
 
 ## A pass that touched nothing is not a pass
