@@ -16,10 +16,17 @@
       <option value="15">Last 15 minutes</option>
       <option value="60" selected>Last hour</option>
       <option value="120">Last 2 hours</option>
+      <option value="360">Last 6 hours</option>
+      <option value="1440">Last day</option>
+      <option value="10080">Last week</option>
+      <option value="43200">Last 30 days</option>
     </select>
+    <button class="btn" id="zoom-out" hidden>Back to the whole window</button>
     <button class="btn" id="refresh">Refresh</button>
   </div>
 </div>
+
+<div class="small faint" id="drawn-range" style="margin:-6px 0 12px"></div>
 
 <div class="notice info" id="short-history" hidden>
   <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 3a.9.9 0 1 1 0 1.8A.9.9 0 0 1 8 4zm1.2 8H6.8v-.9h.7V7.9h-.7V7h2.1v4.1h.3V12z"/></svg>
@@ -425,20 +432,81 @@ document.addEventListener("DOMContentLoaded", function () {
     el("member-charts").innerHTML = out.join("");
   }
 
+  // The range currently drawn.  null means "the last N minutes", which is what
+  // the picker means and is what keeps refreshing forward in time.  A zoom
+  // sets an explicit start and end and stops the clock, because a chart that
+  // slides while somebody is reading the spike they zoomed into is useless.
+  let zoom = null;
+
+  function describe(from, to) {
+    const span = to - from;
+    const fmt = function (t) {
+      const d = new Date(t * 1000);
+      return span > 86400
+        ? d.toLocaleDateString() + " " + d.toTimeString().slice(0, 5)
+        : d.toTimeString().slice(0, 8);
+    };
+    return fmt(from) + " to " + fmt(to);
+  }
+
   async function load() {
-    const minutes = el("window").value;
+    const minutes = parseInt(el("window").value, 10);
+
+    // Under two hours the live in memory samples are finer than anything
+    // stored, so they stay the source for the short windows this page was
+    // built for.  Anything longer, or any zoom, comes from what was written
+    // down.  Both arrive in the same shape, so one drawing routine covers
+    // them and a zoomed chart cannot render differently from a live one.
+    const stored = zoom !== null || minutes > 120;
+
+    let url;
+    if (zoom) {
+      url = "/metrics/history?start=" + Math.round(zoom.from) +
+            "&end=" + Math.round(zoom.to);
+    } else if (stored) {
+      const now = Math.floor(Date.now() / 1000);
+      url = "/metrics/history?start=" + (now - minutes * 60) + "&end=" + now;
+    } else {
+      url = "/metrics/series?minutes=" + minutes;
+    }
+
     try {
-      draw(await NFM.api("/metrics/series?minutes=" + minutes));
+      const payload = await NFM.api(url);
+      draw(payload);
+      const note = el("drawn-range");
+      if (note) {
+        const from = payload.start || 0, to = payload.end || 0;
+        note.textContent = stored && from && to
+          ? "Showing " + describe(from, to) +
+            (payload.resolution === "5m"
+              ? ".  Each point is a five minute average, so a flat line here " +
+                "is an average and not necessarily a quiet period."
+              : ".  Each point is a one minute average.")
+          : "";
+      }
     } catch (err) {
       el("charts").textContent =
         "Could not load: " + (err && err.message ? err.message : err);
     }
+
+    // The backends only have live numbers, so a zoom into last Tuesday has
+    // nothing to show for them.  Said rather than drawn as an empty chart,
+    // which reads as zero traffic.
     try {
-      drawMembers(await NFM.api("/metrics/members?minutes=" + minutes));
+      if (zoom) {
+        el("member-charts").innerHTML =
+          '<div class="small faint">Backend numbers are live only, so they ' +
+          "are not shown for a past range.</div>";
+      } else {
+        drawMembers(await NFM.api("/metrics/members?minutes=" + Math.min(minutes, 120)));
+      }
     } catch (err) {
       el("member-charts").textContent =
         "Could not load the backends: " + (err && err.message ? err.message : err);
     }
+
+    const out = el("zoom-out");
+    if (out) { out.hidden = zoom === null; }
   }
 
   // Redraw when the window changes size, because the geometry is measured
@@ -455,10 +523,62 @@ document.addEventListener("DOMContentLoaded", function () {
     }, 150);
   });
 
-  el("window").addEventListener("change", load);
+  el("window").addEventListener("change", function () { zoom = null; load(); });
   el("refresh").addEventListener("click", load);
+
+  const zoomOut = el("zoom-out");
+  if (zoomOut) {
+    zoomOut.addEventListener("click", function () { zoom = null; load(); });
+  }
+
+  // Drag across any chart to zoom every chart to that range.
+  //
+  // Every chart, not the one under the pointer.  Half the value of this page is
+  // seeing that a request rate spike and a memory climb happened at the same
+  // moment, and that comparison is destroyed the instant each chart carries its
+  // own window.
+  (function dragToZoom() {
+    const area = el("charts");
+    if (!area) return;
+    let dragging = null;
+
+    function atFrom(ev, hit) {
+      const box = hit.getBoundingClientRect();
+      const frac = Math.max(0, Math.min(1, (ev.clientX - box.left) / box.width));
+      const from = parseFloat(hit.dataset.from), to = parseFloat(hit.dataset.to);
+      return from + frac * (to - from);
+    }
+
+    area.addEventListener("mousedown", function (ev) {
+      const hit = ev.target.closest(".hit");
+      if (!hit) return;
+      dragging = { hit: hit, start: atFrom(ev, hit) };
+      ev.preventDefault();
+    });
+
+    window.addEventListener("mouseup", function (ev) {
+      if (!dragging) return;
+      const end = atFrom(ev, dragging.hit);
+      const from = Math.min(dragging.start, end), to = Math.max(dragging.start, end);
+      dragging = null;
+
+      // A click is a drag of nothing.  Below a minute there is no finer data to
+      // fetch, so zooming in would magnify one bucket rather than reveal
+      // anything, and the reset would be the only way out of a chart showing a
+      // single point.
+      if (!(to - from > 60)) return;
+
+      zoom = { from: from, to: to };
+      load();
+    });
+  })();
+
   load();
-  setInterval(load, 15000);
+
+  // Only keep refreshing while looking at the present.  A zoomed range is a
+  // fixed window somebody is reading, and refetching it every fifteen seconds
+  // redraws the same picture and fights the pointer.
+  setInterval(function () { if (!zoom) load(); }, 15000);
 });
 </script>
 

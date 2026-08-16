@@ -870,7 +870,41 @@ async def metrics_history(request: Request, start: int = None, end: int = None,
     if span > metrics_store.KEEP_COARSE:
         start = end - metrics_store.KEEP_COARSE
 
-    return metrics_store.series(start, end)
+    raw = metrics_store.series(start, end)
+
+    # Reshaped into what the charts already read, rather than teaching the page
+    # a second shape.  One drawing routine for live and stored history means a
+    # zoomed chart cannot quietly render differently from a live one.
+    #
+    # value is the mean, with min and max carried alongside.  A five minute
+    # bucket drawn as its mean alone is where a spike goes to die, so the
+    # numbers that keep it are on every point whether the chart draws them yet
+    # or not.
+    nodes = {}
+    for node, points in (raw.get("nodes") or {}).items():
+        series = {}
+        for point in points:
+            at = point.get("at")
+            for key, stat in point.items():
+                if key == "at" or not isinstance(stat, dict):
+                    continue
+                series.setdefault(key, []).append({
+                    "at": at,
+                    "value": stat.get("avg"),
+                    "min": stat.get("min"),
+                    "max": stat.get("max"),
+                })
+        nodes[node] = {"series": series}
+
+    return {
+        "nodes": nodes,
+        "resolution": raw.get("resolution"),
+        "start": raw.get("start"),
+        "end": raw.get("end"),
+        "earliest": raw.get("earliest"),
+        "minutes": max(1, (raw.get("end", 0) - raw.get("start", 0)) // 60),
+        "stored": True,
+    }
 
 
 @router.get("/waf/rule-ids")
