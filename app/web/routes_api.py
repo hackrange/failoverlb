@@ -438,6 +438,32 @@ async def pending_config_diff(g: ObjectGuard = Depends(guard)):
 # The feature catalog, which is also where the help text comes from
 # ==============================================================================
 
+# Settings whose choices are rows in the database rather than a list in the
+# catalog.
+#
+# The catalog is deliberately static: it describes nginx, and nginx does not
+# change while the process is running.  A zone is something somebody made an
+# hour ago, so these three features carry `options=[]` and get their choices
+# filled in at request time.
+#
+# **Both sides have to know that, and for a long time only one did.**  The
+# catalog endpoint filled the dropdowns from the database, so the site editor
+# offered real zones.  The validator did not, so `validate_value` ran the
+# select check against an empty option list and refused every value, including
+# the ones the page had just offered.  Caching, rate limiting and connection
+# limiting could each be chosen and none of them could be saved: the answer was
+# a 400 reading "has to be one of:" with nothing after the colon.
+#
+# One dict now, read by both, so the two cannot drift apart again.  Adding a
+# fourth means adding it here and nowhere else, and checks/catalog_sweep.py
+# fails if a select with no options is missing from it.
+ZONE_CHOICES = {
+    "limit_req_zone_name": (RateLimitZone, "rate limit zone", "Rate limits"),
+    "limit_conn_zone_name": (ConnLimitZone, "connection limit zone", "Rate limits"),
+    "proxy_cache_zone": (CacheZone, "cache zone", "Cache zones"),
+}
+
+
 @router.get("/catalog")
 async def catalog(request: Request, context: str = "server",
                   db: DBSession = Depends(get_db)):
@@ -457,20 +483,26 @@ async def catalog(request: Request, context: str = "server",
     # The zone pickers have no fixed choices, they are whatever you have made.
     # Filling them here means the site editor offers real zones rather than an
     # empty dropdown nobody can use.
-    zone_options = {
-        "limit_req_zone_name": [("", "no rate limit")] + [
-            (z.name, f"{z.name} ({z.rate})")
-            for z in db.query(RateLimitZone).order_by(RateLimitZone.name).all()
-        ],
-        "limit_conn_zone_name": [("", "no connection limit")] + [
-            (z.name, z.name)
-            for z in db.query(ConnLimitZone).order_by(ConnLimitZone.name).all()
-        ],
-        "proxy_cache_zone": [("", "no caching")] + [
-            (z.name, f"{z.name} ({z.max_size} max)")
-            for z in db.query(CacheZone).order_by(CacheZone.name).all()
-        ],
+    #
+    # The keys come from ZONE_CHOICES, which the validator also reads, so a
+    # picker can never again offer something the save refuses.  Only the label
+    # is written out per zone type, because what is worth showing beside a name
+    # differs: a rate for a rate limit, a size for a cache.
+    _blank = {"limit_req_zone_name": "no rate limit",
+              "limit_conn_zone_name": "no connection limit",
+              "proxy_cache_zone": "no caching"}
+    _describe = {
+        "limit_req_zone_name": lambda z: f"{z.name} ({z.rate})",
+        "limit_conn_zone_name": lambda z: z.name,
+        "proxy_cache_zone": lambda z: f"{z.name} ({z.max_size} max)",
     }
+    zone_options = {}
+    for _key, (_model, _what, _page) in ZONE_CHOICES.items():
+        _rows = db.query(_model).order_by(_model.name).all()
+        zone_options[_key] = (
+            [("", _blank.get(_key, f"no {_what}"))] +
+            [(z.name, _describe[_key](z)) for z in _rows]
+        )
 
     out = []
     for feature in all_features().values():
@@ -1627,6 +1659,24 @@ def _validate_settings(raw, context: str) -> dict:
             continue
         if not feature.is_available(caps.modules, caps.version_tuple):
             problems.append(f"{feature.label} {feature.unavailable_reason(caps.modules, caps.version_tuple)}")
+            continue
+
+        # A zone picker, whose choices are rows rather than catalog options.
+        # Checked against what exists, and the message names what does, because
+        # the usual cause is a zone that was renamed or deleted after a site
+        # was pointed at it.
+        zone = ZONE_CHOICES.get(key)
+        if zone and value:
+            model, what, page = zone
+            with session_scope() as session:
+                known = sorted(z.name for z in session.query(model).all())
+            if value not in known:
+                problems.append(
+                    f"{feature.label}: there is no {what} called {value}." +
+                    (f"  There is: {', '.join(known)}" if known
+                     else f"  None exist yet, so make one on the {page} page first."))
+                continue
+            cleaned[key] = value
             continue
 
         # WAF strictness is a level or the name of a tuned profile, and only

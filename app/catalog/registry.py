@@ -374,6 +374,16 @@ def validate_value(feature: Feature, value) -> Optional[str]:
 
     if t == "select":
         valid = [v for v, _ in feature.options]
+        if not valid:
+            # A select with nothing to select from is a feature whose choices
+            # live in the database, and the caller was supposed to check it
+            # against those rows before getting here.  Saying so beats the old
+            # answer, which was "has to be one of:" followed by nothing and
+            # sent somebody looking through nginx documentation for a value
+            # that was never going to be accepted.
+            return ("this setting takes its choices from the database and "
+                    "nothing checked them, which is a bug in this tool rather "
+                    "than anything you typed")
         if value not in valid:
             return f"has to be one of: {', '.join(valid)}"
         return None

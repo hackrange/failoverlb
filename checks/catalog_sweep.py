@@ -316,7 +316,38 @@ def main():
             print(f"    {key}")
         print()
 
-    problems = len(failures) + len(set(k for k, _ in inert) | set(never))
+    # A setting that renders correctly and cannot be saved.
+    #
+    # Everything above asks whether a value reaches the config file.  It never
+    # asks whether the value could have been saved in the first place, and
+    # those are different questions with a different answer three times over:
+    # caching, rate limiting and connection limiting each rendered perfectly
+    # and each refused every value on the way in, because they are selects
+    # whose choices are rows in the database and the catalog carries an empty
+    # option list for them.  The site editor offered real zones and the save
+    # said "has to be one of:" with nothing after the colon.
+    #
+    # So any select with no options has to be one the validator knows to check
+    # against the database instead.  Adding a fourth without wiring it up fails
+    # here rather than in front of somebody trying to turn caching on.
+    from app.web.routes_api import ZONE_CHOICES
+
+    unwired = sorted(
+        f.key for f in all_features().values()
+        if f.type in ("select", "multiselect") and not f.options
+        and f.key not in ZONE_CHOICES and f.key != "waf_paranoia"
+    )
+    if unwired:
+        print(f"  {len(unwired)} select settings have no options in the catalog "
+              f"and nothing that checks")
+        print("  them against the database, so every value will be refused:")
+        for key in unwired:
+            print(f"    {key}")
+        print("  Add them to ZONE_CHOICES in app/web/routes_api.py.")
+        print()
+
+    problems = (len(failures) + len(unwired)
+                + len(set(k for k, _ in inert) | set(never)))
     print("  RESULT:", "every setting reached the config and nginx took it"
           if not problems else f"{problems} PROBLEMS, listed above")
     return 1 if problems else 0
