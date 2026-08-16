@@ -686,7 +686,7 @@ async def waf_session_start(host_id: int, request: Request,
     """
     from app.core.waf_hits import parse_addresses
 
-    g.require("manage_sites")
+    g.require("edit_sites")
     host = g.get(VirtualHost, host_id)
 
     payload = await request.json() if await request.body() else {}
@@ -746,7 +746,7 @@ async def waf_session_stop(session_id: int, request: Request,
     """
     from app.core import waf_hits as hits_mod
 
-    g.require("manage_sites")
+    g.require("edit_sites")
     row = g.get(WafSession, session_id)
     if not row.running:
         raise HTTPException(status_code=400, detail="that session has already stopped")
@@ -816,7 +816,7 @@ async def waf_hits_clear(host_id: int, g: ObjectGuard = Depends(changing)):
     """
     from app.core import waf_hits as hits_mod
 
-    g.require("manage_sites")
+    g.require("edit_sites")
     host = g.get(VirtualHost, host_id)
     name = host.name
 
@@ -857,7 +857,7 @@ async def waf_profile_create(request: Request, g: ObjectGuard = Depends(changing
     request, what date — because an exclusion nobody can explain is one nobody
     will dare remove, and a WAF full of those checks nothing.
     """
-    g.require("manage_sites")
+    g.require("edit_sites")
     payload = await request.json() if await request.body() else {}
 
     name = (payload.get("name") or "").strip()
@@ -918,7 +918,7 @@ async def waf_profile_delete(profile_id: int, g: ObjectGuard = Depends(changing)
     untuned rule set and start refusing traffic it was tuned to allow, which is
     an outage produced by a tidy up.
     """
-    g.require("manage_sites")
+    g.require("edit_sites")
     profile = g.get(WafProfile, profile_id)
     users = _profile_users(g.session, profile.name)
     if users:

@@ -168,13 +168,25 @@ def main():
     from app.auth.service import ROLE_PERMISSIONS
 
     real = set().union(*ROLE_PERMISSIONS.values())
-    # The module's own file, because these suites are run through stdin and
+    # The modules' own files, because these suites are run through stdin and
     # __file__ is then "<stdin>".
+    #
+    # Every route module, not just routes_api.  This check was written after
+    # the import routes shipped with a made up name, and it only ever looked at
+    # the one file that bug happened to be in.  The firewall routes then did the
+    # same thing, in the same file, and it was still only caught by somebody
+    # pressing the button.  Routes live in five modules now and a permission is
+    # equally invisible in any of them.
     import app.web.routes_api as routes_api
 
-    api = Path(routes_api.__file__)
-    asked = set(re.findall(r'require\("([a-z_]+)"\)', api.read_text()))
+    folder = Path(routes_api.__file__).parent
+    asked = set()
+    scanned = []
+    for module in sorted(folder.glob("routes_*.py")):
+        asked |= set(re.findall(r'require\("([a-z_]+)"\)', module.read_text()))
+        scanned.append(module.name)
     invented = sorted(asked - real)
+    print(f"    scanned {len(scanned)} route modules: {', '.join(scanned)}")
 
     results.append(("every permission a route asks for exists", not invented,
                     f"these are asked for but defined nowhere, so they refuse "

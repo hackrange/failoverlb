@@ -529,6 +529,10 @@ PEER_AGENT_VERBS = {
     "waf_hits",
     "waf_hits_clear",
     "waf_log_status",
+    # Rotation runs on a schedule from the active node, for the whole fleet,
+    # because a standby filling its disk is a standby that cannot be failed
+    # over to, which is found out at the worst moment.
+    "waf_log_rotate",
 }
 
 

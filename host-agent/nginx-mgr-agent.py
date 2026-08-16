@@ -3032,7 +3032,7 @@ WAF_MAX_GROUPS = 500
 # When the log is big enough to do something about.  A site being scanned in
 # watching mode writes steadily, and filling the disk on a load balancer is a
 # worse outage than anything the firewall prevents.
-WAF_LOG_CAP = 64 * 1024 * 1024
+WAF_LOG_CAP = int(os.environ.get("NFM_WAF_LOG_CAP", 64 * 1024 * 1024))
 
 
 def _waf_log(site):
@@ -3200,6 +3200,95 @@ def v_waf_hits_clear(req):
     return {"ok": True, "cleared": was, "path": str(path)}
 
 
+def _waf_rotate_one(path, cap, keep_history=True):
+    """
+    Rotate one audit log, keeping every open descriptor valid.
+
+    **Renaming is not an option here and that is the whole design.**  The nginx
+    master and every worker hold this file open for writing, so a rename leaves
+    them all writing into the rotated file: the new one stays empty, the hits
+    page goes quiet, and the disk carries on filling.  nginx's own logs survive
+    a rename because a USR1 makes it reopen them, and that does not help here —
+    libmodsecurity opens the audit log itself, not nginx's log module, so the
+    signal never reaches it.
+
+    So it is copy and truncate, which is what logrotate calls copytruncate and
+    exists for exactly this case.  It has one known cost: anything written
+    between the copy finishing and the truncate landing is lost.  For an audit
+    log that is a few lines, and losing a few lines beats losing the disk.
+    """
+    size = path.stat().st_size
+    if size < cap:
+        return None
+
+    kept = path.with_name(path.name + ".1.gz")
+
+    # Copying doubles the space this log uses until the truncate lands, and we
+    # are rotating precisely because it got big.  If the disk is too tight to
+    # hold a copy, throw the history away rather than filling the disk in the
+    # act of trying not to.
+    if keep_history:
+        try:
+            free = shutil.disk_usage(str(path.parent)).free
+        except OSError:
+            free = 0
+        # A tenth, since it compresses hard, plus a floor so a nearly full disk
+        # never gets a copy at all.
+        if free < max(size // 5, 256 * 1024 * 1024):
+            keep_history = False
+
+    saved = 0
+    if keep_history:
+        import gzip
+
+        temporary = path.with_name(path.name + ".1.gz.new")
+        try:
+            with path.open("rb") as source, gzip.open(temporary, "wb") as target:
+                shutil.copyfileobj(source, target, 1024 * 1024)
+            os.replace(temporary, kept)
+            saved = kept.stat().st_size
+        except OSError as exc:
+            temporary.unlink(missing_ok=True)
+            log.warning("could not keep a copy of %s: %s", path.name, exc)
+            keep_history = False
+
+    with path.open("r+b") as handle:
+        handle.truncate(0)
+
+    log.warning("rotated %s at %d bytes, %s", path.name, size,
+                f"kept {saved} bytes compressed" if keep_history
+                else "no copy kept, the disk was too tight")
+    return {"site": path.name[4:-4], "was": size, "kept_bytes": saved,
+            "history_kept": bool(keep_history)}
+
+
+def v_waf_log_rotate(req):
+    """
+    Rotate any audit log past its cap.  Cheap when there is nothing to do.
+
+    Called on a schedule rather than left to a person.  A site being scanned in
+    watching mode writes steadily and nobody is watching the disk on a load
+    balancer until it is full, and filling it is a worse outage than anything
+    the firewall prevents.
+    """
+    payload = req.get("payload") or req
+    cap = payload.get("cap")
+    cap = int(cap) if isinstance(cap, (int, float)) and cap > 0 else WAF_LOG_CAP
+
+    rotated = []
+    if WAF_LOG_DIR.is_dir():
+        for path in sorted(WAF_LOG_DIR.glob("waf-*.log")):
+            try:
+                done = _waf_rotate_one(path, cap)
+            except OSError as exc:
+                log.warning("could not rotate %s: %s", path.name, exc)
+                continue
+            if done:
+                rotated.append(done)
+
+    return {"ok": True, "cap": cap, "rotated": rotated}
+
+
 def v_waf_log_status(req):
     """
     How big every site's audit log is, and whether any is past its cap.
@@ -3332,6 +3421,7 @@ VERBS = {
     "waf_hits": v_waf_hits,
     "waf_hits_clear": v_waf_hits_clear,
     "waf_log_status": v_waf_log_status,
+    "waf_log_rotate": v_waf_log_rotate,
 }
 
 
@@ -3357,6 +3447,8 @@ SERIALIZED_VERBS = {
     "crs_install",
     # Truncating a file two readers are parsing.
     "waf_hits_clear",
+    # Copying and truncating the same files a read is walking.
+    "waf_log_rotate",
 }
 
 

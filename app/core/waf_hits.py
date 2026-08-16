@@ -181,6 +181,35 @@ async def clear_fleet(site: str) -> dict:
     return {"ok": not failed, "cleared": cleared, "failed": failed}
 
 
+async def rotate_logs() -> dict:
+    """
+    Rotate any audit log past its cap, on every node.
+
+    Every node rather than the active one.  A standby quietly filling its disk
+    is a standby that cannot be failed over to, and that is discovered at
+    exactly the moment it was needed.
+
+    Nothing here decides the cap or does the copying: the agent owns both,
+    because it is the only part that can see the disk it is protecting.
+    """
+    results = await ask_every_node("waf_log_rotate", {})
+
+    rotated = {}
+    failed = {}
+    for name, answer in results.items():
+        if answer.get("ok"):
+            done = answer.get("rotated") or []
+            if done:
+                rotated[name] = done
+        else:
+            failed[name] = answer.get("error") or "failed"
+
+    if rotated or failed:
+        log.warning("rotated WAF logs: %s%s", rotated or "nothing",
+                    f", failed on {failed}" if failed else "")
+    return {"ok": not failed, "rotated": rotated, "failed": failed}
+
+
 async def log_status() -> dict:
     """
     How much disk the audit logs are using, per node.

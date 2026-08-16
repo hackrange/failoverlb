@@ -382,6 +382,29 @@ def start_scheduler():
         coalesce=True,
     )
 
+    # Rotating the firewall's audit logs.  Every fifteen minutes rather than
+    # hourly, and from every node rather than the active one.
+    #
+    # A site being scanned in watching mode writes steadily, and nobody looks
+    # at the disk on a load balancer until it is full.  An hour of a determined
+    # scan is a lot of JSON, and a standby that filled its own disk is a
+    # standby that cannot be failed over to, which is found out at the worst
+    # possible moment.  The job itself is cheap when there is nothing to do,
+    # which is nearly every tick.
+    async def _waf_logs():
+        from app.core import waf_hits
+
+        await waf_hits.rotate_logs()
+
+    scheduler.add_job(
+        _waf_logs,
+        "interval",
+        minutes=15,
+        id="waf_logs",
+        max_instances=1,
+        coalesce=True,
+    )
+
     # Catching up nodes that were offline.  Runs often, does nothing when the
     # queue is empty, which is nearly always.
     scheduler.add_job(
