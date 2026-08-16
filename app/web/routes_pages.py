@@ -18,6 +18,7 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session as DBSession
 
 from app.auth import oidc
+from app.core import settings_store
 from app.auth.service import (
     authenticate_local,
     can,
@@ -190,6 +191,7 @@ async def login_page(request: Request, db: DBSession = Depends(get_db),
             "error": error,
             "stage": stage,
             "oidc_enabled": oidc.is_configured(),
+            "local_enabled": settings_store.local_passwords_allowed(),
             "node_name": get_settings().node_name,
             "csp_nonce": getattr(request.state, "csp_nonce", ""),
             "base": get_settings().root_path.rstrip("/"),
@@ -252,6 +254,7 @@ async def do_login(request: Request, db: DBSession = Depends(get_db),
                 "username": username,
                 "password": password,
                 "oidc_enabled": oidc.is_configured(),
+                "local_enabled": settings_store.local_passwords_allowed(),
                 "node_name": get_settings().node_name,
                 "csp_nonce": getattr(request.state, "csp_nonce", ""),
                 "base": get_settings().root_path.rstrip("/"),
@@ -330,6 +333,15 @@ async def oidc_start(request: Request):
 async def oidc_callback(request: Request, db: DBSession = Depends(get_db),
                         code: str = None, state: str = None, error: str = None):
     ip = client_ip(request)
+
+    # Checked here as well as at the start of the flow.  Somebody can be part
+    # way through a login when the mode is switched to local only, and a reply
+    # that still creates a session because the request was already in flight is
+    # a switch that did not take.
+    if not oidc.is_configured():
+        return RedirectResponse(
+            _p("/login?error=single sign on is switched off on this fleet"),
+            status_code=303)
 
     if error:
         return RedirectResponse(_p(f"/login?error=the provider said: {error}"), status_code=303)

@@ -790,3 +790,11 @@ label.wafhit input:disabled { cursor: not-allowed; }
     border-right: 1px solid var(--accent, #3b82f6);
     z-index: 40;
 }
+
+/* Three fields side by side, wrapping on a narrow screen.  Used for the three
+ * OIDC group names, which only make sense read together: they are one decision
+ * about who gets which role, not three unrelated settings. */
+.grid-3 {
+  display: grid; gap: .8rem;
+  grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+}

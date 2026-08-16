@@ -28,6 +28,189 @@
 <form method="post" action="{{ base }}/settings">
 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
 
+{# Sign in goes first.  It is the only card on this page that can lock
+   everybody out, so it should not be something somebody scrolls past. #}
+<div class="card">
+  <div class="card-head">
+    <h2>Signing in to this GUI</h2>
+    <button class="help-btn" data-help-static="h-auth"
+            data-help-title="How people sign in" data-help-wide
+            aria-label="Help">?</button>
+  </div>
+  <div class="card-body">
+
+    {% if auth.from_env %}
+      <div class="notice">
+        <div>
+          Single sign on is currently switched on by <code>NFM_OIDC_ENABLED</code>
+          in the environment.  Saving this card writes the choice to the
+          database instead, where it applies without a restart and travels to
+          the other nodes with the config.  The environment stays as a fallback
+          and does no harm.
+        </div>
+      </div>
+    {% endif %}
+
+    <fieldset class="field">
+      <legend>Who can sign in</legend>
+
+      <div class="checkline">
+        <input type="radio" id="auth_local" name="auth_mode" value="local"
+               {{ 'checked' if auth.mode == 'local' }}>
+        <label for="auth_local">
+          <strong>Local accounts only.</strong>
+          Usernames and passwords kept here, with a second factor.  The
+          provider is ignored even if it is filled in below, which is what you
+          want while you are still setting one up.
+        </label>
+      </div>
+
+      <div class="checkline">
+        <input type="radio" id="auth_both" name="auth_mode" value="both"
+               {{ 'checked' if auth.mode == 'both' }}
+               {{ 'disabled' if not auth.has_details }}>
+        <label for="auth_both">
+          <strong>Local accounts or single sign on.</strong>
+          Both offered on the login page.  This is the mode to be in while you
+          test the provider, and the only one you can reach the next one from.
+          {% if not auth.has_details %}
+            <span class="badge neutral">fill in the details below first</span>
+          {% endif %}
+        </label>
+      </div>
+
+      <div class="checkline">
+        <input type="radio" id="auth_oidc" name="auth_mode" value="oidc"
+               {{ 'checked' if auth.mode == 'oidc' }}
+               {{ 'disabled' if not auth.can_go_oidc_only }}>
+        <label for="auth_oidc">
+          <strong>Single sign on only.</strong>
+          Local passwords stop working entirely.  This is the mode to be in
+          once the provider is the system of record, because otherwise its
+          lockout, its second factor and its leaver process all have a way
+          round them.
+          {% if auth.can_go_oidc_only %}
+            <span class="hint">
+              {{ auth.sso_admins|length }} admin{{ '' if auth.sso_admins|length == 1 else 's' }}
+              can already get in this way: {{ auth.sso_admins|join(', ') }}.
+            </span>
+          {% else %}
+            <span class="badge neutral">not available yet</span>
+            <span class="hint">
+              No admin has completed a single sign on login, so switching now
+              would lock everybody out.  Choose the middle option, sign in that
+              way once, then come back.
+            </span>
+          {% endif %}
+        </label>
+      </div>
+    </fieldset>
+
+    <div class="notice warn">
+      <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.5 15 14H1L8 1.5zm0 4a.7.7 0 0 0-.7.8l.25 3.2a.45.45 0 0 0 .9 0l.25-3.2A.7.7 0 0 0 8 5.5zm0 5.4a.8.8 0 1 0 0 1.6.8.8 0 0 0 0-1.6z"/></svg>
+      <div>
+        <strong>The way back in.</strong>  If you pick single sign on only and
+        the provider then stops answering, nobody can sign in through the
+        browser at all.  Run <code>./auth-recovery.sh --allow-local</code> from
+        the install directory on any node in the fleet and local passwords come
+        straight back.  It needs a shell on the box, which is the point: it is
+        the door that does not depend on the thing that broke.
+      </div>
+    </div>
+
+    <h3>Provider details</h3>
+    <p class="small muted">
+      These are read live, so a change takes effect on the next sign in with
+      nothing restarted.  They travel to the other nodes with the config, so
+      the standby can sign people in the day it is promoted.
+    </p>
+
+    <div class="field" style="max-width:560px">
+      <label for="oidc_discovery_url">Discovery URL</label>
+      <input type="url" id="oidc_discovery_url" name="oidc_discovery_url"
+             value="{{ auth.values.oidc_discovery_url }}"
+             placeholder="https://login.example.com/.well-known/openid-configuration">
+      <div class="hint">
+        The <code>.well-known/openid-configuration</code> address.  Everything
+        else, the endpoints and the signing keys, is read from there rather
+        than typed in here.
+      </div>
+    </div>
+
+    <div class="field" style="max-width:420px">
+      <label for="oidc_client_id">Client id</label>
+      <input type="text" id="oidc_client_id" name="oidc_client_id"
+             value="{{ auth.values.oidc_client_id }}" autocomplete="off">
+    </div>
+
+    <div class="field" style="max-width:420px">
+      <label for="oidc_client_secret">
+        Client secret
+        {% if auth.secret_set %}<span class="badge ok">stored</span>{% endif %}
+      </label>
+      <input type="password" id="oidc_client_secret" name="oidc_client_secret"
+             value="" autocomplete="new-password"
+             placeholder="{{ 'leave empty to keep the one stored' if auth.secret_set else 'optional for a public client' }}">
+      <div class="hint">
+        Encrypted at rest and never sent back to this page, so the box is
+        always empty.  Saving with it empty keeps what is already stored.
+      </div>
+    </div>
+
+    <div class="field" style="max-width:560px">
+      <label for="oidc_redirect_base">Address the provider sends people back to</label>
+      <input type="url" id="oidc_redirect_base" name="oidc_redirect_base"
+             value="{{ auth.values.oidc_redirect_base }}"
+             placeholder="https://{{ env.node_name }}{{ env.root_path or '' }}">
+      <div class="hint">
+        The outside address of this GUI, including any prefix it is served
+        under.  We add <code>/auth/oidc/callback</code> to it, and that whole
+        address has to be registered with the provider or it will refuse the
+        login.
+      </div>
+    </div>
+
+    <div class="field" style="max-width:280px">
+      <label for="oidc_groups_claim">Claim holding the group names</label>
+      <input type="text" id="oidc_groups_claim" name="oidc_groups_claim"
+             value="{{ auth.values.oidc_groups_claim or 'groups' }}">
+      <div class="hint">
+        Read from the id token, and from the userinfo endpoint when the token
+        does not carry it.
+      </div>
+    </div>
+
+    <div class="grid-3">
+      <div class="field">
+        <label for="oidc_admin_group">Group that gets admin</label>
+        <input type="text" id="oidc_admin_group" name="oidc_admin_group"
+               value="{{ auth.values.oidc_admin_group or 'nginx-admins' }}">
+      </div>
+      <div class="field">
+        <label for="oidc_operator_group">Group that gets operator</label>
+        <input type="text" id="oidc_operator_group" name="oidc_operator_group"
+               value="{{ auth.values.oidc_operator_group or 'nginx-operators' }}">
+      </div>
+      <div class="field">
+        <label for="oidc_viewer_group">Group that gets viewer</label>
+        <input type="text" id="oidc_viewer_group" name="oidc_viewer_group"
+               value="{{ auth.values.oidc_viewer_group or 'nginx-viewers' }}">
+      </div>
+    </div>
+    <p class="small muted">
+      Highest wins.  Somebody in the admin group and the viewer group is an
+      admin, so adding a person to the admin group works without having to take
+      them out of anything first.  Somebody in none of the three cannot sign in
+      at all, which is how access is taken away: remove them at the provider.
+    </p>
+
+    <div class="flex-between mt">
+      <button type="button" class="btn" id="oidc-test">Test the discovery URL</button>
+      <span class="small muted" id="oidc-test-out"></span>
+    </div>
+  </div>
+</div>
+
 <div class="card">
   <div class="card-head">
     <h2>Certificates</h2>
@@ -332,7 +515,14 @@
       </dd>
       <dt>Session timeout</dt><dd class="mono">{{ env.session_timeout }} minutes</dd>
       <dt>Single sign on</dt>
-      <dd class="mono">{{ 'on' if env.oidc_enabled else 'off, local accounts only' }}</dd>
+      <dd class="mono">
+        {{ auth.mode }}
+        <span class="small faint">
+          set on this page now, not in the environment.
+          {%- if env.oidc_enabled %} NFM_OIDC_ENABLED is still true in
+          <code>.env</code> and is only a fallback.{% endif %}
+        </span>
+      </dd>
       <dt>Served under</dt><dd class="mono">{{ env.root_path or '/' }}</dd>
     </dl>
   </div>
@@ -457,8 +647,76 @@ somebody wrote months earlier.</p>
 {% endblock %}
 
 {% block scripts %}
+<div hidden id="h-auth">
+  <p>Three ways in, and the order matters because you can only get to the
+  third one through the second.</p>
+
+  <p><strong>Local accounts only.</strong>  Usernames and passwords kept in
+  this fleet, each with a second factor.  This is where every install starts
+  and there is nothing wrong with staying here.</p>
+
+  <p><strong>Local accounts or single sign on.</strong>  Both offered.  Use
+  this while you are testing the provider, because if the provider is wrong you
+  still have your password.  It is also where somebody has to sign in through
+  the provider once before the third option becomes available.</p>
+
+  <p><strong>Single sign on only.</strong>  Local passwords stop working.  The
+  reason to want this is that leaving them on means the provider's rules do not
+  really apply: its lockout, its second factor and, most of all, its leaver
+  process all have a way round them.  Somebody who left last month still has a
+  password here.</p>
+
+  <p><strong>Why the third one is refused until somebody has used the
+  second.</strong>  Turning local passwords off is the only setting on this
+  page that can leave nobody able to sign in, and it fails quietly: the page
+  saves, and the next person to open the login screen finds neither route
+  works.  So we want evidence rather than intention, and the only evidence
+  worth having is a completed login.  An account gets an OIDC subject on it the
+  first time somebody actually signs in that way, and that is what is being
+  counted.</p>
+
+  <p><strong>Groups decide the role.</strong>  Highest wins.  Somebody in none
+  of the three groups cannot sign in at all, which is how you take access away:
+  remove them at the provider and they are out of every node at once.</p>
+
+  <p><strong>If it all goes wrong.</strong>  Run
+  <code>./auth-recovery.sh --allow-local</code> from the install directory on
+  any node.  It puts local passwords back without needing the GUI, which is the
+  point of it: the way back in must not depend on the thing that broke.</p>
+
+  <p><strong>Where these are kept.</strong>  In the database, not the
+  environment, so a change applies on the next sign in with nothing restarted
+  and travels to the other nodes with the config.  If <code>NFM_OIDC_*</code>
+  is still set in <code>.env</code> it stays as a fallback for anything left
+  blank here.</p>
+</div>
+
 <script nonce="{{ csp_nonce }}">
 document.addEventListener("DOMContentLoaded", function () {
+  // Check the discovery URL without making anybody attempt a login.  A typo
+  // here is the most common way this is set up wrong, and the worst place to
+  // find out is the login page in front of somebody who cannot get in.
+  const testBtn = document.getElementById("oidc-test");
+  if (testBtn) {
+    testBtn.addEventListener("click", async function () {
+      const out = document.getElementById("oidc-test-out");
+      testBtn.disabled = true;
+      out.textContent = "asking the provider";
+      try {
+        const r = await NFM.api("/auth/oidc/test", { method: "POST", body: {} });
+        out.textContent = "answered as " + r.issuer +
+          (r.supports_pkce ? ", PKCE supported" : ", no PKCE advertised") +
+          (r.redirect_uri ? ".  Register " + r.redirect_uri + " with it." : "");
+        NFM.toast("The provider answered", "ok");
+      } catch (err) {
+        out.textContent = err.message;
+        NFM.toast(err.message, "bad");
+      } finally {
+        testBtn.disabled = false;
+      }
+    });
+  }
+
   const source = document.getElementById("geoip_source");
   const maxmind = document.getElementById("geo-maxmind");
   const summary = document.getElementById("geo-summary");

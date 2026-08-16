@@ -59,26 +59,50 @@
       </div>
 
     {% else %}
-      <form method="post" action="{{ base }}/auth/login">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <div class="field">
-          <label for="username">Username</label>
-          <input type="text" id="username" name="username"
-                 autocomplete="username" autofocus required>
-        </div>
+      {# Local passwords are switched off when the fleet is on the provider
+         only.  Hiding the form is presentation and nothing more; the check
+         that means it is in authenticate_local, because a form nobody can see
+         is still a URL anybody can post to. #}
+      {% if local_enabled %}
+        <form method="post" action="{{ base }}/auth/login">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <div class="field">
+            <label for="username">Username</label>
+            <input type="text" id="username" name="username"
+                   autocomplete="username" autofocus required>
+          </div>
 
-        <div class="field">
-          <label for="password">Password</label>
-          <input type="password" id="password" name="password"
-                 autocomplete="current-password" required>
-        </div>
+          <div class="field">
+            <label for="password">Password</label>
+            <input type="password" id="password" name="password"
+                   autocomplete="current-password" required>
+          </div>
 
-        <button type="submit" class="btn primary">Continue</button>
-      </form>
+          <button type="submit" class="btn primary">Continue</button>
+        </form>
+      {% endif %}
 
       {% if oidc_enabled %}
-        <div class="login-divider">or</div>
-        <a href="{{ base }}/auth/oidc/start" class="btn">Sign in with single sign on</a>
+        {% if local_enabled %}<div class="login-divider">or</div>{% endif %}
+        <a href="{{ base }}/auth/oidc/start"
+           class="btn {{ 'primary' if not local_enabled }}">Sign in with single sign on</a>
+      {% endif %}
+
+      {# Both switched off.  Somebody has picked the provider only and either
+         not finished setting it up or it has stopped answering, and a login
+         page with no way in on it needs to say what to do rather than look
+         broken.  The script named here is the way back. #}
+      {% if not local_enabled and not oidc_enabled %}
+        <div class="notice warn">
+          <div>
+            <strong>There is no way to sign in right now.</strong>
+            This fleet is set to single sign on only and the provider details
+            are not complete, so neither route works.
+            An administrator with access to the box can run
+            <code>./auth-recovery.sh --allow-local</code> from the install
+            directory to turn local passwords back on.
+          </div>
+        </div>
       {% endif %}
     {% endif %}
 

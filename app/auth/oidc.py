@@ -4,10 +4,25 @@ Single sign on.
 Standard OpenID Connect authorization code flow with PKCE.  Works with Okta,
 Entra, Keycloak, Google, anything that publishes a discovery document.
 
-Local break glass accounts keep working whether this is set up or not.  That is
-deliberate, and it is the thing most SSO integrations get wrong.  If the
-identity provider is down and it is behind the load balancer you need to fix,
-you have locked yourself out of the tool you need.
+Local accounts keep working alongside this by default, and that default is
+deliberate.  It is the thing most SSO integrations get wrong: if the identity
+provider is down, and it is behind the load balancer you need to fix, you have
+locked yourself out of the tool you need to fix it.
+
+A fleet can now be set to this only, from Settings, which switches local
+passwords off.  There is a real reason to want that, because leaving passwords
+on means the provider's lockout, second factor and leaver process all have a
+way round them.  It is guarded on the way in and on the way out.  On the way
+in, the mode cannot be chosen until an admin has completed a login this way, so
+intention is never enough.  On the way out, `auth-recovery.sh` in the install
+directory turns local passwords back on from a shell, without the browser and
+without the provider, which is the door that does not depend on the thing that
+broke.
+
+Where the settings come from: the database, through `settings_store`, with the
+`NFM_OIDC_*` environment variables behind them as a fallback.  Read through
+`config()` and never straight from the environment, or half the flow ends up
+talking to one provider and half to another.
 """
 
 import base64
@@ -22,7 +37,6 @@ import httpx
 import jwt
 from jwt import PyJWKClient
 
-from app.config import get_settings
 from app.auth.service import role_for_groups
 from app.models import AuthSource, User, UserRole, utcnow
 
@@ -44,8 +58,7 @@ class OIDCError(Exception):
 
 
 async def get_discovery() -> dict:
-    settings = get_settings()
-    url = settings.oidc_discovery_url
+    url = config()["discovery_url"]
 
     if not url:
         raise OIDCError("no OIDC discovery URL is set")
@@ -73,10 +86,10 @@ async def get_discovery() -> dict:
 
 
 def _redirect_uri() -> str:
-    settings = get_settings()
-    base = settings.oidc_redirect_base.rstrip("/")
+    base = config()["redirect_base"].rstrip("/")
     if not base:
-        raise OIDCError("NFM_OIDC_REDIRECT_BASE is not set")
+        raise OIDCError("nobody has set the address the provider sends people "
+                        "back to, under Settings")
     return f"{base}/auth/oidc/callback"
 
 
@@ -94,7 +107,6 @@ async def begin_login(source_ip: str = None) -> str:
     code being useful to anybody who does not also hold the verifier.  It was
     designed for mobile apps but there is no reason not to use it here.
     """
-    settings = get_settings()
     doc = await get_discovery()
 
     state = secrets.token_urlsafe(32)
@@ -112,7 +124,7 @@ async def begin_login(source_ip: str = None) -> str:
 
     params = {
         "response_type": "code",
-        "client_id": settings.oidc_client_id,
+        "client_id": config()["client_id"],
         "redirect_uri": _redirect_uri(),
         "scope": "openid profile email groups",
         "state": state,
@@ -127,7 +139,6 @@ async def complete_login(code: str, state: str, source_ip: str = None) -> dict:
     """
     Finish the login.  Swaps the code for tokens and checks the id_token.
     """
-    settings = get_settings()
 
     pending = _pending.pop(state, None)
     if not pending:
@@ -144,11 +155,12 @@ async def complete_login(code: str, state: str, source_ip: str = None) -> dict:
         "grant_type": "authorization_code",
         "code": code,
         "redirect_uri": _redirect_uri(),
-        "client_id": settings.oidc_client_id,
+        "client_id": config()["client_id"],
         "code_verifier": pending["verifier"],
     }
-    if settings.oidc_client_secret:
-        data["client_secret"] = settings.oidc_client_secret
+    secret = config()["client_secret"]
+    if secret:
+        data["client_secret"] = secret
 
     try:
         async with httpx.AsyncClient(timeout=20) as client:
@@ -172,7 +184,7 @@ async def complete_login(code: str, state: str, source_ip: str = None) -> dict:
 
     # Groups sometimes are not in the id_token, usually because the provider
     # keeps it small.  If we did not get any, ask the userinfo endpoint.
-    groups = claims.get(settings.oidc_groups_claim) or []
+    groups = claims.get(config()["groups_claim"]) or []
     if not groups and doc.get("userinfo_endpoint") and tokens.get("access_token"):
         groups = await _fetch_groups(doc["userinfo_endpoint"], tokens["access_token"])
 
@@ -198,7 +210,6 @@ async def _verify_id_token(id_token: str, doc: dict) -> dict:
     one line shorter, means anybody can hand us a token they wrote themselves
     claiming to be an admin.
     """
-    settings = get_settings()
 
     try:
         jwk_client = PyJWKClient(doc["jwks_uri"], cache_keys=True, lifespan=3600)
@@ -211,7 +222,7 @@ async def _verify_id_token(id_token: str, doc: dict) -> dict:
             id_token,
             signing_key.key,
             algorithms=["RS256", "RS384", "RS512", "ES256", "ES384"],
-            audience=settings.oidc_client_id,
+            audience=config()["client_id"],
             issuer=doc["issuer"],
             options={
                 "verify_signature": True,
@@ -235,7 +246,6 @@ async def _verify_id_token(id_token: str, doc: dict) -> dict:
 
 
 async def _fetch_groups(userinfo_url: str, access_token: str) -> list:
-    settings = get_settings()
     try:
         async with httpx.AsyncClient(timeout=15) as client:
             response = await client.get(
@@ -244,7 +254,7 @@ async def _fetch_groups(userinfo_url: str, access_token: str) -> list:
             )
             if response.status_code >= 400:
                 return []
-            return response.json().get(settings.oidc_groups_claim) or []
+            return response.json().get(config()["groups_claim"]) or []
     except (httpx.HTTPError, json.JSONDecodeError):
         return []
 
@@ -313,11 +323,41 @@ def _cleanup_pending():
             _pending.pop(state, None)
 
 
+def config() -> dict:
+    """
+    Where every value in this module comes from.
+
+    The settings page writes these to the database and the environment is the
+    fallback, so an install that set `NFM_OIDC_*` before the page existed keeps
+    working untouched.  Read through one function rather than nine scattered
+    lookups, because the bug that prevents is a login that starts against the
+    provider in the database and finishes against the one in the environment.
+    """
+    from app.core import settings_store
+    return settings_store.oidc_config()
+
+
+def has_details() -> bool:
+    """
+    Whether enough has been filled in for a login to have a chance.
+
+    Deliberately separate from `is_configured`.  The settings page needs to
+    show "the details are here but the mode has it switched off", and a single
+    boolean cannot say that.
+    """
+    values = config()
+    return bool(values["discovery_url"] and values["client_id"]
+                and values["redirect_base"])
+
+
 def is_configured() -> bool:
-    settings = get_settings()
-    return bool(
-        settings.oidc_enabled
-        and settings.oidc_discovery_url
-        and settings.oidc_client_id
-        and settings.oidc_redirect_base
-    )
+    """
+    Whether the provider should be offered on the login page right now.
+
+    Two questions, both of which have to be yes: the mode allows it, and enough
+    details exist to try.  The mode is checked first because "local only" has
+    to win even when a provider is fully configured, which is the state
+    somebody is in while they are still setting one up.
+    """
+    from app.core import settings_store
+    return settings_store.oidc_offered() and has_details()

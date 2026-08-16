@@ -246,6 +246,23 @@ def authenticate_local(session, username: str, password: str,
     settings = get_settings()
     generic = "that username or password is not right"
 
+    # Refused before anything is checked when the fleet is on the provider
+    # only.  Hiding the form on the login page is presentation; this is the
+    # part that means it, because a form nobody can see is still a URL anybody
+    # can post to.
+    #
+    # Said plainly rather than through `generic`.  The usual reason for a vague
+    # message is not telling an attacker which usernames are real, and this
+    # answer tells them nothing about any account: it is the same for a name
+    # that exists, a name that does not, and an empty box.
+    from app.core import settings_store
+    if not settings_store.local_passwords_allowed():
+        return AuthResult(
+            False,
+            reason="this fleet signs in through single sign on only, so a "
+                   "username and password will not get you in",
+        )
+
     user = session.query(User).filter(
         User.username == username,
         User.source == AuthSource.LOCAL,
@@ -447,14 +464,16 @@ def role_for_groups(groups: list) -> UserRole:
     which is what people expect, and it means adding somebody to the admin group
     works without having to remove them from anything first.
     """
-    settings = get_settings()
+    from app.core import settings_store
+
+    names = settings_store.oidc_config()
     lowered = {str(g).lower() for g in (groups or [])}
 
-    if settings.oidc_admin_group.lower() in lowered:
+    if names["admin_group"].lower() in lowered:
         return UserRole.ADMIN
-    if settings.oidc_operator_group.lower() in lowered:
+    if names["operator_group"].lower() in lowered:
         return UserRole.OPERATOR
-    if settings.oidc_viewer_group.lower() in lowered:
+    if names["viewer_group"].lower() in lowered:
         return UserRole.VIEWER
     return None
 

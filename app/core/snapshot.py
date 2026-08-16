@@ -251,6 +251,16 @@ def capture(session) -> dict:
         out["tables"][key] = rows
 
     out["users"] = _capture_users(session)
+
+    # How people sign in, which belongs to the fleet and not to one box.
+    #
+    # Left out until it was needed, and the gap only shows on the day it costs
+    # most: the identity provider is set on the active node, the active node
+    # goes away, and the standby that takes over knows nothing about it.  With
+    # local passwords switched off that is a fleet nobody can sign in to.
+    from app.core import settings_store
+    out["settings"] = settings_store.capture_fleet()
+
     return out
 
 
@@ -410,6 +420,19 @@ def restore(session, data: dict) -> dict:
     written["users"] = _restore_users(session, (data or {}).get("users"))
 
     session.commit()
+
+    # Sign in settings, after the commit and by their own route, because they
+    # live in a key and value table rather than in one of the models above.
+    #
+    # Only written when the snapshot actually carries them.  A snapshot from a
+    # node on older code says nothing about them, and "said nothing" has to
+    # keep meaning "leave it alone" here for the same reason it does for the
+    # tables: the alternative is a rolling upgrade quietly clearing how the
+    # fleet signs in.
+    if "settings" in (data or {}):
+        from app.core import settings_store
+        written["settings"] = settings_store.restore_fleet(data.get("settings"))
+
     log.warning("restored the config from a snapshot: %s",
                 ", ".join(f"{k}={v}" for k, v in written.items() if v))
     return written

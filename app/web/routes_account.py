@@ -604,6 +604,62 @@ def _users_back(error: str = None, ok: str = None):
 # Settings
 # ==============================================================================
 
+def _sso_capable_admins(db) -> list:
+    """
+    Admins who have actually signed in through the provider at least once.
+
+    `oidc_subject` is only set by a completed login, so this is not a list of
+    people who ought to be able to get in.  It is a list of people who already
+    have, which is the only evidence worth accepting before switching local
+    passwords off.
+    """
+    return [u.username for u in db.query(User).filter(
+        User.role == UserRole.ADMIN,
+        User.enabled.is_(True),
+        User.oidc_subject.isnot(None),
+        User.oidc_subject != "",
+    ).all()]
+
+
+def _auth_mode_problem(db, mode: str) -> str:
+    """
+    Why this sign in mode cannot be selected, or empty when it can.
+
+    The whole of the risk in this feature is here.  Switching to the provider
+    only is the one setting on the page that can leave nobody able to sign in,
+    and it does it silently: the page saves, says "settings saved", and the
+    next person to open the login screen finds it will not take their password
+    and the provider does not know who they are.
+
+    So it is refused unless somebody has already proved the round trip works by
+    completing a login through the provider and landing on an enabled admin
+    account.  That is a real hoop and it is the point: sign in through the
+    provider once while local passwords still work, then switch.
+    """
+    from app.auth import oidc
+    from app.core import settings_store
+
+    if mode not in settings_store.AUTH_MODES:
+        return "that is not one of the sign in modes"
+
+    if mode == "local":
+        return ""
+
+    if not oidc.has_details():
+        return ("single sign on needs a discovery URL, a client id and an "
+                "address to come back to before it can be switched on")
+
+    if mode == "oidc":
+        capable = _sso_capable_admins(db)
+        if not capable:
+            return ("no admin has signed in through single sign on yet, so "
+                    "turning local passwords off would lock everybody out.  "
+                    "Leave this on local or single sign on, sign in that way "
+                    "once, then come back and switch")
+
+    return ""
+
+
 @router.get("/settings", response_class=HTMLResponse)
 async def settings_page(request: Request, db: DBSession = Depends(get_db),
                         error: str = None, ok: str = None):
@@ -611,13 +667,37 @@ async def settings_page(request: Request, db: DBSession = Depends(get_db),
     if not can(user, "manage_settings"):
         raise HTTPException(status_code=403, detail="only an admin can change settings")
 
+    from app.auth import oidc
     from app.core import settings_store
 
     env = get_settings()
     csrf = ensure_csrf_token(request)
+
+    # Everything the sign in card needs to explain itself, including why the
+    # strictest mode may not be available yet.  Worked out here rather than in
+    # the template, because "can this fleet safely go provider only" is a
+    # question about accounts and a template should not be asking it.
+    capable = _sso_capable_admins(db)
+    auth = {
+        "mode": settings_store.auth_mode(),
+        "modes": settings_store.AUTH_MODES,
+        "has_details": oidc.has_details(),
+        "sso_admins": capable,
+        "can_go_oidc_only": bool(capable) and oidc.has_details(),
+        "from_env": bool(env.oidc_enabled and not settings_store.get("auth_mode")),
+        "values": {
+            key: settings_store.get(key) or ""
+            for key in ("oidc_discovery_url", "oidc_client_id",
+                        "oidc_redirect_base", "oidc_groups_claim",
+                        "oidc_admin_group", "oidc_operator_group",
+                        "oidc_viewer_group")
+        },
+        "secret_set": bool(settings_store.get("oidc_client_secret")),
+    }
+
     response = render(
         request, "settings.html", user, csrf_token=csrf,
-        values=settings_store.all_visible(),
+        values=settings_store.all_visible(), auth=auth,
         error=error, ok=ok,
         env={
             "node_name": env.node_name,
@@ -647,7 +727,16 @@ async def save_settings(request: Request, db: DBSession = Depends(get_db),
                         geoip_source: str = Form(""),
                         geoip_account_id: str = Form(""),
                         geoip_license_key: str = Form(""),
-                        geoip_refresh: str = Form("monthly")):
+                        geoip_refresh: str = Form("monthly"),
+                        auth_mode: str = Form("local"),
+                        oidc_discovery_url: str = Form(""),
+                        oidc_client_id: str = Form(""),
+                        oidc_client_secret: str = Form(""),
+                        oidc_redirect_base: str = Form(""),
+                        oidc_groups_claim: str = Form("groups"),
+                        oidc_admin_group: str = Form("nginx-admins"),
+                        oidc_operator_group: str = Form("nginx-operators"),
+                        oidc_viewer_group: str = Form("nginx-viewers")):
     await check_csrf(request)
     user = require_page_user(request, db)
     if not can(user, "manage_settings"):
@@ -743,6 +832,36 @@ async def save_settings(request: Request, db: DBSession = Depends(get_db),
         return RedirectResponse(
             _p(f"/settings?error={quote('that is not a refresh schedule')}"),
             status_code=303)
+
+    # How people sign in.
+    #
+    # Saved before the guard below so a half typed provider can still be
+    # stored: somebody filling this in over two visits should not lose what
+    # they typed because the mode they want is not reachable yet.
+    settings_store.set("oidc_discovery_url", oidc_discovery_url.strip(), user.username)
+    settings_store.set("oidc_client_id", oidc_client_id.strip(), user.username)
+    settings_store.set("oidc_redirect_base", oidc_redirect_base.strip().rstrip("/"),
+                       user.username)
+    settings_store.set("oidc_groups_claim", oidc_groups_claim.strip() or "groups",
+                       user.username)
+    settings_store.set("oidc_admin_group", oidc_admin_group.strip() or "nginx-admins",
+                       user.username)
+    settings_store.set("oidc_operator_group",
+                       oidc_operator_group.strip() or "nginx-operators", user.username)
+    settings_store.set("oidc_viewer_group",
+                       oidc_viewer_group.strip() or "nginx-viewers", user.username)
+
+    # The secret follows the same rule as every other secret on this page: the
+    # box comes back empty on every load, so saving with it untouched must not
+    # wipe what is stored.
+    if oidc_client_secret.strip():
+        settings_store.set("oidc_client_secret", oidc_client_secret.strip(),
+                           user.username)
+
+    problem = _auth_mode_problem(db, auth_mode)
+    if problem:
+        return RedirectResponse(_p(f"/settings?error={quote(problem)}"), status_code=303)
+    settings_store.set("auth_mode", auth_mode, user.username)
 
     settings_store.set("geoip_source", source, user.username)
     settings_store.set("geoip_refresh", schedule, user.username)

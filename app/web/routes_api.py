@@ -931,6 +931,65 @@ async def metrics_history(request: Request, start: int = None, end: int = None,
     }
 
 
+@router.post("/auth/oidc/test")
+async def oidc_test(request: Request, g: ObjectGuard = Depends(changing)):
+    """
+    Fetch the discovery document and say what came back.
+
+    **Honest about what it proves.**  It proves the address resolves, the TLS
+    is acceptable to this node, and the document is an OpenID one with the
+    endpoints in it.  It does not prove the client id is right, the secret is
+    right, the redirect address is registered, or that anybody is in the
+    groups.  Only a real login proves those, which is why the mode that turns
+    local passwords off wants one to have happened.
+
+    Worth having anyway, because a typo in the discovery URL is the single most
+    common way this is set up wrong, and finding it here beats finding it on
+    the login page in front of somebody who cannot get in.
+    """
+    import httpx
+
+    from app.auth import oidc
+
+    g.require("manage_settings")
+
+    values = oidc.config()
+    url = values["discovery_url"]
+    if not url:
+        raise HTTPException(status_code=400,
+                            detail="save a discovery URL first, then test it")
+
+    try:
+        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+            response = await client.get(url)
+            response.raise_for_status()
+            doc = response.json()
+    except Exception as exc:
+        raise HTTPException(status_code=502,
+                            detail=f"could not read that discovery URL: {exc}")
+
+    missing = [k for k in ("issuer", "authorization_endpoint", "token_endpoint",
+                           "jwks_uri") if not doc.get(k)]
+    if missing:
+        raise HTTPException(
+            status_code=502,
+            detail="that answered, but it is not an OpenID discovery document: "
+                   f"no {', '.join(missing)}")
+
+    return {
+        "ok": True,
+        "issuer": doc.get("issuer"),
+        "authorization_endpoint": doc.get("authorization_endpoint"),
+        "token_endpoint": doc.get("token_endpoint"),
+        "userinfo_endpoint": doc.get("userinfo_endpoint"),
+        "supports_pkce": "S256" in (doc.get("code_challenge_methods_supported") or []),
+        "client_id_set": bool(values["client_id"]),
+        "secret_set": bool(values["client_secret"]),
+        "redirect_uri": (values["redirect_base"].rstrip("/") + "/auth/oidc/callback"
+                         if values["redirect_base"] else ""),
+    }
+
+
 @router.get("/waf/rule-ids")
 async def waf_rule_ids(request: Request, db: DBSession = Depends(get_db)):
     """

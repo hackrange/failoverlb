@@ -33,6 +33,13 @@ log = logging.getLogger("nfm.settings")
 #   type     how to store and show it
 #   secret   encrypted at rest and never sent back to the browser
 #   env      the environment variable it falls back to
+#   fleet    belongs to the fleet rather than to one box, so it travels with
+#            the config snapshot on every apply
+#
+# **fleet is not decoration.**  A setting only this node knows is a setting the
+# standby does not have the morning it gets promoted.  For most of what is
+# below that is survivable; for how people sign in it is not, which is why the
+# sign in settings are the first ones marked.
 EDITABLE = {
     "acme_email": {
         "type": "string",
@@ -124,7 +131,85 @@ EDITABLE = {
         "env": None,
         "label": "How often to fetch a new rule set",
     },
+
+    # ---- how people sign in to this GUI --------------------------------------
+    #
+    # These were environment only until now, which meant editing .env on every
+    # node and restarting all of them to change an identity provider.  They are
+    # all marked fleet, because sign in has to work on whichever node answers,
+    # and after a failover that is not the node somebody set them on.
+    "auth_mode": {
+        "type": "string",
+        "env": None,
+        "fleet": True,
+        "label": "How people sign in",
+    },
+    "oidc_discovery_url": {
+        "type": "string",
+        "env": "oidc_discovery_url",
+        "fleet": True,
+        "label": "OpenID discovery URL",
+    },
+    "oidc_client_id": {
+        "type": "string",
+        "env": "oidc_client_id",
+        "fleet": True,
+        "label": "Client id",
+    },
+    "oidc_client_secret": {
+        "type": "secret",
+        "env": "oidc_client_secret",
+        "fleet": True,
+        "label": "Client secret",
+    },
+    "oidc_redirect_base": {
+        "type": "string",
+        "env": "oidc_redirect_base",
+        "fleet": True,
+        "label": "The address the provider sends people back to",
+    },
+    "oidc_groups_claim": {
+        "type": "string",
+        "env": "oidc_groups_claim",
+        "fleet": True,
+        "label": "Which claim holds the group names",
+    },
+    "oidc_admin_group": {
+        "type": "string",
+        "env": "oidc_admin_group",
+        "fleet": True,
+        "label": "Group that gets admin",
+    },
+    "oidc_operator_group": {
+        "type": "string",
+        "env": "oidc_operator_group",
+        "fleet": True,
+        "label": "Group that gets operator",
+    },
+    "oidc_viewer_group": {
+        "type": "string",
+        "env": "oidc_viewer_group",
+        "fleet": True,
+        "label": "Group that gets viewer",
+    },
 }
+
+# The three ways in, and what each one means.
+#
+#   local   passwords on this box only.  The provider is ignored even if it is
+#           configured, which is what you want while you are still setting one
+#           up and do not want a half finished button on the login page.
+#   both    either.  The safe middle, and the only mode you can reach oidc from,
+#           because it is where somebody proves their account maps to a real
+#           person at the provider.
+#   oidc    the provider only.  Local passwords stop working.  This is the mode
+#           people want once the provider is the system of record, and it is the
+#           one that can lock everybody out, so it has its own guard rails.
+AUTH_MODES = ("local", "both", "oidc")
+
+# Settings that belong to the fleet rather than to one box.  Read by the config
+# snapshot so they travel on every apply.
+FLEET_KEYS = tuple(k for k, spec in EDITABLE.items() if spec.get("fleet"))
 
 
 # Settings the app keeps for itself.  Not on the GUI's editable list, because
@@ -250,6 +335,141 @@ def _coerce(raw: str, kind: str):
         except (TypeError, ValueError):
             return []
     return raw
+
+
+# ==============================================================================
+# Signing in
+# ==============================================================================
+
+def auth_mode() -> str:
+    """
+    Which of the three ways in is switched on: local, both, or oidc.
+
+    Falls back to the environment the way everything else here does, so an
+    install that set `NFM_OIDC_ENABLED` before this page existed keeps the
+    behaviour it had: the provider offered alongside local passwords.  Anything
+    unrecognised reads as local, because the failure that matters is a typo in
+    a database row turning into nobody being able to sign in.
+    """
+    stored = str(get("auth_mode") or "").strip().lower()
+    if stored in AUTH_MODES:
+        return stored
+    return "both" if get_settings().oidc_enabled else "local"
+
+
+def local_passwords_allowed() -> bool:
+    """Whether a username and password still gets anybody in."""
+    return auth_mode() != "oidc"
+
+
+def oidc_offered() -> bool:
+    """
+    Whether the provider should be offered at all.
+
+    Only says the mode allows it.  Whether it is actually usable is
+    `app.auth.oidc.is_configured()`, which also wants a discovery URL, a client
+    id and somewhere to come back to.
+    """
+    return auth_mode() in ("both", "oidc")
+
+
+def oidc_config() -> dict:
+    """
+    Every OIDC value, database first and the environment behind it.
+
+    One function rather than nine lookups scattered about, because the failure
+    this prevents is subtle: half the flow reading the database and half of it
+    still reading the environment gives a login that starts against one
+    provider and finishes against another.
+    """
+    return {
+        "discovery_url": (get("oidc_discovery_url") or "").strip(),
+        "client_id": (get("oidc_client_id") or "").strip(),
+        "client_secret": (get("oidc_client_secret") or "").strip(),
+        "redirect_base": (get("oidc_redirect_base") or "").strip(),
+        "groups_claim": (get("oidc_groups_claim") or "groups").strip(),
+        "admin_group": (get("oidc_admin_group") or "nginx-admins").strip(),
+        "operator_group": (get("oidc_operator_group") or "nginx-operators").strip(),
+        "viewer_group": (get("oidc_viewer_group") or "nginx-viewers").strip(),
+    }
+
+
+# ==============================================================================
+# What travels with the config
+# ==============================================================================
+
+def capture_fleet() -> list:
+    """
+    The fleet wide settings, as plain data, for the config snapshot.
+
+    Secrets are unsealed here and sealed again with the receiving node's own
+    key, exactly as `snapshot.py` already does for pool tokens and private
+    keys.  The reasoning is the same and so is the trade: the peer link is
+    mutual TLS between two nodes holding certificates from the same private CA,
+    with a signature on every message, and a client secret that does not
+    survive a failover is a fleet where nobody can sign in the moment the
+    standby takes over.
+
+    A value that will not decrypt here is left out rather than sent as bytes
+    the far end would store and never be able to read.
+    """
+    out = []
+    for key in FLEET_KEYS:
+        with session_scope() as session:
+            row = session.query(SystemSetting).filter(
+                SystemSetting.key == key).first()
+            if row is None:
+                continue
+            raw, sealed = row.value, bool(row.encrypted)
+
+        if sealed and raw:
+            raw = decrypt(raw)
+            if raw is None:
+                log.warning("could not read %s for the snapshot, leaving it out", key)
+                continue
+
+        out.append({"key": key, "value": raw, "encrypted": sealed})
+    return out
+
+
+def restore_fleet(rows) -> int:
+    """
+    Put the fleet wide settings back from a snapshot.
+
+    Only keys on the fleet list are accepted.  A snapshot is data that arrived
+    over the network, and a loop that wrote whatever keys it was handed would
+    let a peer set anything in this table, including the internal values the
+    settings page deliberately cannot reach.
+    """
+    if not rows:
+        return 0
+
+    allowed = set(FLEET_KEYS)
+    written = 0
+    with session_scope() as session:
+        for row in rows:
+            key = row.get("key")
+            if key not in allowed:
+                log.warning("a snapshot tried to set %s, which is not a fleet "
+                            "setting, so it was ignored", key)
+                continue
+
+            value = row.get("value")
+            sealed = bool(row.get("encrypted"))
+            if sealed and value:
+                value = encrypt(value)
+
+            existing = session.query(SystemSetting).filter(
+                SystemSetting.key == key).first()
+            if existing is None:
+                existing = SystemSetting(key=key)
+                session.add(existing)
+            existing.value = value
+            existing.encrypted = sealed
+            existing.updated_by = "snapshot"
+            written += 1
+        session.commit()
+    return written
 
 
 def acme_email() -> str:
