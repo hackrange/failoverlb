@@ -2936,6 +2936,7 @@ register(
 
     Feature(
         key="waf_mode",
+        own_screen=True,
         label="Web application firewall",
         category="security",
         directive="",            # one setting, several lines, so the renderer does it
@@ -2993,6 +2994,7 @@ register(
 
     Feature(
         key="waf_paranoia",
+        own_screen=True,
         label="Firewall strictness",
         category="security",
         directive="",

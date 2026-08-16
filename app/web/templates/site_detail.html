@@ -63,6 +63,7 @@
   <button class="tab" data-tab="paths" role="tab">Paths</button>
   <button class="tab" data-tab="settings" role="tab">Settings</button>
   <button class="tab" data-tab="geo" role="tab" id="tab-geo" hidden>Geo blocking</button>
+  <button class="tab" data-tab="waf" role="tab" id="tab-waf" hidden>Firewall</button>
   <button class="tab" data-tab="config" role="tab">nginx config</button>
 </div>
 
@@ -126,6 +127,24 @@
               </option>
             {% endfor %}
           </select>
+        </div>
+
+        {#
+          Which tunnel workloads this site actually depends on.
+
+          Filled in from the API, and hidden when there are none, so a fleet
+          not using the tunnel never sees it.  It covers the paths' pools as
+          well as this one, because a site with one backend here and another on
+          a path depends on both and the second is the one that gets forgotten.
+        #}
+        <div class="field" id="tunnel-dep-field" hidden>
+          <label>Tunnels used</label>
+          <div id="tunnel-dep"></div>
+          <div class="hint">
+            This site's traffic ends up at these workloads, so it stops working
+            if the tunnel does.  Removing one is refused while a pool still
+            names it.
+          </div>
         </div>
 
         <div class="field" data-when-mode="static">
@@ -413,6 +432,75 @@
           <button type="button" class="btn primary" id="geo-save">Save</button>
           <span class="small faint">Applies at the next Apply config, like every other change.</span>
         </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+{# ============================ firewall ============================ #}
+{#
+  Its own tab for the same reason geo blocking has one.  It is a question about
+  what reaches the site rather than a knob, the four answers need explaining in
+  more than a hint, and the page has to say whether the fleet can actually do
+  it before somebody picks an answer that cannot be applied.
+
+  The tab is hidden entirely when nginx was built without the module.  A tab
+  offering a setting that cannot be written is worse than no tab: it reads as
+  broken rather than as not installed.
+#}
+<div class="tab-panel" data-panel="waf" hidden>
+  <div class="card">
+    <div class="card-head">
+      <h2>Firewall for this site</h2>
+      <span class="small faint" id="waf-state"></span>
+    </div>
+    <div class="card-body">
+      <div id="waf-no-rules" class="notice warn" hidden>
+        <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.4 15 14H1z"/></svg>
+        <div>
+          There is no rule set on the fleet yet, so the firewall cannot be
+          applied.  Install one under <strong>Settings, Firewall rule set</strong>
+          and it takes a few seconds.
+        </div>
+      </div>
+
+      <p class="small muted" style="margin-top:0">
+        Checks each request against the OWASP rules before your backend sees it.
+        Start in watching, exercise the site, then decide what to refuse.
+      </p>
+
+      <div class="field" style="max-width:460px">
+        <label for="waf-mode">What this site does with the rules</label>
+        <select id="waf-mode">
+          <option value="off">Off</option>
+          <option value="watching">Watching, refuse nothing</option>
+          <option value="block_known">Block known malicious</option>
+          <option value="block">Block what the rules say</option>
+        </select>
+      </div>
+
+      <div id="waf-explain" class="notice info">
+        <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 3a.9.9 0 1 1 0 1.8A.9.9 0 0 1 8 4zm1.2 8H6.8v-.9h.7V7.9h-.7V7h2.1v4.1h.3V12z"/></svg>
+        <div id="waf-explain-text"></div>
+      </div>
+
+      <div class="field" style="max-width:320px">
+        <label for="waf-paranoia">Strictness</label>
+        <select id="waf-paranoia">
+          <option value="1">1, the default</option>
+          <option value="2">2, stricter</option>
+          <option value="3">3, stricter still</option>
+          <option value="4">4, refuses ordinary things</option>
+        </select>
+        <div class="hint">
+          Leave this at 1 unless you are prepared to spend time on what it
+          starts refusing.  Raise it in watching first and look at what fires.
+        </div>
+      </div>
+
+      <div class="flex mt">
+        <button type="button" class="btn primary" id="waf-save">Save</button>
+        <span class="small faint">Applies at the next Apply config, like every other change.</span>
       </div>
     </div>
   </div>
@@ -1449,6 +1537,138 @@ document.addEventListener("DOMContentLoaded", function () {
   window.addEventListener("beforeunload", function (e) {
     if (dirty) { e.preventDefault(); e.returnValue = ""; }
   });
+
+  // ---- which tunnel workloads this site leans on ----
+  (function tunnelDependencies() {
+    const field = document.getElementById("tunnel-dep-field");
+    const holder = document.getElementById("tunnel-dep");
+    if (!field || !holder) return;
+
+    (async function start() {
+      let host;
+      try { host = await NFM.api("/hosts/" + HOST_ID); }
+      catch (err) { return; }
+
+      const rows = host.tunnel_workloads || [];
+      if (!rows.length) return;
+
+      holder.innerHTML = rows.map(function (w) {
+        // A workload that was never enrolled is a backend that has never once
+        // answered, which is a different problem from one that is down, and
+        // the site page is where somebody is standing when they wonder why.
+        const badge = !w.enabled
+          ? '<span class="badge bad">disabled</span>'
+          : (w.enrolled ? '<span class="badge ok">enrolled</span>'
+                        : '<span class="badge warn">never enrolled</span>');
+        return '<div class="flex" style="gap:8px;align-items:baseline">' +
+          '<a href="/tunnel"><strong>' + NFM.escapeHtml(w.name) + "</strong></a>" +
+          '<span class="mono small faint">' + NFM.escapeHtml(w.address) + "</span>" +
+          badge +
+          (w.description
+            ? '<span class="small faint">' + NFM.escapeHtml(w.description) + "</span>"
+            : "") +
+          "</div>";
+      }).join("");
+
+      field.hidden = false;
+    })();
+  })();
+
+  // ---- the firewall ----
+  //
+  // Two settings on their own tab rather than two lines in the advanced list,
+  // and the tab is only there when nginx was built with the module.  The
+  // wording under the picker changes with the answer, because the difference
+  // between watching and blocking is the whole feature and a hint that says
+  // the same thing for all four answers explains none of them.
+  (function firewall() {
+    const tab = document.getElementById("tab-waf");
+    const mode = document.getElementById("waf-mode");
+    if (!tab || !mode) return;
+
+    const paranoia = document.getElementById("waf-paranoia");
+    const explain = document.getElementById("waf-explain-text");
+
+    const WORDS = {
+      off: "Nothing is checked.  Requests reach your backend exactly as they do now.",
+      watching:
+        "Every request is checked and none are refused.  Nothing your visitors " +
+        "do can break because of this, which is why it is where to start.  What " +
+        "the rules would have refused is written to this site's log.",
+      block_known:
+        "Refuses requests that are obviously an attack and nothing else.  The " +
+        "rules score each request and the bar is set high, so one odd looking " +
+        "header never refuses anybody.  Safe to turn on without tuning.",
+      block:
+        "Applies the full rule set.  It will refuse things your own application " +
+        "does until you have told it not to, so run watching first and deal with " +
+        "what fires.  Going straight here is how people end up switching a " +
+        "firewall off at two in the morning.",
+    };
+
+    function refresh() {
+      explain.textContent = WORDS[mode.value] || "";
+      // Strictness only means anything when something is being checked.
+      paranoia.closest(".field").hidden = mode.value === "off";
+      document.getElementById("waf-state").textContent =
+        mode.value === "off" ? "" :
+        mode.value === "watching" ? "watching" : "blocking";
+    }
+
+    mode.addEventListener("change", refresh);
+
+    document.getElementById("waf-save").addEventListener("click", async function () {
+      const button = document.getElementById("waf-save");
+      button.disabled = true;
+      try {
+        // Read the settings back and put them whole, the same as geo blocking.
+        // A settings put replaces the blob, so sending only these two keys
+        // would drop every other setting on the site.
+        const host = await NFM.api("/hosts/" + HOST_ID);
+        const settings = Object.assign({}, host.settings || {});
+        if (mode.value === "off") {
+          delete settings.waf_mode;
+          delete settings.waf_paranoia;
+        } else {
+          settings.waf_mode = mode.value;
+          settings.waf_paranoia = paranoia.value;
+        }
+        await NFM.api("/hosts/" + HOST_ID, { method: "PUT", body: { settings: settings } });
+        NFM.toast(mode.value === "off" ? "Firewall off for this site"
+                                       : "Firewall set to " + mode.value, "ok");
+      } catch (err) {
+        NFM.toast(err.message, "bad");
+      }
+      button.disabled = false;
+    });
+
+    (async function start() {
+      let host, rules;
+      try { host = await NFM.api("/hosts/" + HOST_ID); }
+      catch (err) { return; }
+
+      // The module is what decides whether the tab exists at all.  Asked of
+      // the fleet rather than this node, because a setting that only one node
+      // can write is a setting that fails the apply on the other one.
+      let modules;
+      try { modules = await NFM.api("/upgrade/modules"); }
+      catch (err) { modules = {}; }
+      const built = (modules.third_party || []).some(
+        n => String(n).toLowerCase().indexOf("modsecurity") !== -1);
+      if (!built) return;
+
+      tab.hidden = false;
+
+      try { rules = await NFM.api("/waf/rules"); }
+      catch (err) { rules = {}; }
+      document.getElementById("waf-no-rules").hidden = !!rules.everywhere;
+
+      const s = host.settings || {};
+      mode.value = s.waf_mode || "off";
+      paranoia.value = s.waf_paranoia || "1";
+      refresh();
+    })();
+  })();
 
   // ---- geo blocking ----
   //

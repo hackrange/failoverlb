@@ -299,6 +299,42 @@ async def new_enrol_link(peer_id: str, request: Request,
     }
 
 
+@router.patch("/api/tunnel/peers/{peer_id}")
+async def edit_peer(peer_id: str, request: Request, g: ObjectGuard = Depends(changing)):
+    """
+    Change the note on a workload.
+
+    The note is the only thing here worth editing after the fact.  The name is
+    what pools and sites are matched against by eye, and the address is what
+    they are matched against in code, so changing either of those is a rename
+    with consequences elsewhere rather than a correction.
+
+    Notes go stale faster than anything else on this page.  A workload called
+    web07 described as "the new billing box" is worse than one with no note at
+    all once billing has moved, and if the only way to fix it is to remove the
+    workload and enrol it again, nobody fixes it.
+
+    No apply.  The tunnel config has no notes in it, so nothing on any node
+    changes and pushing a fleet wide apply for a comment would be a lie about
+    what happened.
+    """
+    g.require("manage_cluster")
+    peer = g.get(TunnelPeer, peer_id)
+
+    payload = await request.json() if await request.body() else {}
+    if "description" not in payload:
+        raise HTTPException(status_code=400, detail="there is nothing to change")
+
+    was = peer.description or ""
+    peer.description = (str(payload["description"] or "").strip() or None)
+    g.session.commit()
+
+    audit.record("tunnel.peer.edit", user=g.user, object_type="tunnel_peer",
+                 object_name=peer.name,
+                 changes={"description": {"from": was, "to": peer.description or ""}})
+    return _peer_json(peer)
+
+
 @router.delete("/api/tunnel/peers/{peer_id}")
 async def remove_peer(peer_id: str, g: ObjectGuard = Depends(changing)):
     """

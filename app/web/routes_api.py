@@ -994,7 +994,57 @@ def _host_detail(h):
             _location_json(loc)
             for loc in sorted(h.locations, key=lambda x: x.sort_order or 0)
         ],
+        "tunnel_workloads": _tunnels_behind(h),
     }
+
+
+def _tunnels_behind(h):
+    """
+    Which tunnel workloads this site's traffic actually ends up at.
+
+    The dependency is real and completely invisible: a site points at a pool,
+    the pool names an address, and that address belongs to a machine that is
+    only reachable because it is on the tunnel.  Nothing on the site page says
+    so, so somebody removing a workload, or wondering why a site broke when the
+    tunnel went down, has to walk pools and members by hand to find out.
+
+    Both the site's own pool and the pools its paths use, since a site with one
+    backend on the Basics tab and another on a path depends on both, and the
+    one that gets forgotten is always the second.
+
+    Matched on address rather than on name.  The pool member holds whatever
+    somebody typed, and what makes it a tunnel workload is that the address is
+    the one the tunnel handed out.
+    """
+    from sqlalchemy.orm import object_session
+
+    from app.models import PoolMember, TunnelPeer
+
+    session = object_session(h)
+    if session is None:
+        return []
+
+    pool_ids = {h.pool_id} | {loc.pool_id for loc in h.locations}
+    pool_ids.discard(None)
+    if not pool_ids:
+        return []
+
+    addresses = {m.address for m in session.query(PoolMember)
+                 .filter(PoolMember.pool_id.in_(pool_ids)).all() if m.address}
+    if not addresses:
+        return []
+
+    peers = (session.query(TunnelPeer)
+             .filter(TunnelPeer.address.in_(addresses))
+             .order_by(TunnelPeer.name).all())
+
+    return [{"id": p.id, "name": p.name, "address": p.address,
+             "description": p.description or "",
+             # Said out loud, because a workload that was never enrolled is a
+             # backend that has never once answered, and that is a different
+             # problem from one that is simply down.
+             "enrolled": p.is_enrolled(), "enabled": bool(p.enabled)}
+            for p in peers]
 
 
 # ==============================================================================
