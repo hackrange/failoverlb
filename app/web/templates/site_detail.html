@@ -557,7 +557,7 @@
 
     Its own card because it is an activity rather than a setting: it has a
     start, an end and a result.  The addresses are asked for before anything
-    starts, which is the whole safeguard.  A firewall that whitelists whatever
+    starts, which is the whole safeguard.  A firewall that excuses whatever
     fired while it was learning is a gift to anybody scanning the site at the
     time.
   #}
@@ -572,6 +572,10 @@
           Name the addresses your testers will come from, start watching,
           exercise the site properly, then stop.  What fired from those
           addresses becomes a list you can tick and save as a named profile.
+          These are <strong>exclusions</strong>: each one stops a rule firing
+          on a path where it was wrong about your application.  The rules still
+          decide what gets refused, and anything they do not recognise is still
+          allowed.
         </p>
 
         <div class="field" style="max-width:460px">
@@ -2075,7 +2079,7 @@ document.addEventListener("DOMContentLoaded", function () {
         const clients = (g.clients || []).map(c => c[0] + " (" + c[1] + ")").join(", ");
         const tick = r.kind === "candidate"
           ? '<input type="checkbox" class="waf-hit" value="' + NFM.escapeHtml(key) + '">'
-          : '<input type="checkbox" disabled title="only traffic from a tester address can be whitelisted">';
+          : '<input type="checkbox" disabled title="only traffic from a tester address can be excused">';
         const badge = r.kind === "candidate"
           ? '<span class="badge ok">tester</span>'
           : (r.kind === "mixed"
@@ -2125,7 +2129,7 @@ document.addEventListener("DOMContentLoaded", function () {
           hits.mixed.length + " of these fired for a tester and for somebody " +
           "else.  Those cannot be ticked: a rule that a stranger also tripped " +
           "during your test window is exactly what this filter exists to " +
-          "catch, and whitelisting it on the strength of the tester's half is " +
+          "catch, and excusing it on the strength of the tester's half is " +
           "how a site goes blind to the attack it was being probed with.";
       }
       if (payload.partial) {
