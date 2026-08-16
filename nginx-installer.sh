@@ -552,12 +552,26 @@ build_modsecurity() {
 
   cd "${BUILD_ROOT}/ModSecurity"
   ./build.sh
+  # --prefix matters more than it looks.
+  #
+  # ModSecurity's configure defaults to /usr/local/modsecurity, not /usr/local,
+  # which is unusual enough that it cost a whole build to find.  Two things go
+  # wrong if it is left alone: the nginx connector cannot find the library, and
+  # even pointed at it by hand the module would then fail at runtime, because
+  # /usr/local/modsecurity/lib is not on the loader's search path and nginx
+  # would start, load the module and die on a missing libmodsecurity.so.3.
+  #
+  # Installing into /usr/local instead puts it where ldconfig already looks, so
+  # both problems go away rather than being papered over with an ld.so.conf.d
+  # entry.
+  #
   # The docs and examples are most of the build time and none of the value.
   # yajl and lmdb are asked for by name rather than left to autodetect, so a
   # missing package fails here with a clear reason instead of quietly producing
   # an engine that cannot write a JSON audit log, which is what the hits page
   # reads.
   ./configure \
+    --prefix=/usr/local \
     --with-yajl \
     --with-lmdb \
     --disable-doxygen-doc \
