@@ -109,6 +109,64 @@ def addresses_pools_point_at(session, network):
     return out
 
 
+def address_problem(session, network, wanted: str) -> str:
+    """
+    Why this address cannot be given to a workload, or empty when it can.
+
+    Asking for a specific one is allowed, and it has an obvious use: putting a
+    machine back where it was.  A pool member is an address rather than a
+    machine, so re-adding web01 at the address web01 used to have is the one
+    case where reuse is not just safe but the thing you actually want.
+
+    Two things are still refused outright, because neither has a good outcome:
+
+      * an address a load balancer holds, which would make the fleet argue with
+        a workload about who it is
+      * an address another workload already has, which is two machines claiming
+        one identity and whichever handshakes last wins
+
+    A pool pointing at it is **not** refused, only reported.  That is the
+    re-adding case, and telling somebody which pools will start reaching this
+    machine is more use than refusing and making them guess.
+    """
+    net = ipaddress.ip_network(network.cidr)
+    try:
+        address = ipaddress.ip_address(str(wanted).strip())
+    except ValueError:
+        return f"{wanted} is not an IP address"
+
+    if address not in net:
+        return f"{address} is outside {network.cidr}"
+    if address == net.network_address or address == net.broadcast_address:
+        return f"{address} is the network or broadcast address of {network.cidr}"
+
+    for node, held in node_addresses(session, network).items():
+        if held == str(address):
+            return (f"{address} belongs to the load balancer {node}.  The "
+                    f"bottom of the range is theirs.")
+
+    for peer in (session.query(TunnelPeer)
+                 .filter(TunnelPeer.network_id == network.id).all()):
+        if peer.address == str(address):
+            return f"the workload {peer.name} already has {address}"
+
+    return ""
+
+
+def pools_naming(session, network, address: str) -> list:
+    """Which pools name this address, so somebody can be told before reuse."""
+    from app.models import Pool, PoolMember
+
+    out = []
+    for member in session.query(PoolMember).all():
+        if (member.address or "").strip() != str(address):
+            continue
+        pool = session.query(Pool).filter(Pool.id == member.pool_id).first()
+        if pool:
+            out.append(pool.name)
+    return sorted(set(out))
+
+
 def next_free_address(session, network):
     """
     The next address a workload can have.

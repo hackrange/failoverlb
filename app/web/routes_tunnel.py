@@ -268,10 +268,27 @@ async def add_peer(request: Request, g: ObjectGuard = Depends(changing)):
         raise HTTPException(status_code=409,
                             detail=f"there is already a workload called {name}")
 
-    try:
-        address = tunnel.next_free_address(g.session, network)
-    except ValueError as exc:
-        raise HTTPException(status_code=409, detail=str(exc))
+    # An address can be asked for, and the reason is putting a machine back
+    # where it was.  A pool member is an address rather than a machine, so
+    # re-adding web01 at the address web01 had is the case where reuse is the
+    # thing you want rather than a risk to be talked out of.
+    #
+    # The counter is left alone when one is chosen.  Bumping it would skip
+    # everything between here and there, which is the opposite of what somebody
+    # picking an address out of a gap is trying to do.
+    wanted = str(payload.get("address") or "").strip()
+    reusing = []
+    if wanted:
+        problem = tunnel.address_problem(g.session, network, wanted)
+        if problem:
+            raise HTTPException(status_code=409, detail=problem)
+        address = wanted
+        reusing = tunnel.pools_naming(g.session, network, address)
+    else:
+        try:
+            address = tunnel.next_free_address(g.session, network)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
 
     peer = TunnelPeer(network_id=network.id, name=name, address=address,
                       description=(payload.get("description") or "")[:500] or None)
@@ -291,11 +308,83 @@ async def add_peer(request: Request, g: ObjectGuard = Depends(changing)):
     if not base:
         base = f"https://{settings.node_address}"
 
+    note = "single use, expires in two hours, treat it like a password"
+    if reusing:
+        # Said plainly rather than refused.  Somebody putting a machine back
+        # wants exactly this; somebody who typed the wrong address needs to
+        # know before the pool starts sending it production traffic.
+        note += (f".  {', '.join(reusing)} already "
+                 f"{'points' if len(reusing) == 1 else 'point'} at "
+                 f"{address}, so {name} will start taking that traffic as soon "
+                 f"as it enrols")
+
     return {
         **_peer_json(peer),
         "enrol_command": f"curl -sSL {base}/tunnel/enrol/{token} | sudo bash",
         "expires_in_minutes": tunnel.ENROL_MINUTES,
-        "note": ("single use, expires in two hours, treat it like a password"),
+        "reusing": reusing,
+        "note": note,
+    }
+
+
+@router.get("/api/tunnel/addresses")
+async def tunnel_addresses(request: Request, g: ObjectGuard = Depends(guard)):
+    """
+    Who holds what in the tunnel range, and what can be picked.
+
+    Exists because the counter only goes up, which is right and is also
+    invisible: somebody adding and removing workloads while testing watches the
+    numbers climb and reasonably concludes they are running out.  They are not.
+    The gaps are all still there and can be asked for by name; this is the page
+    that shows them.
+    """
+    import ipaddress
+
+    g.require("view")
+
+    network = g.session.query(TunnelNetwork).first()
+    if not network:
+        return {"configured": False, "addresses": []}
+
+    net = ipaddress.ip_network(network.cidr)
+    hosts = list(net.hosts())
+    mark = int(network.address_high_water or 0)
+
+    peers = {p.address: p.name for p in g.session.query(TunnelPeer)
+             .filter(TunnelPeer.network_id == network.id).all()}
+    nodes = {v: k for k, v in tunnel.node_addresses(g.session, network).items()}
+
+    out = []
+    # The whole range is 254 rows and nobody needs that.  Everything already
+    # counted past, plus a few beyond, is the part somebody is choosing from.
+    for index, host in enumerate(hosts[:max(mark + 8, 16)]):
+        address = str(host)
+        if address in nodes:
+            out.append({"address": address, "state": "node",
+                        "held_by": f"load balancer {nodes[address]}"})
+        elif address in peers:
+            out.append({"address": address, "state": "workload",
+                        "held_by": peers[address]})
+        else:
+            pools = tunnel.pools_naming(g.session, network, address)
+            out.append({
+                "address": address,
+                "state": "free",
+                "held_by": "",
+                "pools": pools,
+                # Whether the counter has gone past it.  A free address below
+                # the mark is one the automatic choice will skip, and is
+                # exactly what somebody reusing an address is looking for.
+                "in_a_gap": index < mark,
+            })
+
+    return {
+        "configured": True,
+        "cidr": network.cidr,
+        "counter": mark,
+        "next_automatic": next((a["address"] for a in out
+                                if a["state"] == "free" and not a["in_a_gap"]), None),
+        "addresses": out,
     }
 
 

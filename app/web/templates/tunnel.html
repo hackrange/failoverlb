@@ -494,6 +494,14 @@ document.addEventListener("DOMContentLoaded", function () {
           : "That machine becomes <span class=\"mono\">" + esc(result.address) +
             "</span>.  Use that address when you add it to a pool."}
       </div>
+      ${(result.reusing && result.reusing.length) ? `
+      <div class="notice warn mt"><div>
+        <strong>${esc(result.reusing.join(", "))}</strong>
+        ${result.reusing.length === 1 ? "already points" : "already point"} at
+        <span class="mono">${esc(result.address)}</span>, so this machine starts
+        taking that traffic the moment it enrols.  That is the point if you are
+        putting the same thing back, and worth a second look if you are not.
+      </div></div>` : ""}
       <div class="mt"><button class="btn primary" id="cmd-done">Done</button></div>`,
       true);
     fillCmd("enrol-cmd", result.enrol_command || result.command);
@@ -510,7 +518,17 @@ document.addEventListener("DOMContentLoaded", function () {
 
   const add = el("add-workload");
   if (add) {
-    add.addEventListener("click", function () {
+    add.addEventListener("click", async function () {
+      // What is actually free, so nobody has to guess.  The counter only goes
+      // up, which is right and is also invisible: somebody adding and removing
+      // workloads while testing watches the numbers climb and reasonably
+      // concludes they are running out.  They are not, and this shows why.
+      let plan = null;
+      try { plan = await NFM.api("/tunnel/addresses"); } catch (err) { plan = null; }
+
+      const gaps = plan && plan.configured
+        ? plan.addresses.filter(a => a.state === "free" && a.in_a_gap) : [];
+
       NFM.openModal("Add a workload", "", `
         <div class="field">
           <label for="w-name">Name</label>
@@ -522,12 +540,44 @@ document.addEventListener("DOMContentLoaded", function () {
           <label for="w-desc">Note</label>
           <input type="text" id="w-desc" placeholder="what it runs, who owns it">
         </div>
+        <div class="field">
+          <label for="w-addr">Address <span class="badge neutral">optional</span></label>
+          <input type="text" id="w-addr" placeholder="${
+            plan && plan.next_automatic
+              ? "leave empty for " + esc(plan.next_automatic)
+              : "leave empty to take the next one"}">
+          <div class="hint">
+            Leave it empty and the next address is used, counting upward and
+            never going back for gaps.  That is on purpose: an address that
+            belonged to something else last week means something different to
+            a pool that still points at it.
+            ${gaps.length ? `
+            <div class="mt"><strong>Free addresses further down</strong>, which
+            the automatic choice skips.  Ask for one by name to put a machine
+            back where it was:</div>
+            <div class="mt">${gaps.map(a =>
+              '<button type="button" class="btn small w-pick" data-a="' +
+              esc(a.address) + '">' + esc(a.address) + "</button> " +
+              (a.pools && a.pools.length
+                ? '<span class="small faint">' + esc(a.pools.join(", ")) +
+                  (a.pools.length === 1 ? " points" : " point") +
+                  " at it</span> "
+                : '<span class="small faint">nothing points at it</span> ")
+            ).join("<br>")}</div>` : ""}
+          </div>
+        </div>
         <div class="mt"><button class="btn primary" id="w-save">Add it</button></div>`,
         true);
+
+      document.querySelectorAll(".w-pick").forEach(function (b) {
+        b.addEventListener("click", function () { el("w-addr").value = b.dataset.a; });
+      });
+
       el("w-save").addEventListener("click", async function () {
         const body = {
           name: el("w-name").value.trim(),
           description: el("w-desc").value.trim(),
+          address: el("w-addr").value.trim(),
           base_url: window.location.origin + "{{ base }}"
         };
         if (!body.name) { NFM.toast("Give it a name", "bad"); return; }

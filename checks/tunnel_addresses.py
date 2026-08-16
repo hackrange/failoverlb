@@ -171,6 +171,68 @@ def main():
           "refuse every workload the moment it was promoted, and every node "
           "has its own encryption key so it cannot travel sealed")
 
+    # -----------------------------------------------------------------------
+    # Asking for a particular address
+    #
+    # The counter only goes up, which is right, and it leaves gaps that are
+    # perfectly usable.  Putting a machine back where it was is the case that
+    # needs them: a pool member is an address rather than a machine, so
+    # re-adding web01 at web01's old address is the one time reuse is the thing
+    # you want rather than a risk.
+    #
+    # What must stay refused is the pair that has no good outcome: an address a
+    # load balancer holds, and one another workload already has.
+    print()
+    print("  asking for a particular address")
+
+    with session_scope() as session:
+        network = session.query(TunnelNetwork).first()
+        if network is None:
+            check("choosing an address", True, "")
+            print("      (no tunnel configured here)")
+        else:
+            import ipaddress as _ip
+            hosts = list(_ip.ip_network(network.cidr).hosts())
+            nodes = tunnel.node_addresses(session, network)
+
+            if nodes:
+                held = sorted(nodes.items())[0]
+                check("a load balancer's own address is refused",
+                      bool(tunnel.address_problem(session, network, held[1])),
+                      f"{held[1]} belongs to {held[0]} and handing it to a "
+                      f"workload would make the fleet argue with it about who "
+                      f"it is")
+
+            existing = session.query(TunnelPeer).first()
+            if existing:
+                check("an address another workload has is refused",
+                      bool(tunnel.address_problem(session, network, existing.address)),
+                      "two machines claiming one address is whichever "
+                      "handshakes last wins")
+
+            check("an address outside the range is refused",
+                  bool(tunnel.address_problem(session, network, "192.0.2.99")),
+                  "outside the tunnel's own network")
+            check("something that is not an address is refused",
+                  bool(tunnel.address_problem(session, network, "not-an-ip")))
+
+            # A free one in a gap, which is the whole point of the feature.
+            taken = {p.address for p in session.query(TunnelPeer).all()}
+            taken |= set(nodes.values())
+            gap = next((str(h) for h in hosts[len(nodes):int(network.address_high_water or 0)]
+                        if str(h) not in taken), None)
+            if gap:
+                check("a free address in a gap can be asked for",
+                      tunnel.address_problem(session, network, gap) == "",
+                      f"{gap} is free and below the counter, which is exactly "
+                      f"what somebody putting a machine back needs")
+                check("and the pools naming it are reported rather than hidden",
+                      isinstance(tunnel.pools_naming(session, network, gap), list),
+                      "refusing would make somebody guess; saying which pools "
+                      "will reach the new machine is the useful answer")
+            else:
+                print("      (no gap on this fleet to try)")
+
     failed = [name for name, ok, _ in results if not ok]
     print()
     print(f"  {len(results) - len(failed)} passed, {len(failed)} failed")
