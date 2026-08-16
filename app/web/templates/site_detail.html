@@ -622,6 +622,17 @@ document.addEventListener("DOMContentLoaded", function () {
   syncMode();
 
   document.querySelectorAll("input, select, textarea").forEach(function (el) {
+    // Not the geo panel.  It has its own Save and writes the site itself, so
+    // nothing in it belongs to this form, and its search box is a filter
+    // rather than a setting at all.
+    //
+    // Worth more than tidiness: the banner appears above the tabs and pushes
+    // the whole panel down by about fifty pixels.  A search box fires change
+    // when it loses focus, which is the moment you press a button, so the
+    // banner opened between the press and the release, the button moved out
+    // from under the pointer, and the browser threw the click away.  Check all
+    // and Uncheck all did nothing at all after a search, once, silently.
+    if (el.closest("[data-panel=geo]")) return;
     el.addEventListener("change", markDirty);
   });
 
