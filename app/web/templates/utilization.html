@@ -637,25 +637,70 @@ document.addEventListener("DOMContentLoaded", function () {
     if (!area) return;
     let dragging = null;
 
-    function atFrom(ev, hit) {
-      const box = hit.getBoundingClientRect();
-      const frac = Math.max(0, Math.min(1, (ev.clientX - box.left) / box.width));
-      const from = parseFloat(hit.dataset.from), to = parseFloat(hit.dataset.to);
-      return from + frac * (to - from);
+    // The measurements are read once, at mousedown, rather than taken from the
+    // element again at mouseup.  Every chart is replaced on each refresh, so a
+    // drag that spans one would otherwise measure an element that has been
+    // thrown away, and a detached element reports zero width.
+    function timeAt(clientX) {
+      const frac = Math.max(0, Math.min(1,
+        (clientX - dragging.left) / dragging.width));
+      return dragging.from + frac * (dragging.to - dragging.from);
+    }
+
+    // The band showing what is being selected.
+    //
+    // Without it the drag worked and gave no sign of working, which is the
+    // same problem the Refresh button had: doing the job invisibly is
+    // indistinguishable from not doing it.
+    //
+    // Parented to the body rather than the chart, because the charts are
+    // replaced wholesale on every refresh and anything inside one would be
+    // thrown away mid drag.
+    function marker() {
+      let box = document.getElementById("zoom-marker");
+      if (!box) {
+        box = document.createElement("div");
+        box.id = "zoom-marker";
+        document.body.appendChild(box);
+      }
+      return box;
     }
 
     area.addEventListener("mousedown", function (ev) {
       const hit = ev.target.closest(".hit");
       if (!hit) return;
-      dragging = { hit: hit, start: atFrom(ev, hit) };
+      const box = hit.getBoundingClientRect();
+      if (!box.width) return;
+      dragging = {
+        left: box.left, width: box.width,
+        top: box.top, height: box.height,
+        from: parseFloat(hit.dataset.from),
+        to: parseFloat(hit.dataset.to),
+        startX: ev.clientX,
+      };
+      dragging.start = timeAt(ev.clientX);
       ev.preventDefault();
+    });
+
+    window.addEventListener("mousemove", function (ev) {
+      if (!dragging) return;
+      const box = marker();
+      const a = Math.min(dragging.startX, ev.clientX);
+      const b = Math.max(dragging.startX, ev.clientX);
+      box.style.display = "block";
+      box.style.left = a + "px";
+      box.style.width = (b - a) + "px";
+      box.style.top = (dragging.top + window.scrollY) + "px";
+      box.style.height = dragging.height + "px";
     });
 
     window.addEventListener("mouseup", function (ev) {
       if (!dragging) return;
-      const end = atFrom(ev, dragging.hit);
+      const end = timeAt(ev.clientX);
       const from = Math.min(dragging.start, end), to = Math.max(dragging.start, end);
       dragging = null;
+      const band = document.getElementById("zoom-marker");
+      if (band) band.style.display = "none";
 
       // A click is a drag of nothing.  Below a minute there is no finer data to
       // fetch, so zooming in would magnify one bucket rather than reveal
