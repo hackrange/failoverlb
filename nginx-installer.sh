@@ -841,6 +841,45 @@ EOF
 
 # A plain http site so a fresh box actually serves something, and so certbot
 # has a place to drop its challenge files.
+# Let QUIC in, when there is a firewall here that would stop it.
+#
+# HTTP/3 is UDP, and this is the one place where a missing rule fails silently.
+# A box allowing TCP 443 and nothing else serves every request perfectly over
+# HTTP/2 while HTTP/3 never connects at all: no error, no log line, and the
+# setting in the GUI looks on.  Somebody then spends an afternoon on the nginx
+# config, which is correct.
+#
+# Only touches a firewall that is actually running, and says so when it does.
+# Nothing is opened on a box with no firewall, because there is nothing to open
+# and quietly starting one would be a much bigger change than this deserves.
+open_quic_port() {
+  local port="${1:-443}"
+
+  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
+    if ufw status 2>/dev/null | grep -qE "^${port}/udp .*ALLOW"; then
+      log "ufw already allows ${port}/udp, which is what HTTP/3 needs."
+    else
+      log "ufw is active, allowing ${port}/udp so HTTP/3 can connect."
+      ufw allow "${port}/udp" >/dev/null 2>&1 \
+        || warn "could not add the ufw rule, so HTTP/3 will not connect until ${port}/udp is open"
+    fi
+    return 0
+  fi
+
+  if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
+    log "firewalld is active, allowing ${port}/udp so HTTP/3 can connect."
+    firewall-cmd --permanent --add-port="${port}/udp" >/dev/null 2>&1 \
+      && firewall-cmd --reload >/dev/null 2>&1 \
+      || warn "could not add the firewalld rule, so HTTP/3 will not connect until ${port}/udp is open"
+    return 0
+  fi
+
+  # No managed firewall here.  Say nothing loud, but leave the fact somewhere,
+  # because "it is already open" and "nobody checked" look identical later.
+  log "No ufw or firewalld running, so nothing is filtering ${port}/udp here."
+  log "Anything in front of this box still has to allow UDP ${port} for HTTP/3."
+}
+
 write_default_site() {
   if [[ -e "${PREFIX}/sites-available/default.conf" ]]; then
     log "Keeping your existing default site."
@@ -1206,6 +1245,7 @@ cmd_install() {
   write_ssl_snippet
   write_acme_snippet
   write_default_site
+  open_quic_port 443
 
   # Test before stopping anything.
   #
