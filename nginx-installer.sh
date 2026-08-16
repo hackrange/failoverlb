@@ -36,15 +36,23 @@ NGINX_VERSION="${NGINX_VERSION:-1.30.4}"
 OPENSSL_VERSION="${OPENSSL_VERSION:-3.5.7}"
 HEADERS_MORE_VERSION="${HEADERS_MORE_VERSION:-0.40}"
 
+# The WAF engine, built from source rather than taken from apt.  Ubuntu 24.04
+# ships libmodsecurity3 at 3.0.12, which is older than the two CVEs fixed in
+# 3.0.15 (an integer underflow in the verify operators, and a buffer overflow
+# in hex_decode).  A WAF running a knowingly vulnerable engine is worse than no
+# WAF, so we pin a current one the same way we pin nginx and OpenSSL.
+MODSECURITY_VERSION="${MODSECURITY_VERSION:-3.0.16}"
+
 
 # ==============================================================================
 # Included modules
 # ==============================================================================
 #
-# This is the one place to add or drop modules.  There are three lists.
+# This is the one place to add or drop modules.  There are four lists.
 #
 #   BUILTIN_MODULES      nginx's own modules, switched on with a configure flag.
 #   THIRD_PARTY_MODULES  outside modules we download and compile in.
+#   DYNAMIC_MODULES      outside modules built as .so and loaded only when used.
 #   EXTRA_BUILD_DEPS     apt packages that some of those modules need to build.
 #
 # To drop a module, comment out its line.  To add one, put a new line in the
@@ -99,6 +107,36 @@ THIRD_PARTY_MODULES=(
   "upstream-fair|https://github.com/itoffshore/nginx-upstream-fair|master"
 )
 
+# Modules built as loadable .so files instead of compiled in.  Same
+# "folder|git-url|git-ref" format as the list above.
+#
+# Why these are not just in THIRD_PARTY_MODULES: a compiled in module is part
+# of the binary whether anybody wants it or not.  ModSecurity links against
+# libmodsecurity.so, and if that library is ever missing or a version out of
+# step, a statically linked nginx will not exec at all.  That would take down
+# every node in the fleet over a feature most of them are not using.  Built
+# this way the .so sits on disk doing nothing until a load_module line asks for
+# it, and that line is only written for a node whose sites have the WAF on.
+#
+# --with-compat is in BUILTIN_MODULES above, which is what these need.
+#
+# The WAF is off unless asked for.  Building it costs about fifteen minutes and
+# most installs will never switch it on, so a fresh box does not pay for it.
+# Turning it on in the GUI rebuilds nginx with WITH_MODSECURITY=1, which is the
+# same path the version upgrades already take, so nobody has to edit this file
+# or compile anything by hand.
+#
+#   sudo WITH_MODSECURITY=1 ./nginx-installer.sh install
+#
+WITH_MODSECURITY="${WITH_MODSECURITY:-0}"
+
+DYNAMIC_MODULES=()
+if [[ "$WITH_MODSECURITY" == "1" ]]; then
+  DYNAMIC_MODULES+=(
+    "modsecurity-nginx|https://github.com/owasp-modsecurity/ModSecurity-nginx|v1.0.4"
+  )
+fi
+
 # Extra apt packages the modules above need at build time.
 EXTRA_BUILD_DEPS=(
   libpam0g-dev        # auth-pam
@@ -109,6 +147,23 @@ EXTRA_BUILD_DEPS=(
   libxslt1-dev        # xslt
   libperl-dev         # perl
 )
+
+# What libmodsecurity needs to build, added only when the WAF is being built.
+# autotools because that is how it builds, yajl for the JSON audit log the hits
+# page reads, lmdb for the counters CRS keeps between requests, curl for rules
+# that fetch.  None of this goes on a box that is not building a WAF.
+if [[ "$WITH_MODSECURITY" == "1" ]]; then
+  EXTRA_BUILD_DEPS+=(
+    automake
+    autoconf
+    libtool
+    pkg-config
+    libcurl4-openssl-dev
+    libyajl-dev
+    liblmdb-dev
+    libssl-dev
+  )
+fi
 # Note: the lua module needs OpenResty's own LuaJIT, not the stock Ubuntu one.
 # We build that from source in build_lua_support, so it is not an apt package.
 
@@ -369,14 +424,22 @@ fetch_sources() {
   tar xf nginx.tar.gz
   tar xf openssl.tar.gz
 
-  # Clone each outside module into its own folder.
+  # Clone each outside module into its own folder.  Both lists land in the same
+  # place, since the only difference between them is the configure flag.
   local entry name url ref
-  for entry in "${THIRD_PARTY_MODULES[@]}"; do
+  for entry in "${THIRD_PARTY_MODULES[@]}" "${DYNAMIC_MODULES[@]}"; do
     IFS='|' read -r name url ref <<< "$entry"
     log "Fetching module $name ($ref)"
     git clone --depth 1 --branch "$ref" "$url" "modules/${name}" \
       || die "Could not fetch module $name from $url"
   done
+}
+
+# True when the WAF module is in the build.  Several steps below are skipped
+# entirely without it, so a box that does not want a WAF does not spend twenty
+# minutes compiling one.
+wants_modsecurity() {
+  printf '%s\n' "${DYNAMIC_MODULES[@]}" | grep -q "modsecurity-nginx"
 }
 
 
@@ -444,6 +507,76 @@ build_lua_support() {
 
 
 # ==============================================================================
+# The WAF engine
+# ==============================================================================
+
+# libmodsecurity is the engine.  The nginx module in DYNAMIC_MODULES is only a
+# connector and will not build without this, the same way the lua module will
+# not build without LuaJIT.
+#
+# This is the slowest thing in the whole install after OpenSSL, so it only runs
+# when the module is actually in the list.
+build_modsecurity() {
+  wants_modsecurity || return 0
+
+  # Skip it when the right version is already here.
+  #
+  # This is the difference between an nginx rebuild taking a few minutes and
+  # taking twenty.  People rebuild nginx to pick up a new OpenSSL or to add a
+  # module, and making all of them wait for a WAF engine that has not changed
+  # since last time is how a maintained thing stops being maintained.  Bump
+  # MODSECURITY_VERSION and it builds again; leave it alone and it does not.
+  #
+  # The connector in DYNAMIC_MODULES is rebuilt every time regardless, because
+  # an nginx module is tied to the exact nginx it was compiled against.  That
+  # part is quick.
+  local stamp="/usr/local/lib/.modsecurity-version"
+  if [[ -f "$stamp" && -f /usr/local/lib/libmodsecurity.so ]] \
+     && [[ "$(cat "$stamp" 2>/dev/null)" == "$MODSECURITY_VERSION" ]]; then
+    log "libmodsecurity ${MODSECURITY_VERSION} is already built, skipping it."
+    # Still needs to be findable, in case ld.so.cache was rebuilt without it.
+    ldconfig
+    return 0
+  fi
+
+  log "Building libmodsecurity ${MODSECURITY_VERSION}.  This one takes a while."
+  git clone --depth 1 --branch "v${MODSECURITY_VERSION}" \
+    https://github.com/owasp-modsecurity/ModSecurity "${BUILD_ROOT}/ModSecurity" \
+    || die "Could not fetch libmodsecurity ${MODSECURITY_VERSION}."
+
+  # libinjection is a submodule, not vendored, and it is what does the SQL
+  # injection and XSS detection.  Without this the build gets a long way in
+  # before failing on a missing header.
+  git -C "${BUILD_ROOT}/ModSecurity" submodule update --init --recursive --depth 1 \
+    || die "Could not fetch the libmodsecurity submodules."
+
+  cd "${BUILD_ROOT}/ModSecurity"
+  ./build.sh
+  # The docs and examples are most of the build time and none of the value.
+  # yajl and lmdb are asked for by name rather than left to autodetect, so a
+  # missing package fails here with a clear reason instead of quietly producing
+  # an engine that cannot write a JSON audit log, which is what the hits page
+  # reads.
+  ./configure \
+    --with-yajl \
+    --with-lmdb \
+    --disable-doxygen-doc \
+    --disable-doxygen-html \
+    --disable-examples
+  make -j"$(nproc)"
+  make install
+
+  # Make sure the loader can find it, or nginx loads the module and dies on a
+  # missing libmodsecurity.so.3 at startup.
+  ldconfig
+
+  # Only stamped once the build actually finished, so a run that died halfway
+  # through builds again next time instead of being skipped forever.
+  printf '%s\n' "$MODSECURITY_VERSION" > "$stamp"
+}
+
+
+# ==============================================================================
 # The actual build
 # ==============================================================================
 
@@ -456,6 +589,23 @@ build_nginx() {
     name="${entry%%|*}"
     addmods+=( "--add-module=${BUILD_ROOT}/modules/${name}" )
   done
+
+  # The dynamic ones get built into .so files under --modules-path instead of
+  # into the binary.  Nothing loads them until a load_module line says to.
+  for entry in "${DYNAMIC_MODULES[@]}"; do
+    name="${entry%%|*}"
+    addmods+=( "--add-dynamic-module=${BUILD_ROOT}/modules/${name}" )
+  done
+
+  # Point the connector at the libmodsecurity we just built.  Its config script
+  # will fall back to pkg-config, which on Ubuntu can find the 3.0.12 package
+  # instead and produce a module linked against an engine we did not choose.
+  # Same reasoning as the LuaJIT variables below: say which one, do not guess.
+  if wants_modsecurity; then
+    export MODSECURITY_INC="/usr/local/include"
+    export MODSECURITY_LIB="/usr/local/lib"
+    log "Using libmodsecurity from $MODSECURITY_LIB"
+  fi
 
   # Point the lua module at the OpenResty LuaJIT we built in build_lua_support.
   if printf '%s\n' "${THIRD_PARTY_MODULES[@]}" | grep -q "lua-nginx-module"; then
@@ -513,6 +663,7 @@ make_dirs() {
     /var/cache/nginx \
     /var/log/nginx \
     /usr/lib/nginx/modules \
+    "${PREFIX}/modules-enabled" \
     "${PREFIX}/conf.d" \
     "${PREFIX}/sites-available" \
     "${PREFIX}/sites-enabled" \
@@ -547,6 +698,12 @@ user ${RUN_USER};
 worker_processes auto;
 pid /run/nginx.pid;
 
+# Loadable modules.  This has to be up here in the main context, which is why
+# it is an include rather than a load_module line the manager could write into
+# conf.d.  The folder is normally empty: a module only gets a file here when
+# something is switched on that needs it, and dropping the file unloads it.
+include ${PREFIX}/modules-enabled/*.conf;
+
 events {
     worker_connections 1024;
 }
@@ -575,6 +732,67 @@ ${lua_conf}
     include ${PREFIX}/sites-enabled/*;
 }
 EOF
+}
+
+# Put the modules-enabled include into an nginx.conf that predates it.
+#
+# write_main_conf above only writes on a first install, on purpose, so an
+# upgrade never stomps on somebody's edits.  That leaves every box installed
+# before dynamic modules existed with no way to load one: the manager would
+# write a perfectly good file into modules-enabled and nothing would ever read
+# it, and the WAF would look switched on while doing nothing at all.  That is
+# the exact shape of bug this project keeps finding, so it gets handled here
+# rather than discovered later.
+#
+# Only touches a config we wrote.  Somebody else's hand rolled nginx.conf is
+# left alone and told about, because guessing where to put a directive in a
+# file we do not understand is how an installer takes a node down.
+ensure_modules_include() {
+  local conf="${PREFIX}/nginx.conf"
+  [[ -f "$conf" ]] || return 0
+
+  if grep -q "modules-enabled" "$conf"; then
+    return 0
+  fi
+
+  if ! grep -q "installer-managed" "$conf"; then
+    warn "Your nginx.conf is not one of ours, so the modules-enabled include"
+    warn "was not added.  Loadable modules will not work until you add this"
+    warn "line in the main context, above the events block:"
+    warn "    include ${PREFIX}/modules-enabled/*.conf;"
+    return 0
+  fi
+
+  log "Adding the modules-enabled include to your existing nginx.conf."
+  cp -a "$conf" "${conf}.bak-modules"
+
+  # Go in above the events block.  That is the first thing in every config this
+  # installer has ever written, and anything before it is the main context,
+  # which is the only place load_module is allowed.
+  if ! grep -qE '^[[:space:]]*events[[:space:]]*\{' "$conf"; then
+    warn "No events block found in ${conf}, so the include was not added."
+    return 0
+  fi
+
+  awk -v line="include ${PREFIX}/modules-enabled/*.conf;" '
+    !done && /^[[:space:]]*events[[:space:]]*\{/ {
+      print "# Loadable modules.  Added on upgrade; see modules-enabled."
+      print line
+      print ""
+      done = 1
+    }
+    { print }
+  ' "$conf" > "${conf}.new" || die "Could not rewrite ${conf}."
+
+  mv -f "${conf}.new" "$conf"
+
+  # Prove it before leaving it there.  A config test runs later anyway, but
+  # failing here says which change did it.
+  if ! "$SBIN" -t -c "$conf" >/dev/null 2>&1; then
+    warn "nginx would not accept the include, putting your nginx.conf back."
+    mv -f "${conf}.bak-modules" "$conf"
+    return 0
+  fi
 }
 
 # A shared TLS snippet.  Any site can include this to get solid settings plus
@@ -951,6 +1169,7 @@ cmd_install() {
   fetch_sources
   backup_current
   build_lua_support
+  build_modsecurity
   build_nginx
 
   # Now that ${SBIN} really is the new build, tell dpkg so.  Before this point
@@ -959,6 +1178,7 @@ cmd_install() {
 
   make_dirs
   write_main_conf
+  ensure_modules_include
   write_ssl_snippet
   write_acme_snippet
   write_default_site

@@ -4135,6 +4135,14 @@ async def upgrade_start(request: Request, g: ObjectGuard = Depends(changing)):
 
     payload = await request.json() if await request.body() else {}
 
+    # The WAF module is a build option, so it is decided here rather than on a
+    # page of its own.  Stored before the walk starts, because every node in
+    # the walk reads it as it goes: the whole fleet has to come out of this
+    # agreeing about whether the module is there.
+    if "with_modsecurity" in payload:
+        settings_store.set("waf_module", bool(payload["with_modsecurity"]),
+                           actor=g.user.username)
+
     try:
         result = await get_upgrade_runner().start(
             nginx_version=(payload.get("nginx_version") or "").strip() or None,
@@ -4147,7 +4155,8 @@ async def upgrade_start(request: Request, g: ObjectGuard = Depends(changing)):
 
     audit.record("nginx.upgrade.requested", user=g.user, object_type="fleet",
                  changes={"nginx": payload.get("nginx_version"),
-                          "openssl": payload.get("openssl_version")})
+                          "openssl": payload.get("openssl_version"),
+                          "waf_module": payload.get("with_modsecurity")})
     return result
 
 
@@ -4189,6 +4198,10 @@ async def upgrade_modules(g: ObjectGuard = Depends(guard)):
         "nginx_version": caps.nginx_version,
         "openssl_version": caps.openssl_version,
         "post_quantum": caps.supports_post_quantum(),
+        # What the next rebuild will do about the WAF module, so the checkbox
+        # on the page shows what is actually in force rather than defaulting to
+        # off and quietly turning it off on the next rebuild.
+        "waf_module": bool(settings_store.get("waf_module")),
     }
 
 

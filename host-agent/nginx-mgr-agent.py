@@ -570,6 +570,89 @@ def v_config_test(req):
     }
 
 
+# Where a load_module line has to live, and the one file we put there.
+#
+# It cannot go in the config bundle.  Everything the manager renders is pulled
+# in by an include inside http {}, and load_module is only legal in the main
+# context, so this is written here instead and the installer puts the matching
+# include above the events block.
+MODULES_ENABLED = NGINX_PREFIX / "modules-enabled"
+MODSEC_LOAD_CONF = MODULES_ENABLED / "50-modsecurity.conf"
+MODSEC_MODULE_SO = Path("/usr/lib/nginx/modules/ngx_http_modsecurity_module.so")
+
+
+def v_waf_module(req):
+    """
+    Load or unload the WAF module, and prove nginx still starts either way.
+
+    Two things have to be true before this can say yes, and they fail in
+    different ways:
+
+      * The .so has to be there, which it only is after a rebuild with
+        WITH_MODSECURITY=1.  Writing a load_module line for a file that does
+        not exist means nginx will not start at all, and the node that was
+        serving traffic a second ago is now down.  So the file is checked
+        first, and a missing one is an error the caller can act on rather than
+        an outage.
+      * nginx has to accept the result.  A module built against a different
+        nginx loads and then fails on a version check, which nginx -t catches.
+
+    So it writes, tests, and puts the old state back if the test fails.  The
+    node is never left in a state it cannot start from, which matters more here
+    than anywhere else in this file: this is the one verb that can stop nginx
+    from starting rather than just serving the wrong thing.
+    """
+    enabled = req.get("enabled")
+    if not isinstance(enabled, bool):
+        raise AgentError("enabled has to be true or false", "bad_request")
+
+    if enabled and not MODSEC_MODULE_SO.is_file():
+        raise AgentError(
+            f"no WAF module at {MODSEC_MODULE_SO}.  nginx has to be rebuilt "
+            f"with the module before the WAF can be switched on.",
+            "module_missing",
+        )
+
+    MODULES_ENABLED.mkdir(parents=True, exist_ok=True)
+
+    had = MODSEC_LOAD_CONF.read_text() if MODSEC_LOAD_CONF.is_file() else None
+
+    if enabled:
+        atomic_write(
+            MODSEC_LOAD_CONF,
+            "# Written by the fleet manager.  Do not edit.\n"
+            f"load_module {MODSEC_MODULE_SO};\n",
+            mode=0o644,
+        )
+    else:
+        MODSEC_LOAD_CONF.unlink(missing_ok=True)
+
+    result = run([str(NGINX_BIN), "-t"])
+    if result["rc"] != 0:
+        # Put it back exactly as it was, then say what nginx objected to.
+        if had is None:
+            MODSEC_LOAD_CONF.unlink(missing_ok=True)
+        else:
+            atomic_write(MODSEC_LOAD_CONF, had, mode=0o644)
+        raise AgentError(
+            "nginx would not accept the WAF module, so nothing was changed: "
+            + (result["stderr"] + result["stdout"]).strip()[:600],
+            "config_test_failed",
+        )
+
+    log.warning("WAF module %s", "loaded" if enabled else "unloaded")
+    return {"enabled": enabled, "path": str(MODSEC_LOAD_CONF)}
+
+
+def v_waf_module_status(req):
+    """What this node has, so the page can say rather than guess."""
+    return {
+        "built": MODSEC_MODULE_SO.is_file(),
+        "loaded": MODSEC_LOAD_CONF.is_file(),
+        "module_path": str(MODSEC_MODULE_SO),
+    }
+
+
 def _staged_mode(rel_path):
     """
     How readable a staged file has to be, which is not the same for all of them.
@@ -1809,10 +1892,12 @@ def v_nginx_upgrade(req):
     dropped connection halfway through a compile must not leave a box with half
     an nginx.
 
-    Nothing about the caller's input becomes a shell command.  The versions are
-    checked against a version shaped pattern and passed as environment
-    variables, which is exactly how the installer expects to be told, and the
-    module list is written to a file the installer sources.
+    Nothing about the caller's input becomes a shell command.  Every value is
+    checked here first, the versions against a version shaped pattern and the
+    WAF switch against the two strings it is allowed to be, then passed as
+    environment variables, which is exactly how the installer expects to be
+    told.  They go into an environment file the unit reads, so no part of the
+    request is ever parsed as a shell word.
     """
     if not INSTALLER.is_file():
         raise AgentError(
@@ -1833,11 +1918,24 @@ def v_nginx_upgrade(req):
         if value and not version_re.match(str(value)):
             raise AgentError(f"{value!r} is not a {label} version number", "bad_request")
 
+    # The WAF module.  Sent on every rebuild once a fleet has one, because the
+    # installer rebuilds from the list it is given rather than from what is
+    # already on the box: leave this out of a later version upgrade and nginx
+    # comes back without the module, with every site that had the WAF on now
+    # failing its config test.  So the manager always says which it wants, and
+    # absent means off.
+    with_modsecurity = req.get("with_modsecurity")
+    if with_modsecurity is None:
+        with_modsecurity = False
+    if not isinstance(with_modsecurity, bool):
+        raise AgentError("with_modsecurity has to be true or false", "bad_request")
+
     env = {}
     if nginx_version:
         env["NGINX_VERSION"] = str(nginx_version)
     if openssl_version:
         env["OPENSSL_VERSION"] = str(openssl_version)
+    env["WITH_MODSECURITY"] = "1" if with_modsecurity else "0"
 
     if _have_systemd():
         # Hand it to systemd.  The versions go in an environment file rather
@@ -1867,6 +1965,7 @@ def v_nginx_upgrade(req):
                 "monotonic_us": int(time.monotonic() * 1_000_000),
                 "nginx_version": nginx_version,
                 "openssl_version": openssl_version,
+                "with_modsecurity": with_modsecurity,
             }),
             mode=0o600,
         )
@@ -1893,6 +1992,7 @@ def v_nginx_upgrade(req):
         started=datetime.now(timezone.utc).isoformat(),
         nginx_version=nginx_version,
         openssl_version=openssl_version,
+        with_modsecurity=with_modsecurity,
         finished=None,
         ok=None,
         error=None,
@@ -2654,6 +2754,8 @@ VERBS = {
     "write_hook_scripts": v_write_hook_scripts,
     "geoip_install": v_geoip_install,
     "geoip_status": v_geoip_status,
+    "waf_module": v_waf_module,
+    "waf_module_status": v_waf_module_status,
 }
 
 
@@ -2670,6 +2772,10 @@ SERIALIZED_VERBS = {
     "nginx_upgrade", "nginx_revert",
     # Two downloads racing would both be writing the same file.
     "geoip_install",
+    # It writes a file and then runs nginx -t against the result.  Two of these
+    # at once, or one alongside an apply, and the test proves nothing about
+    # what either of them wrote.
+    "waf_module",
 }
 
 

@@ -38,6 +38,26 @@ from app.models import Node, NodeState, Pool, utcnow
 
 log = logging.getLogger("nfm.upgrade")
 
+
+def wants_waf_module() -> bool:
+    """
+    Whether nginx should be built with the WAF module in it.
+
+    Every rebuild has to answer this, not just the one that turns the WAF on.
+    The installer builds from the module list it is handed rather than from
+    whatever happens to be on the box, so a version upgrade six months later
+    that forgets to mention the WAF produces an nginx without it, and every
+    site with the WAF switched on then fails its config test at once.  That is
+    a fleet outage caused by an upgrade nobody connected to the WAF.
+
+    So this is read fresh on every build, from one fleet wide setting rather
+    than from the sites.  A per site switch decides where the WAF runs; this
+    decides whether the binary can run one at all.
+    """
+    from app.core import settings_store
+
+    return bool(settings_store.get("waf_module"))
+
 # How long to let a build run before calling it stuck.  A full source build of
 # nginx with OpenSSL and a dozen modules is ten to twenty minutes on a normal
 # box, so this is generous rather than tight.
@@ -234,6 +254,7 @@ class UpgradeRunner:
             await self._call(name, "nginx_upgrade", {
                 "nginx_version": self.state["target"].get("nginx_version"),
                 "openssl_version": self.state["target"].get("openssl_version"),
+                "with_modsecurity": wants_waf_module(),
             })
         except (AgentError, NodeUnreachable, ClusterError) as exc:
             return False, f"could not start the build: {exc}"

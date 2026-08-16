@@ -128,6 +128,14 @@ INTERNAL = {
     # not something anybody should be typing.
     "geoip_last_install": {"type": "string", "env": None,
                            "label": "country database last installed"},
+    # Whether nginx is built with the WAF module in it.  Not a normal setting
+    # and deliberately not on the settings page: turning it on by itself does
+    # nothing, because the module only appears after nginx is rebuilt.  The
+    # flow that switches the WAF on sets this and then offers the rebuild, and
+    # every rebuild after that reads it so the module is not quietly dropped by
+    # an unrelated version upgrade.
+    "waf_module": {"type": "bool", "env": None,
+                   "label": "build nginx with the WAF module"},
 }
 
 

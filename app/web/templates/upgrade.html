@@ -59,13 +59,28 @@
       </div>
     </div>
 
+    <div class="checkline mt">
+      <input type="checkbox" id="u-waf">
+      <label for="u-waf">Include the web application firewall module</label>
+    </div>
+    <div class="field">
+      <div class="hint">
+        Adds ModSecurity to the build, which is what the WAF needs before it can
+        be switched on for a site.  The first build with this on takes about
+        fifteen minutes longer while the engine is compiled; later ones do not,
+        unless the engine version changes.  Unticking it takes the module back
+        out on the next rebuild, so any site still using the WAF would stop
+        passing its config test.
+      </div>
+    </div>
+
     <div class="notice warn">
       <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.5 15 14H1L8 1.5zm0 4a.7.7 0 0 0-.7.8l.25 3.2a.45.45 0 0 0 .9 0l.25-3.2A.7.7 0 0 0 8 5.5zm0 5.4a.8.8 0 1 0 0 1.6.8.8 0 0 0 0-1.6z"/></svg>
       <div>
-        To change the module list, edit the lists at the top of
-        <code>nginx-installer.sh</code> on each node first, then rebuild here.
-        The script is the single place modules are defined, and the manager
-        drives it rather than second guessing it.
+        Other than the firewall above, changing the module list means editing
+        the lists at the top of <code>nginx-installer.sh</code> on each node
+        first, then rebuilding here.  The script is the single place modules
+        are defined, and the manager drives it rather than second guessing it.
       </div>
     </div>
 
@@ -184,6 +199,12 @@ document.addEventListener("DOMContentLoaded", function () {
     try {
       const m = await NFM.api("/upgrade/modules");
       const d = m.differences || {};
+
+      // Show what the next rebuild will actually do.  Defaulting this to
+      // unticked would quietly take the module back out of the build for
+      // anybody who rebuilt for an unrelated reason.
+      const waf = document.getElementById("u-waf");
+      if (waf) waf.checked = !!m.waf_module;
       let html = '<dl class="kv">' +
         "<dt>nginx</dt><dd>" + NFM.escapeHtml(m.nginx_version || "unknown") +
         (d.versions ? ' <span class="faint small">(oldest in the fleet)</span>' : "") + "</dd>" +
@@ -277,7 +298,8 @@ document.addEventListener("DOMContentLoaded", function () {
       async function () {
         startBtn.disabled = true;
         await NFM.api("/upgrade/start", { method: "POST", body: {
-          nginx_version: n || null, openssl_version: o || null
+          nginx_version: n || null, openssl_version: o || null,
+          with_modsecurity: document.getElementById("u-waf").checked
         }});
         NFM.toast("Rebuild started.  Watch the progress below.", "ok");
         startPolling();
