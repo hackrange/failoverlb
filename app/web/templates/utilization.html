@@ -449,6 +449,33 @@ document.addEventListener("DOMContentLoaded", function () {
     return fmt(from) + " to " + fmt(to);
   }
 
+  // How far back a payload actually reaches, in minutes.
+  function coverage(payload) {
+    var oldest = Infinity;
+    var nodes = (payload && payload.nodes) || {};
+    Object.keys(nodes).forEach(function (n) {
+      var s = ((nodes[n] || {}).series || {}).cpu_percent || [];
+      if (s.length) { oldest = Math.min(oldest, s[0].at); }
+    });
+    if (oldest === Infinity) { return 0; }
+    return (Date.now() / 1000 - oldest) / 60;
+  }
+
+  // Swap in the stored history when it has more to say than memory does.
+  async function preferStored(payload, minutes) {
+    if (coverage(payload) >= minutes * 0.8) { return payload; }
+    var now = Math.floor(Date.now() / 1000);
+    try {
+      var fromDisk = await NFM.api(
+        "/metrics/history?start=" + (now - minutes * 60) + "&end=" + now);
+      if (coverage(fromDisk) > coverage(payload)) { return fromDisk; }
+    } catch (err) {
+      // Keep the live payload.  A missing history is not a reason to draw
+      // nothing when there is something in memory.
+    }
+    return payload;
+  }
+
   async function load() {
     const minutes = parseInt(el("window").value, 10);
 
@@ -471,7 +498,20 @@ document.addEventListener("DOMContentLoaded", function () {
     }
 
     try {
-      const payload = await NFM.api(url);
+      let payload = await NFM.api(url);
+
+      // Use what was written down when memory does not cover the window.
+      //
+      // The in memory samples start again from nothing when the manager
+      // restarts, so a minute after a restart this drew one minute and said it
+      // could not cover the window asked for, while the history sat on disk
+      // unread.  That is the whole reason the history exists.
+      //
+      // Live is still preferred when it does cover the window, because fifteen
+      // second samples are finer than one minute buckets.
+      if (!stored) {
+        payload = await preferStored(payload, minutes);
+      }
       draw(payload);
       const note = el("drawn-range");
       if (note) {
