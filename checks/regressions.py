@@ -393,7 +393,19 @@ NOT_REPLICATED = {
     # Users do travel, through their own path, so that the per box columns like
     # lockout state stay on the box that saw the failed logins.
     "User",
+    # Measurements, not configuration.  Every node already writes the whole
+    # fleet's numbers rather than only its own, precisely so a promoted standby
+    # has the history, so replicating the table would copy each node's copy of
+    # the same readings onto every other node and multiply the rows by the size
+    # of the fleet.  Left behind on purpose; see app/core/metrics_store.py.
+    "MetricSample",
 }
+
+# Worth saying plainly, because the line between the two sets is the whole
+# point of this check: TABLES is for things somebody configured and would be
+# upset to lose, NOT_REPLICATED is for things a box observed about itself or
+# decided about itself.  A new model belongs in one of them, and putting it in
+# neither is what this catches.
 
 from app.core.snapshot import TABLES as _SNAP_TABLES
 from app import models as _models
