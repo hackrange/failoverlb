@@ -66,6 +66,36 @@ def put_mode(value):
         session.commit()
 
 
+def try_login(mode):
+    """
+    One sign in attempt against a real local admin, in the given mode.
+
+    The mode is set outside the session on purpose.  Writing a setting from a
+    second connection while this one holds a write transaction open is how the
+    first version of this check deadlocked against sqlite, which is a fair
+    reminder that the settings store opens its own session every time.
+
+    The account is real, because the thing being proved is that the refusal
+    happens before the password is looked at.  An account that would fail
+    anyway proves nothing.  It lives in a transaction that is rolled back.
+    """
+    put_mode(mode)
+    with session_scope() as session:
+        try:
+            session.add(User(
+                username="check-auth-modes-scratch",
+                source=AuthSource.LOCAL,
+                role=UserRole.ADMIN,
+                enabled=True,
+                password_hash=None,
+            ))
+            session.flush()
+            return authenticate_local(session, "check-auth-modes-scratch",
+                                      "whatever", source_ip="127.0.0.1")
+        finally:
+            session.rollback()
+
+
 ORIGINAL = stored_mode()
 print()
 print(f"  the stored mode before any of this: {ORIGINAL!r}")
@@ -106,40 +136,21 @@ try:
     print()
     print("  the refusal is in the code path, not only in the template")
 
-    put_mode("oidc")
-    with session_scope() as session:
-        # A real local admin, inside a transaction that gets rolled back.  The
-        # point is to prove the refusal happens before the password is even
-        # looked at, so the account has to be one that would otherwise work.
-        scratch = User(
-            username="check-auth-modes-scratch",
-            source=AuthSource.LOCAL,
-            role=UserRole.ADMIN,
-            enabled=True,
-            password_hash=None,
-        )
-        session.add(scratch)
-        session.flush()
+    refused = try_login("oidc")
+    check("a local sign in is refused outright in provider only mode",
+          refused.ok is False,
+          "the template hiding the form is presentation; this is the part "
+          "that means it")
+    check("and it says why rather than pretending the password was wrong",
+          "single sign on" in (refused.reason or "").lower(),
+          f"it said: {refused.reason!r}")
 
-        answer = authenticate_local(session, "check-auth-modes-scratch",
-                                    "whatever", source_ip="127.0.0.1")
-        check("a local sign in is refused outright in provider only mode",
-              answer.ok is False,
-              "the template hiding the form is presentation; this is the part "
-              "that means it")
-        check("and it says why rather than pretending the password was wrong",
-              "single sign on" in (answer.reason or "").lower(),
-              f"it said: {answer.reason!r}")
-
-        put_mode("both")
-        answer = authenticate_local(session, "check-auth-modes-scratch",
-                                    "whatever", source_ip="127.0.0.1")
-        check("with both allowed it gets as far as checking the password",
-              answer.ok is False and "single sign on" not in (answer.reason or "").lower(),
-              f"it said: {answer.reason!r}, which means the mode check is "
-              f"firing when it should not")
-
-        session.rollback()
+    allowed = try_login("both")
+    check("with both allowed it gets as far as checking the password",
+          allowed.ok is False
+          and "single sign on" not in (allowed.reason or "").lower(),
+          f"it said: {allowed.reason!r}, which means the mode check is "
+          f"firing when it should not")
 
     print()
     print("  the provider is only offered when it could actually work")
