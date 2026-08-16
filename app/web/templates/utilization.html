@@ -87,6 +87,7 @@
 <script nonce="{{ csp_nonce }}">
 // Waits for app.js, which the layout loads after this block.
 document.addEventListener("DOMContentLoaded", function () {
+ try {
 
   // Two lines is all this page ever draws at once, one per node, so the
   // palette is small on purpose.  Chosen to stay apart for the common kinds of
@@ -664,6 +665,26 @@ document.addEventListener("DOMContentLoaded", function () {
   // fixed window somebody is reading, and refetching it every fifteen seconds
   // redraws the same picture and fights the pointer.
   setInterval(function () { if (!zoom && !dragging) load(); }, 15000);
+
+ } catch (err) {
+   // Say what went wrong, in the page.
+   //
+   // Everything on this page is drawn by this one handler, so anything that
+   // throws leaves an empty page and nothing else: no charts, no tiles, no
+   // message.  That is indistinguishable from "there is no data", which sent
+   // three rounds of looking in the wrong place.  An error somebody can read
+   // and quote is worth more than a tidy blank page.
+   var box = document.getElementById("charts");
+   if (box) {
+     box.innerHTML = '<div class="notice bad"><div><strong>' +
+       "This page could not draw.</strong><br>" +
+       String(err && err.message ? err.message : err) +
+       "<br><span class='small faint'>" +
+       String((err && err.stack ? err.stack : "")).split("\n").slice(0, 3).join(" ") +
+       "</span></div></div>";
+   }
+   throw err;
+ }
 });
 </script>
 
