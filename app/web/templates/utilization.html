@@ -243,13 +243,40 @@ document.addEventListener("DOMContentLoaded", function () {
     names.forEach(function (n, i) {
       const pts = seriesByNode[n];
       if (pts.length < 2) { return; }
-      // A gap longer than three sample intervals is a gap, not a straight
-      // line across it.  Joining them would invent numbers for exactly the
-      // moments worth looking at: a restart, or a node nobody could reach.
+
+      // A gap longer than a few sample intervals is a gap, not a straight line
+      // across it.  Joining them would invent numbers for exactly the moments
+      // worth looking at: a restart, or a node nobody could reach.
+      //
+      // **The interval has to be measured, not assumed.**  This was a fixed 45
+      // seconds, which is right for the fifteen second live samples it was
+      // written against and wrong for everything else.  Stored history arrives
+      // in one minute buckets, and five minute ones further back, so every
+      // single point was more than 45 seconds from the last and counted as a
+      // gap.  The path came out as nothing but moveto commands and the chart
+      // drew no line at all, while the data sat there and the page cheerfully
+      // reported how many minutes it covered.
+      //
+      // The middle gap is used rather than the average, so one real outage in
+      // the middle of the window does not stretch the threshold far enough to
+      // hide the next one.
+      const steps = [];
+      for (let k = 1; k < pts.length; k++) { steps.push(pts[k].at - pts[k - 1].at); }
+      steps.sort(function (a, b) { return a - b; });
+      const typical = steps[Math.floor(steps.length / 2)] || 15;
+      const gapAt = typical * 2.5;
+
       let d = "", pen = false;
       for (let k = 0; k < pts.length; k++) {
         const p = pts[k];
-        const jumped = k > 0 && (p.at - pts[k - 1].at) > 45;
+        const jumped = k > 0 && (p.at - pts[k - 1].at) > gapAt;
+        // A missing value is a hole, not a zero.  One NaN in the path data
+        // makes the browser throw the whole line away, so a single gap in one
+        // series would blank an entire chart.
+        if (p.value === null || p.value === undefined || isNaN(p.value)) {
+          pen = false;
+          continue;
+        }
         if (!pen || jumped) {
           d += "M" + x(p.at).toFixed(1) + " " + y(p.value).toFixed(1);
           pen = true;
