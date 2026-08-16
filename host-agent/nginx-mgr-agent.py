@@ -96,6 +96,11 @@ MANAGED_DIR = NGINX_PREFIX / "nginxmgr"
 # Where we stage a config before testing it.
 STAGING_DIR = NGINX_PREFIX / ".nginxmgr-staging"
 
+# A throwaway copy of the staging folder, used only when a staged file names
+# the live bundle in a path nginx opens while loading the config.  See
+# _staging_for_test.  Never applied and never moved anywhere.
+TEST_DIR = NGINX_PREFIX / ".nginxmgr-test"
+
 # The throwaway nginx.conf we test a staged config with.
 #
 # This has to sit in the prefix folder itself, next to the real nginx.conf, and
@@ -142,6 +147,7 @@ MAX_REQUEST_BYTES = 8 * 1024 * 1024
 WRITE_ALLOWED = (
     MANAGED_DIR,
     STAGING_DIR,
+    TEST_DIR,
     ACME_WEBROOT / ".well-known" / "acme-challenge",
     NGINX_PREFIX / "conf.d",
     NGINX_PREFIX / "snippets",
@@ -716,6 +722,66 @@ def v_write_staging(req):
     return {"written": written, "count": len(written)}
 
 
+def _staging_for_test() -> str:
+    """
+    Which folder the test should include, and why it is sometimes not staging.
+
+    Nearly every directive we render points outside the bundle or is opened
+    lazily at request time, so testing the staging folder as it stands is
+    fine.  `auth_basic_user_file` is the usual example: nginx -t never opens
+    it, so the absolute path in a staged site file pointing at the *live*
+    bundle costs nothing.
+
+    `modsecurity_rules_file` is not like that.  nginx reads and parses it while
+    loading the config, which is the whole reason a bad rule file fails the
+    test rather than failing at runtime.  A staged site file pointing at the
+    live bundle then tests the rules that are already there, and on a first
+    apply there is no file at that path at all and the test fails on a config
+    that is perfectly good.
+
+    So when a staged file refers to the live bundle, the test runs against a
+    rewritten copy instead, leaving the staging folder exactly as the manager
+    sent it.  Rewriting staging itself would be worse than the bug: apply moves
+    that folder into place, so the paths have to be the live ones by then.
+
+    A config with no such reference, which is every config this project wrote
+    before the firewall existed, takes the old path and copies nothing.
+    """
+    if TEST_DIR.exists():
+        shutil.rmtree(TEST_DIR, ignore_errors=True)
+
+    live = str(MANAGED_DIR)
+    staged = str(STAGING_DIR)
+
+    needs_rewrite = False
+    for path in STAGING_DIR.rglob("*"):
+        if not path.is_file():
+            continue
+        try:
+            if live in path.read_text():
+                needs_rewrite = True
+                break
+        except (OSError, UnicodeDecodeError):
+            # Binary or unreadable.  Nothing we would rewrite anyway.
+            continue
+
+    if not needs_rewrite:
+        return staged
+
+    shutil.copytree(STAGING_DIR, TEST_DIR)
+    for path in TEST_DIR.rglob("*"):
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text()
+        except (OSError, UnicodeDecodeError):
+            continue
+        if live in text:
+            path.write_text(text.replace(live, str(TEST_DIR)))
+
+    return str(TEST_DIR)
+
+
 def v_test_staging(req):
     """
     Test the staged config without letting it near the running server.
@@ -734,7 +800,7 @@ def v_test_staging(req):
     # Swap our include line over to staging.  If the manager has never applied
     # anything yet there is no include line, so we add one inside http.
     live_include = str(MANAGED_DIR)
-    staged_include = str(STAGING_DIR)
+    staged_include = _staging_for_test()
 
     if live_include in original:
         candidate = original.replace(live_include, staged_include)
@@ -760,6 +826,10 @@ def v_test_staging(req):
         # Always clean up, even if nginx blew up.  Leaving this behind would
         # mean the next test reads a stale candidate.
         CANDIDATE_CONF.unlink(missing_ok=True)
+        # And the rewritten copy, if this test needed one.  It is a copy of
+        # config that is about to be applied anyway, but leaving it on disk
+        # would give the next reader two folders that look equally live.
+        shutil.rmtree(TEST_DIR, ignore_errors=True)
 
 
 def _inject_include(conf_text, include_dir):
