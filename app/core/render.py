@@ -1489,6 +1489,25 @@ map $cookie_{cookie} $sticky_set_{var} {{
         lines.extend(self._limit_lines(cfg, indent=4))
 
         lines.extend(self._serving_lines(cfg, indent=4))
+
+        # Bandwidth and expiry, which are offered on the site and were only
+        # ever written inside a path.
+        #
+        # A site with no paths, which is most of them, could have a rate limit
+        # set and shown on its own page and serve at full speed.  The catalog
+        # has always listed these for the server context; only the location
+        # renderer wrote them.
+        #
+        # Found by checks/wiring.py on its first run against a fleet whose
+        # first site happens to have no paths, which is exactly the case that
+        # hides it.
+        for key in ("limit_rate", "limit_rate_after", "expires"):
+            value = cfg.get(key)
+            if value in (None, ""):
+                continue
+            feature = get_feature(key)
+            if feature:
+                lines.append(f"    {feature.directive} {emit(feature, value)};")
         lines.extend(self._cors_lines(cfg, indent=4, name=host.name))
         lines.extend(self._geo_block_lines(cfg, indent=4, name=host.name))
         lines.extend(self._waf_lines(cfg, indent=4, name=host.name))
