@@ -120,6 +120,54 @@ for p in files:
 check("ids compared against the DOM are compared as strings",
       not loose, "; ".join(loose))
 
+# N. Every input type a template uses is one the stylesheet actually styles.
+#
+#    The stylesheet lists input types by name, which is a trap that has caught
+#    this project twice.  A type that is not on the list gets no border, no
+#    padding and no radius, and falls back to whatever the browser draws, so it
+#    is a differently shaped box sitting next to the others.  Both times it was
+#    reported as "that field looks wrong", and both times the cause was one
+#    missing word in a css selector rather than anything in the template.
+#
+#    Types that are deliberately styled elsewhere or not at all are listed
+#    here rather than found, because a checkbox is meant to look like a
+#    checkbox.
+STYLED_ELSEWHERE = {"checkbox", "radio", "hidden", "submit", "button", "file",
+                    "range", "color"}
+
+#    Looked for in the rule that actually draws the box, not anywhere in the
+#    file.  The first version of this asked whether the type appeared in any
+#    `input[type=...]` selector at all, which the pseudo element rule for the
+#    search field's clear button satisfies without styling the field itself.
+#    So the check passed while the bug it exists to catch was present, which is
+#    the exact failure mode the README warns about.
+css = pathlib.Path("app/web/static/app.css").read_text()
+
+styled = set()
+for rule in css.split("}"):
+    if "{" not in rule:
+        continue
+    selector, body = rule.split("{", 1)
+    # The canonical text field rule: the one that names input[type=text] and
+    # sets a border.  Anything sharing that selector list is drawn the same.
+    if "input[type=text]" in selector and "border:" in body:
+        styled.update(re.findall(r"input\[type=([a-z]+)\]", selector))
+
+used = {}
+for p in files:
+    for n, line in enumerate(p.read_text().split("\n"), 1):
+        for kind in re.findall(r'<input[^>]*\btype="([a-z]+)"', line):
+            used.setdefault(kind, f"{p.name}:{n}")
+
+unstyled = [f"{k} ({where})" for k, where in sorted(used.items())
+            if k not in styled and k not in STYLED_ELSEWHERE]
+check("every input type in a template is styled by the stylesheet",
+      not unstyled,
+      "these fall back to the browser's own look, which is a different shaped "
+      "box next to the others.  Add the type to the input selector in "
+      "app.css: " + "; ".join(unstyled))
+
+
 print()
 print(f"  {len(problems)} problem(s)")
 sys.exit(1 if problems else 0)
