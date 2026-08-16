@@ -30,7 +30,7 @@ import ipaddress
 import logging
 import secrets
 
-from app.core.crypto import hash_token
+from app.core.crypto import decrypt, encrypt, hash_token
 from app.models import TunnelNetwork, TunnelNodeKey, TunnelPeer
 
 log = logging.getLogger("nfm.tunnel")
@@ -285,6 +285,42 @@ def new_enrol_token(peer) -> str:
     return token
 
 
+def new_psk_token(peer) -> str:
+    """
+    A ticket for the one command that puts a key on a workload already on the
+    tunnel.
+
+    Deliberately not the enrolment ticket.  A workload being upgraded keeps its
+    address, its own private key and its place in every pool that points at it,
+    and re-enrolling it would change the first and regenerate the second.
+    """
+    from datetime import timedelta
+
+    from app.models import utcnow
+
+    token = secrets.token_urlsafe(32)
+    peer.psk_token_hash = hash_token(token)
+    peer.psk_expires_at = utcnow() + timedelta(minutes=ENROL_MINUTES)
+    return token
+
+
+def peer_for_psk_token(session, token: str):
+    """The workload this upgrade ticket belongs to, if it is still good."""
+    from app.models import utcnow
+
+    peer = session.query(TunnelPeer).filter(
+        TunnelPeer.psk_token_hash == hash_token(token)).first()
+    if not peer or not peer.psk_expires_at:
+        return None
+    expires = peer.psk_expires_at
+    if expires.tzinfo is None:
+        from datetime import timezone
+        expires = expires.replace(tzinfo=timezone.utc)
+    if expires < utcnow():
+        return None
+    return peer
+
+
 def peer_for_token(session, token: str):
     """The peer this ticket belongs to, if it is still good."""
     if not token:
@@ -296,10 +332,45 @@ def peer_for_token(session, token: str):
     return peer
 
 
+def new_psk() -> str:
+    """
+    A WireGuard pre-shared key: 32 random bytes, base64, same as `wg genpsk`.
+
+    Generated here rather than on the workload because both ends need the same
+    value and this end is the one that can hand it to every load balancer.  It
+    never crosses the wire in a handshake; it is only ever configured at both
+    ends, which is what makes it useful against somebody who has recorded the
+    traffic and later breaks Curve25519.
+    """
+    import base64
+    return base64.b64encode(secrets.token_bytes(32)).decode()
+
+
+def peer_psk(peer) -> str:
+    """The stored key in the clear, or empty when this peer has none."""
+    if not peer.psk_encrypted:
+        return ""
+    return decrypt(peer.psk_encrypted) or ""
+
+
+def set_peer_psk(peer, value: str = None) -> str:
+    """Give a peer a key, generating one unless a value is supplied."""
+    value = value or new_psk()
+    peer.psk_encrypted = encrypt(value)
+    return value
+
+
 def wanted_peers(session, network):
     """What every node's interface should contain."""
     return [
-        {"name": p.name, "address": p.address, "public_key": p.public_key}
+        # The key travels to the agent in the clear, over the peer link, which
+        # is mutual TLS between nodes holding certificates from the same
+        # private CA with a signature on every message.  Same trade the pool
+        # tokens and the private keys already make, and for the same reason: a
+        # key that does not reach every node is a workload that cannot connect
+        # to whichever one is active.
+        {"name": p.name, "address": p.address, "public_key": p.public_key,
+         "psk": peer_psk(p)}
         for p in session.query(TunnelPeer)
         .filter(TunnelPeer.network_id == network.id)
         .filter(TunnelPeer.enabled.is_(True))

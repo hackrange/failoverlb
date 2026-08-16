@@ -391,6 +391,18 @@ document.addEventListener("DOMContentLoaded", function () {
         '<span class="dot ' + state + '"></span><strong>' + esc(p.name) + "</strong> " +
         '<span class="mono small faint">' + esc(p.address) + "</span>" +
         '<div class="small faint">' + words + "</div>" +
+        // Whether this peering survives somebody breaking Curve25519 later.
+        // Per workload, because a fleet is upgraded one at a time and the ones
+        // still without a key are the useful thing to see.
+        (p.enrolled
+          ? (p.has_psk
+             ? '<div class="small"><span class="badge ok">pre-shared key</span> ' +
+               '<span class="faint">breaking the key exchange is not enough on ' +
+               'its own</span></div>'
+             : '<div class="small"><span class="badge warn">no pre-shared key</span> ' +
+               '<span class="faint">Curve25519 alone, so traffic recorded today ' +
+               'is readable to whoever breaks it later</span></div>')
+          : "") +
         // What breaks if this goes away.  Sites rather than pools, because a
         // pool nothing serves from breaks nothing and that is not the question
         // anybody is asking before they press Remove.
@@ -406,6 +418,14 @@ document.addEventListener("DOMContentLoaded", function () {
         (CAN_EDIT && !p.enrolled
           ? '<button class="btn small" data-relink="' + p.id + '">' +
             "Show the command</button> "
+          : "") +
+        (CAN_EDIT && p.enrolled && !p.has_psk
+          ? '<button class="btn small" data-psk="' + p.id + '" data-name="' +
+            esc(p.name) + '">Add a pre-shared key</button> '
+          : "") +
+        (CAN_EDIT && p.enrolled && p.has_psk
+          ? '<button class="btn small" data-dropsk="' + p.id + '" data-name="' +
+            esc(p.name) + '">Remove the key</button> '
           : "") +
         (CAN_EDIT
           ? '<button class="btn small" data-note="' + p.id + '">' +
@@ -452,23 +472,31 @@ document.addEventListener("DOMContentLoaded", function () {
     // ticket is single use and its hash is all that is stored, so there is no
     // way to show it again later and it is better to say so than to let
     // somebody go looking.
+    // Two commands share this: enrolling a new workload, and putting a
+    // pre-shared key on one that is already here.  Same shape, same warning
+    // about the ticket, different sentence underneath, so they share the modal
+    // rather than having two that drift apart.
+    const upgrade = !result.enrol_command;
     NFM.openModal("Run this on " + esc(result.name), "", `
-      <p>On the machine you want to reach, run this.  Nothing needs to be
-      opened for it inbound.</p>
+      <p>${upgrade
+        ? "On that workload, run this.  It keeps its address, its own private key and its place in every pool."
+        : "On the machine you want to reach, run this.  Nothing needs to be opened for it inbound."}</p>
       ${cmdBlock("enrol-cmd")}
       <div class="hint mt">
         It works once and expires in ${esc(result.expires_in_minutes)} minutes.
-        Treat it like a password: anybody who has it can put a machine on your
-        tunnel.  Only its hash is kept here, so this exact command cannot be
-        shown again, but you can get a fresh one from the workload list.
+        Treat it like a password.  Only its hash is kept here, so this exact
+        command cannot be shown again, but you can get a fresh one from the
+        workload list.
       </div>
       <div class="hint">
-        That machine becomes <span class="mono">${esc(result.address)}</span>.
-        Use that address when you add it to a pool.
+        ${upgrade
+          ? esc(result.note || "")
+          : "That machine becomes <span class=\"mono\">" + esc(result.address) +
+            "</span>.  Use that address when you add it to a pool."}
       </div>
       <div class="mt"><button class="btn primary" id="cmd-done">Done</button></div>`,
       true);
-    fillCmd("enrol-cmd", result.enrol_command);
+    fillCmd("enrol-cmd", result.enrol_command || result.command);
     el("cmd-done").addEventListener("click", function () {
       NFM.closeModal();
       load();
@@ -620,6 +648,52 @@ document.addEventListener("DOMContentLoaded", function () {
         NFM.toast("Note saved", "ok");
         load();
       });
+      return;
+    }
+
+    // The one command that puts a pre-shared key on a workload already on the
+    // tunnel.
+    //
+    // It cannot be done from this end alone and that is not a gap: a WireGuard
+    // pre-shared key is never sent over the wire, which is the whole reason it
+    // survives somebody breaking Curve25519 later.  Both ends have to be told
+    // it separately.
+    const psk = ev.target.closest("[data-psk]");
+    if (psk) {
+      NFM.confirmThen(
+        "Add a pre-shared key to " + psk.dataset.name + "?\n\n" +
+        "You will get one command to run on that workload.  Fetching it " +
+        "switches the key on at this end, so run it rather than saving it for " +
+        "later: between the two the workload is offline for a few seconds.\n\n" +
+        "If it cannot get a handshake within a minute it puts itself back.",
+        async function () {
+          try {
+            const r = await NFM.api("/tunnel/peers/" + psk.dataset.psk + "/psk", {
+              method: "POST", body: {},
+            });
+            showCommand(r);
+          } catch (err) { NFM.toast(err.message, "bad"); }
+        });
+      return;
+    }
+
+    const dropsk = ev.target.closest("[data-dropsk]");
+    if (dropsk) {
+      NFM.confirmThen(
+        "Take the pre-shared key off " + dropsk.dataset.name + "?\n\n" +
+        "This is the way out when an upgrade half happened and the workload " +
+        "cannot connect.  It goes back to a plain peering, which is weaker and " +
+        "working rather than stronger and down.\n\n" +
+        "Take the PresharedKey line out of that machine's config too, or it " +
+        "still will not connect.",
+        async function () {
+          try {
+            await NFM.api("/tunnel/peers/" + dropsk.dataset.dropsk + "/psk",
+                          { method: "DELETE" });
+            NFM.toast("Key removed at this end", "ok");
+            load();
+          } catch (err) { NFM.toast(err.message, "bad"); }
+        });
       return;
     }
 

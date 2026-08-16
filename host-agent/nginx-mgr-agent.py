@@ -2527,6 +2527,23 @@ def v_tunnel_apply(req):
             f"# {peer.get('name') or 'peer'}",
             "[Peer]",
             f"PublicKey = {key}",
+        ]
+
+        # The pre-shared key, when this workload has one.
+        #
+        # It is WireGuard's own answer to a quantum computer: 32 bytes mixed
+        # into the handshake as an extra symmetric input, so breaking
+        # Curve25519 is no longer enough on its own to read traffic somebody
+        # recorded today.  Optional per peer on purpose, because both ends have
+        # to hold the same value and adding one to a workload that is already
+        # connected would drop it until the far end is updated too.
+        psk = str(peer.get("psk") or "").strip()
+        if psk:
+            if not re.fullmatch(r"[A-Za-z0-9+/]{42,44}=", psk):
+                raise AgentError("a peer pre-shared key is not valid", "bad_request")
+            lines.append(f"PresharedKey = {psk}")
+
+        lines += [
             # One address, never a range.  This is what keeps a workload from
             # being able to speak for anything but itself.
             f"AllowedIPs = {peer_address}/32",

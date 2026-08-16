@@ -1375,6 +1375,34 @@ class TunnelPeer(Base):
     address = Column(String(64), nullable=False, index=True)
     public_key = Column(String(64))
 
+    # A WireGuard pre-shared key, and the only post quantum story WireGuard
+    # has.
+    #
+    # The handshake is Curve25519, which a quantum computer breaks, and traffic
+    # captured today is decrypted whenever one arrives.  That is the same
+    # harvest now, decrypt later argument the TLS side makes, and it applies
+    # harder here: this carries backend traffic rather than public pages.
+    #
+    # WireGuard's own answer is this key.  It is 32 random bytes mixed into the
+    # handshake as an extra symmetric input, so an attacker who breaks
+    # Curve25519 still has to have taken this as well, and it is never sent
+    # over the wire by either end.  It does not make the tunnel post quantum in
+    # the sense that ML-KEM does; it makes breaking Curve25519 insufficient on
+    # its own, which is what is available.
+    #
+    # Encrypted at rest with the node's own key, like a pool token, and both
+    # ends have to hold the same value or the handshake fails.  That last part
+    # is why it is never added to a peer that already works without asking.
+    psk_encrypted = Column(Text)
+
+    # A ticket for the one command that puts the key on an existing workload.
+    # Separate from the enrolment ticket because a workload being upgraded is
+    # already enrolled and must not be re-enrolled: it keeps its address, its
+    # own private key and its place in every pool that points at it.
+    psk_token_hash = Column(String(128), index=True)
+    psk_expires_at = Column(DateTime)
+    psk_applied_at = Column(DateTime)
+
     # The enrolment ticket.  Only the hash is kept, it works once, and it is
     # short lived, exactly like the cluster join token.  Anybody holding one can
     # put a machine on the tunnel.
@@ -1387,6 +1415,10 @@ class TunnelPeer(Base):
 
     def is_enrolled(self):
         return bool(self.public_key and self.enrolled_at)
+
+    @property
+    def has_psk(self):
+        return bool(self.psk_encrypted)
 
     @property
     def enrol_is_valid(self):

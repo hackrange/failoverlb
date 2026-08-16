@@ -116,6 +116,61 @@ def main():
         clean(session)
         print("    (rows made by this check removed)")
 
+    # -----------------------------------------------------------------------
+    # Pre-shared keys
+    #
+    # WireGuard's key exchange is Curve25519, so traffic recorded today is
+    # readable by whoever breaks it later.  A pre-shared key is 32 bytes mixed
+    # into the handshake as an extra symmetric input, and it is the only answer
+    # WireGuard has.  It is never sent over the wire, which is what makes it
+    # work and is also why both ends have to be told it separately.
+    #
+    # What can go wrong is not subtle and is expensive: both ends must hold the
+    # same value or the peering stops dead, and this tunnel is how the backends
+    # are reached.
+    print()
+    print("  pre-shared keys")
+
+    import re
+    from app.core import snapshot
+
+    a, b = tunnel.new_psk(), tunnel.new_psk()
+    check("a generated key is the shape wireguard accepts",
+          bool(re.fullmatch(r"[A-Za-z0-9+/]{42,44}=", a)),
+          f"got {a!r}, and the agent refuses anything that is not this shape")
+    check("two keys are not the same key", a != b,
+          "one key across every workload would mean one workload's key opens "
+          "all of them")
+
+    with session_scope() as session:
+        peer = session.query(TunnelPeer).first()
+        if peer is None:
+            check("storage", True, "")
+            print("      (no workloads here, so storage was not exercised)")
+        else:
+            was = peer.psk_encrypted
+            try:
+                value = tunnel.set_peer_psk(peer)
+                session.flush()
+                check("the key is encrypted at rest, not stored in the clear",
+                      peer.psk_encrypted != value
+                      and value not in str(peer.psk_encrypted),
+                      "a tunnel key sitting in plain text in the database "
+                      "would undo the reason for having one")
+                check("it comes back out the same",
+                      tunnel.peer_psk(peer) == value,
+                      "a key that does not round trip is a tunnel that will "
+                      "not come up")
+            finally:
+                peer.psk_encrypted = was
+                session.rollback()
+
+    check("the key travels with the config snapshot, unsealed and resealed",
+          "psk_encrypted" in snapshot.SECRET_COLUMNS,
+          "a standby that inherited the peer list without the keys would "
+          "refuse every workload the moment it was promoted, and every node "
+          "has its own encryption key so it cannot travel sealed")
+
     failed = [name for name, ok, _ in results if not ok]
     print()
     print(f"  {len(results) - len(failed)} passed, {len(failed)} failed")

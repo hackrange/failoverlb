@@ -27,6 +27,7 @@ from app.core import audit, tunnel
 from app.db import session_scope
 from app.models import TunnelNetwork, TunnelNodeKey, TunnelPeer, utcnow
 from app.web.routes_api import ObjectGuard, changing, guard
+from app.web.security import client_ip
 
 log = logging.getLogger("nfm.tunnel.web")
 
@@ -140,6 +141,11 @@ def _peer_json(p):
         "enrolled_at": p.enrolled_at.isoformat() if p.enrolled_at else None,
         "enabled": p.enabled,
         "waiting_for_enrolment": bool(p.enrol_token_hash and not p.public_key),
+        # Whether this peering survives somebody breaking Curve25519 later.
+        # Shown per workload rather than as one number for the tunnel, because
+        # a fleet is upgraded one workload at a time and the ones left are the
+        # useful thing to see.
+        "has_psk": p.has_psk,
         "unenrol_command": UNENROL_COMMAND,
         "used_by": _pools_pointing_at(p),
         "sites_using": _sites_using(p),
@@ -269,6 +275,10 @@ async def add_peer(request: Request, g: ObjectGuard = Depends(changing)):
 
     peer = TunnelPeer(network_id=network.id, name=name, address=address,
                       description=(payload.get("description") or "")[:500] or None)
+    # Every new workload gets a pre-shared key, with nothing extra to do.  It
+    # goes into the enrolment script and into the peer block on every node at
+    # the same moment, so there is no window and nobody has to know it happened.
+    tunnel.set_peer_psk(peer)
     token = tunnel.new_enrol_token(peer)
     g.session.add(peer)
     g.session.commit()
@@ -287,6 +297,94 @@ async def add_peer(request: Request, g: ObjectGuard = Depends(changing)):
         "expires_in_minutes": tunnel.ENROL_MINUTES,
         "note": ("single use, expires in two hours, treat it like a password"),
     }
+
+
+@router.post("/api/tunnel/peers/{peer_id}/psk")
+async def new_psk_link(peer_id: str, request: Request,
+                       g: ObjectGuard = Depends(changing)):
+    """
+    A one command upgrade that puts a pre-shared key on a workload already on
+    the tunnel.
+
+    **This cannot be done from here alone, and it is worth saying why rather
+    than looking like a missing feature.**  A WireGuard pre-shared key is never
+    sent over the wire.  Both ends have to be told it separately, which is the
+    entire reason it survives somebody breaking Curve25519 later.  There is no
+    handshake that can carry it, so a command has to run on the workload.
+
+    What this does is make that one command, once, per workload.  It keeps the
+    workload's address, its own private key and its place in every pool, and it
+    puts itself back if the tunnel does not come up within a minute.
+    """
+    g.require("manage_settings")
+
+    peer = g.session.query(TunnelPeer).filter(
+        TunnelPeer.id == int(peer_id)).first()
+    if not peer:
+        raise HTTPException(status_code=404, detail="no such workload")
+    if not peer.is_enrolled():
+        raise HTTPException(
+            status_code=400,
+            detail="that workload has never joined, so enrol it instead.  "
+                   "Anything enrolling now gets a key as part of that.")
+    if peer.has_psk:
+        raise HTTPException(status_code=400,
+                            detail=f"{peer.name} already has a pre-shared key")
+
+    token = tunnel.new_psk_token(peer)
+    g.session.commit()
+
+    audit.record("tunnel.peer.psk.offer", user=g.user,
+                 object_type="tunnel_peer", object_name=peer.name)
+
+    settings = get_settings()
+    base = str(request.headers.get("referer") or "").split("/tunnel")[0].rstrip("/")
+    if not base:
+        base = f"https://{settings.node_address}"
+
+    return {
+        "name": peer.name,
+        "command": f"curl -sSL {base}/tunnel/psk/{token} | sudo bash",
+        "expires_in_minutes": tunnel.ENROL_MINUTES,
+        "note": ("Run it on that workload.  Fetching the link switches the key "
+                 "on at this end, so run it rather than saving it for later, "
+                 "and the workload is briefly offline while the two ends catch "
+                 "up.  If it cannot get a handshake within a minute it undoes "
+                 "itself."),
+    }
+
+
+@router.delete("/api/tunnel/peers/{peer_id}/psk")
+async def drop_psk(peer_id: str, g: ObjectGuard = Depends(changing)):
+    """
+    Take the pre-shared key off a workload, at this end.
+
+    The way out when an upgrade half happened: the load balancers took the key
+    and the workload did not, so the workload cannot connect.  Removing it here
+    puts things back to a plain WireGuard peering, which is weaker and working
+    rather than stronger and down.
+    """
+    g.require("manage_settings")
+
+    peer = g.session.query(TunnelPeer).filter(
+        TunnelPeer.id == int(peer_id)).first()
+    if not peer:
+        raise HTTPException(status_code=404, detail="no such workload")
+
+    peer.psk_encrypted = None
+    peer.psk_applied_at = None
+    peer.psk_token_hash = None
+    peer.psk_expires_at = None
+    name = peer.name
+    g.session.commit()
+
+    await tunnel.apply_to_fleet()
+    audit.record("tunnel.peer.psk.remove", user=g.user,
+                 object_type="tunnel_peer", object_name=name,
+                 detail="back to a plain peering")
+    return {"ok": True, "name": name,
+            "note": "the workload should reconnect within a minute.  Take the "
+                    "PresharedKey line out of its config too, or it will not."}
 
 
 @router.post("/api/tunnel/peers/{peer_id}/enrol")
@@ -571,12 +669,141 @@ PEER_BLOCK = """
 [Peer]
 # {node}
 PublicKey = {public_key}
-Endpoint = {endpoint}
+{psk_line}Endpoint = {endpoint}
 # Only the load balancers, never a default route.  This is what keeps the
 # tunnel from becoming this machine's way out to the internet.
 AllowedIPs = {allowed}
 PersistentKeepalive = 25
 """
+
+
+PSK_SCRIPT = """#!/usr/bin/env bash
+# Put a pre-shared key on this workload's tunnel.
+#
+# Why: the tunnel's key exchange is Curve25519, which a quantum computer
+# breaks, and traffic recorded today is decrypted whenever one arrives.  A
+# pre-shared key is 32 bytes mixed into the handshake as an extra symmetric
+# input, so breaking Curve25519 stops being enough on its own.  It is never
+# sent over the wire; both ends have to be told it, which is why this has to
+# run here rather than being pushed from the load balancers.
+#
+# What it changes: one line per peer in /etc/wireguard/{iface}.conf.  Your
+# private key, your address and your routes are untouched, and this machine
+# stays exactly where it is in every pool.
+set -euo pipefail
+
+IFACE={iface}
+CONF=/etc/wireguard/$IFACE.conf
+PSK='{psk}'
+
+if [ "$(id -u)" != "0" ]; then echo "run this with sudo" >&2; exit 1; fi
+if [ ! -f "$CONF" ]; then
+  echo "no $CONF here, so this machine is not on the tunnel" >&2; exit 1
+fi
+
+cp -a "$CONF" "$CONF.before-psk"
+
+# Written into the file first so it survives a reboot, then pushed into the
+# live interface so it takes effect without dropping anything else.
+python3 - "$CONF" "$PSK" <<'PYEOF'
+import sys
+path, psk = sys.argv[1], sys.argv[2]
+out, seen = [], False
+for line in open(path).read().splitlines():
+    if line.strip().startswith("PresharedKey"):
+        continue
+    out.append(line)
+    if line.strip() == "[Peer]":
+        seen = True
+    # One key line per peer block, straight after PublicKey so it reads well.
+    if seen and line.strip().startswith("PublicKey"):
+        out.append("PresharedKey = " + psk)
+open(path, "w").write("\n".join(out) + "\n")
+PYEOF
+
+for PUB in $(wg show $IFACE peers 2>/dev/null); do
+  wg set $IFACE peer "$PUB" preshared-key <(echo "$PSK")
+done
+
+echo "waiting for the tunnel to come back"
+ok=0
+for i in $(seq 1 30); do
+  hs=$(wg show $IFACE latest-handshakes 2>/dev/null | awk '{{print $2}}' | sort -rn | head -1)
+  now=$(date +%s)
+  if [ -n "$hs" ] && [ "$hs" != "0" ] && [ $((now - hs)) -lt 40 ]; then ok=1; break; fi
+  sleep 2
+done
+
+if [ "$ok" = "1" ]; then
+  rm -f "$CONF.before-psk"
+  echo
+  echo "Done.  This tunnel now uses a pre-shared key."
+  echo "Nothing else about this machine changed."
+else
+  echo
+  echo "The tunnel did not come back within a minute, so this has been undone." >&2
+  mv "$CONF.before-psk" "$CONF"
+  for PUB in $(wg show $IFACE peers 2>/dev/null); do
+    wg set $IFACE peer "$PUB" preshared-key /dev/null 2>/dev/null || true
+  done
+  echo "Tell whoever runs the load balancers to remove the key there too." >&2
+  exit 1
+fi
+"""
+
+
+@router.get("/tunnel/psk/{token}", response_class=PlainTextResponse)
+async def psk_script(token: str, request: Request):
+    """
+    The one command that puts a pre-shared key on a workload already enrolled.
+
+    **Fetching this activates the key on the load balancers**, because the
+    alternative orderings are worse.  Both ends have to hold the same value, so
+    there is a window either way; making it start when the script starts means
+    the script is already running and about to close it, rather than depending
+    on somebody coming back later.
+
+    The window is a few seconds and WireGuard's keepalive re-handshakes
+    through it.  If the script cannot get a handshake within a minute it puts
+    the file back and takes the key off the interface, so a workload that
+    cannot be upgraded ends up where it started rather than off the tunnel.
+
+    Single use.  Only the hash of the ticket is stored, the same as the
+    enrolment ticket, because anybody holding one can read a key that protects
+    a tunnel.
+    """
+    from app.core import tunnel as tunnel_mod
+    from app.models import utcnow
+
+    with session_scope() as session:
+        peer = tunnel_mod.peer_for_psk_token(session, token)
+        if not peer:
+            raise HTTPException(status_code=404,
+                                detail="that link has been used already or has expired")
+        if not peer.is_enrolled():
+            raise HTTPException(
+                status_code=400,
+                detail="that workload has never joined the tunnel, so enrol it "
+                       "instead and it will get a key as part of that")
+
+        value = tunnel_mod.set_peer_psk(peer)
+        peer.psk_applied_at = utcnow()
+        # Burned on read.  A key that can be fetched twice is a key sitting in
+        # somebody's shell history and still valid.
+        peer.psk_token_hash = None
+        peer.psk_expires_at = None
+        name = peer.name
+        session.commit()
+
+    # The load balancers take it now, so by the time the script writes its end
+    # the far end already agrees.
+    await tunnel_mod.apply_to_fleet()
+
+    audit.record("tunnel.peer.psk", user=None, source_ip=client_ip(request),
+                 object_type="tunnel_peer", object_name=name,
+                 detail="pre-shared key issued and applied on the fleet")
+
+    return PSK_SCRIPT.format(iface=IFACE, psk=value)
 
 
 @router.get("/tunnel/enrol/{token}", response_class=PlainTextResponse)
@@ -596,6 +823,10 @@ async def enrol_script(token: str, request: Request):
                 detail=("that enrolment link is not valid any more.  They are "
                         "single use and expire after two hours.  Ask for a "
                         "fresh one on the Tunnel page."))
+
+        # Read while the session is open, because it is decrypted from the row
+        # and the script is built after this block closes.
+        psk = tunnel.peer_psk(peer)
 
         network = session.query(TunnelNetwork).first()
         keys = session.query(TunnelNodeKey).order_by(TunnelNodeKey.node_name).all()
@@ -622,7 +853,8 @@ async def enrol_script(token: str, request: Request):
         # count bytes out and receive almost nothing back.
         peers = "".join(
             PEER_BLOCK.format(node=k.node_name, public_key=k.public_key,
-                              endpoint=k.endpoint, allowed=f"{k.address}/32")
+                              endpoint=k.endpoint, allowed=f"{k.address}/32",
+                              psk_line=(f"PresharedKey = {psk}\n" if psk else ""))
             for k in keys)
 
         base = str(request.base_url).rstrip("/")

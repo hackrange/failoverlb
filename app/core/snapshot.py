@@ -155,6 +155,10 @@ SECRET_COLUMNS = {
     "dns_credentials_encrypted",
     "eab_hmac_key_encrypted",
     "uploaded_privkey_encrypted",
+    # The tunnel pre-shared keys.  Both ends of a WireGuard peering have to
+    # hold the same one, so a standby that inherited the peer list without
+    # these would refuse every workload the moment it was promoted.
+    "psk_encrypted",
     "totp_secret_encrypted",
 }
 
