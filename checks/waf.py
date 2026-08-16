@@ -23,7 +23,7 @@ import json
 import socket
 import sys
 
-from app.core.render import CRS_ROOT
+from app.core.render import CRS_ROOT, _safe_name
 from app.db import session_scope
 from app.models import VirtualHost, json_set
 from app.web.routes_api import render_current
@@ -67,8 +67,22 @@ def rendered_with(mutate):
 
 
 def with_waf(mode, paranoia=None):
+    """
+    Put one named site into a mode, and leave every other site alone.
+
+    Always the same site, chosen by id, and every assertion below is about
+    *that* site's file rather than about the whole render.  The first version
+    of this asked whether the render contained exactly one firewall file and
+    whether any file mentioned modsecurity, which was true only while nobody
+    had turned the feature on for real.  The moment two sites were switched to
+    watching on a live fleet, a correct render failed the check.
+
+    That is the shape of test this project has already written down as worse
+    than none: it passed because of the state of the box, not because of the
+    code.
+    """
     def mutate(session):
-        host = session.query(VirtualHost).first()
+        host = session.query(VirtualHost).get(TARGET_ID)
         cfg = host.setting_map()
         cfg["waf_mode"] = mode
         if paranoia:
@@ -81,11 +95,19 @@ print("\n=== The web application firewall ===\n")
 
 with session_scope() as s:
     site_count = s.query(VirtualHost).count()
+    first = s.query(VirtualHost).order_by(VirtualHost.id).first()
+    TARGET_ID = first.id if first else None
+    TARGET_NAME = first.name if first else ""
 
 if not site_count:
     skip("everything", "no sites on this node, which is normal for a standby")
     print("\nnothing to check here\n")
     sys.exit(0)
+
+# The one file every assertion below is about.
+TARGET_FILE = f"waf/{_safe_name(TARGET_NAME)}.conf"
+TARGET_SITE = f"sites/{_safe_name(TARGET_NAME)}.conf"
+print(f"    testing against {TARGET_NAME}\n")
 
 module = agent({"verb": "waf_module_status"}).get("data") or {}
 built = bool(module.get("built"))
@@ -104,26 +126,24 @@ print(f"    rule set: {crs.get('version') or 'not installed'}, "
 
 files = rendered_with(with_waf("watching"))
 
-site_files = {p: t for p, t in files.items() if p.startswith("sites/")}
-waf_files = {p: t for p, t in files.items() if p.startswith("waf/")}
+mine = files.get(TARGET_SITE, "")
 
 if built:
-    check("a rules file is written for the site",
-          len(waf_files) == 1,
-          f"expected one waf file, got {sorted(waf_files)}")
+    check("a rules file is written for this site",
+          TARGET_FILE in files,
+          f"expected {TARGET_FILE}, got {sorted(p for p in files if p.startswith('waf/'))}")
 
-    check("the site points at its own rules file",
-          any("modsecurity_rules_file" in t and "modsecurity on;" in t
-              for t in site_files.values()),
-          "no modsecurity directives in the site config")
+    check("this site points at its own rules file",
+          f"modsecurity_rules_file /etc/nginx/nginxmgr/{TARGET_FILE};" in mine
+          and "modsecurity on;" in mine,
+          "no modsecurity directives in this site's config")
 else:
     check("without the module the site degrades to a comment",
-          not waf_files and not any("modsecurity on;" in t
-                                    for t in site_files.values()),
+          TARGET_FILE not in files and "modsecurity on;" not in mine,
           "the module is missing and directives were written anyway")
 
     check("and says why, in the config",
-          any("without the modsecurity module" in t for t in site_files.values()),
+          "without the modsecurity module" in mine,
           "no explanation was left in the config")
 
 
@@ -132,14 +152,14 @@ else:
 # =============================================================================
 
 if built:
-    rules_text = "\n".join(waf_files.values())
+    rules_text = files.get(TARGET_FILE, "")
 
     check("watching means DetectionOnly",
           "SecRuleEngine DetectionOnly" in rules_text,
           f"engine line was: {[l for l in rules_text.splitlines() if 'SecRuleEngine' in l]}")
 
     blocking = rendered_with(with_waf("block"))
-    blocking_text = "\n".join(t for p, t in blocking.items() if p.startswith("waf/"))
+    blocking_text = blocking.get(TARGET_FILE, "")
     check("blocking means On",
           "SecRuleEngine On" in blocking_text,
           f"engine line was: {[l for l in blocking_text.splitlines() if 'SecRuleEngine' in l]}")
@@ -149,7 +169,7 @@ if built:
     # mode promises "safe without tuning", and it can only keep that promise by
     # overriding a level that was raised on the assumption of tuning.
     known = rendered_with(with_waf("block_known", paranoia="3"))
-    known_text = "\n".join(t for p, t in known.items() if p.startswith("waf/"))
+    known_text = known.get(TARGET_FILE, "")
     check("block known malicious blocks on one critical rule, as CRS ships",
           "SecRuleEngine On" in known_text
           and "inbound_anomaly_score_threshold=5" in known_text,
@@ -159,17 +179,19 @@ if built:
           "blocking_paranoia_level=1" in known_text,
           "a strictness of 3 leaked into the locked preset")
 
+    # Off means off for *this* site.  Other sites keep whatever they were
+    # set to, which is why this asks about one file rather than about the
+    # absence of the whole folder.
     off = rendered_with(with_waf("off"))
-    check("off writes nothing at all",
-          not any(p.startswith("waf/") for p in off)
-          and not any("modsecurity" in t for p, t in off.items()
-                      if p.startswith("sites/")),
-          "off still wrote firewall config")
+    check("off writes nothing for this site",
+          TARGET_FILE not in off
+          and "modsecurity" not in off.get(TARGET_SITE, ""),
+          "off still wrote firewall config for this site")
 
     # Order is the silent one.  A variable set after the rules are included is
     # read too late, the config tests clean, and the setting does nothing.
     strict = rendered_with(with_waf("watching", paranoia="3"))
-    strict_text = "\n".join(t for p, t in strict.items() if p.startswith("waf/"))
+    strict_text = strict.get(TARGET_FILE, "")
     setvar = strict_text.find("blocking_paranoia_level=3")
     include = strict_text.find(f"Include {CRS_ROOT}/rules/")
     check("the paranoia level is set before the rules are included",
