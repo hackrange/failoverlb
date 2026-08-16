@@ -9,7 +9,16 @@
 # libraries that parse untrusted input, so the date is here and it is part of
 # the deal:
 #
-#     Last reviewed: 16 August 2026
+#     Last reviewed: 16 August 2026, with trivy against a live CVE feed
+#                    rather than by eye.  It found twelve HIGH advisories in
+#                    what was pinned here, which a reading of the file could
+#                    never have found, and two were on the authentication
+#                    path: a PyJWT token forgery bypass and a path traversal
+#                    in python-multipart, which parses every form this GUI
+#                    posts.  Those two were bumped immediately; the rest
+#                    (starlette, fastapi, cryptography, SQLAlchemy) are a
+#                    major version move and are being done as their own piece
+#                    of work with its own testing.
 #     Review again:  quarterly, and immediately for an advisory in any of the
 #                    six below that touch untrusted input
 #
@@ -29,7 +38,7 @@
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
 starlette==0.41.3
-python-multipart==0.0.20
+python-multipart==0.0.30      # 0.0.20 had a path traversal arbitrary file write
 itsdangerous==2.2.0
 
 # Templates.  Used for both the web pages and the nginx config we write out.
@@ -47,7 +56,7 @@ pydantic-settings==2.7.0
 # Login stuff
 argon2-cffi==23.1.0          # password hashing with argon2id
 pyotp==2.9.0                 # the 6 digit codes for local break glass accounts
-PyJWT[crypto]==2.10.1        # checks the id_token that comes back from OIDC
+PyJWT[crypto]==2.13.0        # checks the id_token that comes back from OIDC
 qrcode[pil]==8.0             # we draw the TOTP QR code ourselves, no outside CDN
 
 # Certificates.  The cluster CA, the peer certs, and reading cert files.
