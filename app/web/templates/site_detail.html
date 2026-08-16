@@ -612,6 +612,34 @@
           <button type="button" class="btn" id="waf-refresh">Show what has fired so far</button>
         </div>
       </div>
+
+      {#
+        Rounds that have already finished.
+
+        Without this, stopping a session hid the evidence it had just
+        gathered.  The hits were never deleted, they were only unreachable:
+        the page could only ask "what has fired since the running session
+        started", so there was no window that described a session which had
+        ended.  Somebody who exercised an application properly and then
+        stopped watching before saving a profile had done all the work and
+        could not get back to it.
+      #}
+      <div id="waf-past" hidden>
+        <h3>Earlier rounds</h3>
+        <p class="small muted">
+          What fired during a round that has already finished.  Nothing is
+          thrown away when you stop watching, so you can come back to a round
+          and save a profile from it later.
+        </p>
+        <div id="waf-past-list"></div>
+      </div>
+
+      {# A load that failed used to leave this card looking idle, which reads
+         as "no session" rather than "we could not find out". #}
+      <div class="notice warn" id="waf-session-error" hidden>
+        <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.4 15 14H1z"/></svg>
+        <div id="waf-session-error-text"></div>
+      </div>
     </div>
   </div>
 
@@ -649,6 +677,7 @@
       <span class="small faint" id="waf-hits-summary"></span>
     </div>
     <div class="card-body">
+      <div class="small muted" id="waf-hits-round"></div>
       <div class="notice warn" id="waf-mixed-warn" hidden>
         <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.4 15 14H1z"/></svg>
         <div id="waf-mixed-text"></div>
@@ -2134,6 +2163,78 @@ document.addEventListener("DOMContentLoaded", function () {
       }
     }
 
+    // Which round the hits on screen came from.  Not the same thing as the
+    // running one: a finished round can be on screen while nothing is
+    // running, and the profile that gets saved has to be attributed to the
+    // round it actually came from rather than to whatever is running now.
+    let viewing = null;
+
+    function tidy(stamp) {
+      return String(stamp || "").replace("T", " ").slice(0, 16);
+    }
+
+    function seconds(stamp) {
+      const at = Date.parse(stamp);
+      return isNaN(at) ? null : at / 1000;
+    }
+
+    // One round's hits, whether it is still going or finished.
+    //
+    // A finished round is bounded at both ends.  Leaving the far end open
+    // would fold every hit since it stopped into the list, so traffic nobody
+    // was watching would arrive looking like something a tester produced.
+    async function loadHits(session) {
+      viewing = session;
+      const from = seconds(session.started_at);
+      const to = session.ended_at ? seconds(session.ended_at) : null;
+      let q = "?addresses=" +
+              encodeURIComponent((session.addresses || []).join(","));
+      if (from !== null) { q += "&since=" + from; }
+      if (to !== null) { q += "&until=" + to; }
+      showHits(await NFM.api("/waf/hits/" + HOST_ID + q));
+
+      const note = document.getElementById("waf-hits-round");
+      if (note) {
+        note.textContent = session.ended_at
+          ? "From the round that ran " + tidy(session.started_at) + " to " +
+            tidy(session.ended_at) + ", watching " +
+            (session.addresses || []).join(", ") + "."
+          : "";
+      }
+    }
+
+    function drawPast(sessions) {
+      const box = document.getElementById("waf-past");
+      const list = document.getElementById("waf-past-list");
+      if (!box || !list) return;
+
+      const done = (sessions || []).filter(s => s.ended_at);
+      box.hidden = !done.length;
+      if (!done.length) { list.innerHTML = ""; return; }
+
+      list.innerHTML = done.map(s =>
+        '<div class="flex-between waf-past-row">' +
+          '<div class="small"><strong>' + NFM.escapeHtml(s.note || "unnamed round") +
+            "</strong> " + NFM.escapeHtml(tidy(s.started_at)) + " to " +
+            NFM.escapeHtml(tidy(s.ended_at)) +
+            '<div class="faint">watching ' +
+            NFM.escapeHtml((s.addresses || []).join(", ")) + "</div></div>" +
+          '<button type="button" class="btn sm waf-past-show" data-id="' +
+            s.id + '">Show what fired</button>' +
+        "</div>").join("");
+
+      list.querySelectorAll(".waf-past-show").forEach(function (button) {
+        button.addEventListener("click", async function () {
+          const chosen = done.filter(s => String(s.id) === button.dataset.id)[0];
+          if (!chosen) return;
+          button.disabled = true;
+          try { await loadHits(chosen); }
+          catch (err) { NFM.toast(err.message, "bad"); }
+          button.disabled = false;
+        });
+      });
+    }
+
     document.getElementById("waf-start").addEventListener("click", async function () {
       const button = document.getElementById("waf-start");
       button.disabled = true;
@@ -2163,22 +2264,26 @@ document.addEventListener("DOMContentLoaded", function () {
       try {
         const r = await NFM.api("/waf/sessions/" + running.id + "/stop",
                                 { method: "POST", body: {} });
+        const finished = running;
         showSession(null);
         if (r.restored_mode) { mode.value = r.restored_mode; refresh(); }
         showHits(r);
+        if (finished) { viewing = finished; }
+        try {
+          const state = await NFM.api("/waf/sessions/" + HOST_ID);
+          drawPast(state.sessions || []);
+        } catch (err) { /* the list refreshes on the next page load */ }
         NFM.toast("Stopped.  " + (r.candidates || []).length +
-                  " entries came from your testers.", "ok");
+                  " entries came from your testers.  They stay available " +
+                  "under Earlier rounds.", "ok");
       } catch (err) { NFM.toast(err.message, "bad"); }
       button.disabled = false;
     });
 
     document.getElementById("waf-refresh").addEventListener("click", async function () {
-      try {
-        const q = "?addresses=" + encodeURIComponent((running.addresses || []).join(",")) +
-                  (running.started_at ? "&since=" +
-                   (new Date(running.started_at).getTime() / 1000) : "");
-        showHits(await NFM.api("/waf/hits/" + HOST_ID + q));
-      } catch (err) { NFM.toast(err.message, "bad"); }
+      if (!running) { NFM.toast("Nothing is being watched right now", "bad"); return; }
+      try { await loadHits(running); }
+      catch (err) { NFM.toast(err.message, "bad"); }
     });
 
     document.getElementById("waf-clear").addEventListener("click", function () {
@@ -2205,7 +2310,7 @@ document.addEventListener("DOMContentLoaded", function () {
           body: {
             name: name,
             learned_from_site: SITE_NAME,
-            learned_from_addresses: running ? running.addresses : [],
+            learned_from_addresses: (viewing || running || {}).addresses || [],
             exclusions: entries,
           },
         });
@@ -2249,10 +2354,25 @@ document.addEventListener("DOMContentLoaded", function () {
       try {
         const state = await NFM.api("/waf/sessions/" + HOST_ID);
         showSession(state.running);
+        drawPast(state.sessions || []);
         if (state.running) {
-          document.getElementById("waf-refresh").click();
+          try { await loadHits(state.running); }
+          catch (err) { NFM.toast(err.message, "bad"); }
         }
-      } catch (err) { /* the card just stays idle */ }
+      } catch (err) {
+        // Not swallowed any more.  A failure here used to leave the card
+        // looking idle, which reads as "there is no session" rather than "we
+        // could not find out", and those need different reactions from the
+        // person looking at it.
+        const box = document.getElementById("waf-session-error");
+        if (box) {
+          document.getElementById("waf-session-error-text").textContent =
+            "Could not read the watching state for this site: " + err.message +
+            ".  Reload the page.  Nothing that was learned is lost, it is kept " +
+            "in the logs on each node rather than in this page.";
+          box.hidden = false;
+        }
+      }
     })();
   })();
 

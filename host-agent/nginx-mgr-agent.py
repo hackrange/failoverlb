@@ -3065,9 +3065,16 @@ def v_waf_hits(req):
     """
     What fired on this node, grouped by rule and path.
 
-    `since` bounds it to a learning session.  Filtering here rather than in the
-    manager means a session that ran for ten minutes does not have to carry a
-    week of unrelated traffic across the wire to be thrown away at the far end.
+    `since` and `until` bound it to a learning session.  Filtering here rather
+    than in the manager means a session that ran for ten minutes does not have
+    to carry a week of unrelated traffic across the wire to be thrown away at
+    the far end.
+
+    `until` exists so a session that has finished can still be looked at.
+    Without it the only readable window was "since the running session began",
+    so stopping a session made its own evidence unreachable even though it was
+    still sitting in this file.  Somebody who stopped watching before saving a
+    profile had done the work and could not get at it.
 
     Every client address that produced each group comes back with it, because
     deciding whether a hit is a false positive is exactly the question of who
@@ -3078,6 +3085,8 @@ def v_waf_hits(req):
     path = _waf_log(payload.get("site"))
     since = payload.get("since")
     since = float(since) if isinstance(since, (int, float)) else None
+    until = payload.get("until")
+    until = float(until) if isinstance(until, (int, float)) else None
 
     if not path.is_file():
         return {"ok": True, "present": False, "groups": [], "transactions": 0,
@@ -3111,6 +3120,8 @@ def v_waf_hits(req):
         tx = entry.get("transaction") or entry
         when = _waf_when(tx.get("time_stamp"))
         if since is not None and (when is None or when < since):
+            continue
+        if until is not None and (when is None or when > until):
             continue
 
         transactions += 1

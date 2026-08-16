@@ -787,8 +787,15 @@ async def waf_session_stop(session_id: int, request: Request,
 @router.get("/waf/hits/{host_id}")
 async def waf_hits_for_host(host_id: int, request: Request,
                             addresses: str = "", since: float = None,
+                            until: float = None,
                             db: DBSession = Depends(get_db)):
-    """What fired for one site, split into what a tester produced and what did not."""
+    """
+    What fired for one site, split into what a tester produced and what did not.
+
+    `until` is how a session that has already stopped can still be read.  The
+    window was open ended, so the page could only ever ask about the session
+    running right now, and stopping one hid the evidence it had just gathered.
+    """
     from app.core import waf_hits as hits_mod
 
     get_user(request, db)
@@ -796,7 +803,7 @@ async def waf_hits_for_host(host_id: int, request: Request,
     if not host:
         raise HTTPException(status_code=404, detail="no such site")
 
-    found = await hits_mod.fleet_hits(host.name, since=since)
+    found = await hits_mod.fleet_hits(host.name, since=since, until=until)
     networks, bad = hits_mod.parse_addresses(addresses)
     split = hits_mod.split_by_tester(found["groups"], networks)
 
@@ -1466,6 +1473,33 @@ def _validate_settings(raw, context: str) -> dict:
             continue
         if not feature.is_available(caps.modules, caps.version_tuple):
             problems.append(f"{feature.label} {feature.unavailable_reason(caps.modules, caps.version_tuple)}")
+            continue
+
+        # WAF strictness is a level or the name of a tuned profile, and only
+        # the levels can be in the catalog.
+        #
+        # The catalog is static by design and a profile is a database row that
+        # did not exist when it was written, so `custom:whatever` failed the
+        # select check and every attempt to apply a profile came back 400.  The
+        # picker offered profiles, the renderer understood them, the save was
+        # the one link in the chain that did not, so the feature had never
+        # worked end to end.
+        #
+        # Checked against the profiles that exist rather than waved through.  A
+        # name that matches nothing renders a site with no exclusions at all,
+        # which is a site refusing traffic somebody believed they had allowed,
+        # and it would do it quietly.
+        if key == "waf_paranoia" and str(value).startswith("custom:"):
+            wanted = str(value).split(":", 1)[1]
+            with session_scope() as session:
+                known = [p.name for p in session.query(WafProfile).all()]
+            if wanted not in known:
+                problems.append(
+                    f"{feature.label}: there is no WAF profile called "
+                    f"{wanted}." + (f"  There is: {', '.join(sorted(known))}"
+                                    if known else "  None are saved yet."))
+                continue
+            cleaned[key] = value
             continue
 
         error = validate_value(feature, value)

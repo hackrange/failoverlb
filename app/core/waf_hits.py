@@ -61,7 +61,7 @@ def address_matches(client, networks):
     return any(address in net for net in networks)
 
 
-async def fleet_hits(site: str, since=None) -> dict:
+async def fleet_hits(site: str, since=None, until=None) -> dict:
     """
     Every node's hits for one site, merged.
 
@@ -69,10 +69,19 @@ async def fleet_hits(site: str, since=None) -> dict:
     testers were working is the one holding the evidence, and that is not
     necessarily the node somebody is looking at now, least of all after a
     failover, which is exactly when people go looking.
+
+    `until` is what makes a finished session readable.  The window used to be
+    open ended, so the only thing anybody could ask for was "since the running
+    session started", and stopping a session therefore hid its own evidence.
+    The hits were still in the log the whole time, which is the part that made
+    it costly: somebody had exercised an application properly, stopped
+    watching, and had no way back to the work they had just done.
     """
     payload = {"site": site}
     if since is not None:
         payload["since"] = float(since)
+    if until is not None:
+        payload["until"] = float(until)
 
     results = await ask_every_node("waf_hits", payload)
 
