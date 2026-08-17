@@ -83,6 +83,16 @@ check("the site save does not hand the visible controls straight to the put",
       "this is the line that ate the rewrites: it sends only what was on "
       "screen, and the put replaces everything")
 
+# Narrowed to the save handler rather than searched for anywhere on the page,
+# and the marker is asserted first.  A split on a string that is not there
+# quietly hands back the whole file, and every assertion after it then passes
+# on the wrong text.  That is not hypothetical: the error page checks in
+# checks/regressions.py did it for months against "__nfm_error/ {", which never
+# appears because the template name sits in the middle of that path.
+check("the save handler can be found to read",
+      "saveBtn.disabled = true;" in page,
+      "the marker below moved, so the assertions after it are reading the "
+      "whole page and mean nothing")
 save = page.split("saveBtn.disabled = true;")[0]
 check("the site save reads the site back before building the blob",
       'fresh = await NFM.api("/hosts/" + HOST_ID);' in save,

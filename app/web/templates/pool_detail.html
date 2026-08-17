@@ -1047,6 +1047,22 @@ document.addEventListener("DOMContentLoaded", function () {
     const btn = this;
     btn.disabled = true;
     try {
+      // A settings put replaces the whole blob, and the fields below are the
+      // ones this page has controls for, which is not the same as every
+      // setting a pool can hold.  adaptive_floor_ms is the live example: the
+      // api takes it, the adaptive weighting reads it, and no control here
+      // offers it, so saving a pool from this page used to delete it without
+      // saying anything.  Read the pool back and merge, the way the site page
+      // does.  If the read fails, save nothing rather than a guess.
+      let existing;
+      try {
+        existing = await NFM.api("/pools/" + POOL_ID);
+      } catch (err) {
+        NFM.toast("Could not read the pool back, so nothing was saved: " +
+                  err.message, "bad");
+        btn.disabled = false;
+        return;
+      }
       await NFM.api("/pools/" + POOL_ID, { method: "PUT", body: {
         name: str("p-name"),
         description: str("p-desc"),
@@ -1078,7 +1094,7 @@ document.addEventListener("DOMContentLoaded", function () {
                            ? num("h-port") : null,
         health_check_verify_tls: chk("h-verify"),
 
-        settings: {
+        settings: Object.assign({}, existing.settings || {}, {
           sticky_enabled: chk("s-enabled"),
           sticky_cookie_name: str("s-cookie"),
           sticky_cookie_max_age: num("s-maxage"),
@@ -1090,7 +1106,7 @@ document.addEventListener("DOMContentLoaded", function () {
           adaptive_base_weight: num("aw-base"),
           adaptive_min_weight: num("aw-min"),
           adaptive_max_weight: num("aw-max")
-        }
+        })
       }});
 
       // Members are separate rows, so they save separately.
