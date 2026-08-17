@@ -939,6 +939,37 @@ def analyse(text: str) -> dict:
     }
 
 
+def _zone_named(bare: str):
+    """
+    The zone a limit_req or limit_conn line names, or None.
+
+    The two directives do not agree on how to write it, which is worth being
+    explicit about because reading them the same way is wrong in a way that
+    looks right:
+
+        limit_req  zone=one burst=10 nodelay;
+        limit_conn perip 5;
+
+    limit_req puts it in `zone=`, limit_conn makes it the first argument and
+    follows it with a number.  Scanning every token for "something that is not
+    a declared zone" finds the burst count or the connection count and blames
+    that, so a line whose zone is perfectly fine gets commented out for naming
+    a zone called "5".  Read the one argument that actually holds the name.
+    """
+    parts = bare.rstrip(";").split()
+    if not parts:
+        return None
+    if parts[0] == "limit_req":
+        for token in parts[1:]:
+            if token.startswith("zone="):
+                # zone=one, and on the declaration side zone=one:10m.
+                return token[len("zone="):].split(":")[0] or None
+        return None
+    if parts[0] == "limit_conn":
+        return parts[1] if len(parts) > 1 else None
+    return None
+
+
 def _blank_dangling_zones(site: dict, declared: set) -> set:
     """
     Comment out limit_req/limit_conn lines naming a zone that is not coming with
@@ -950,21 +981,14 @@ def _blank_dangling_zones(site: dict, declared: set) -> set:
         out = []
         for line in (text or "").splitlines():
             bare = line.strip()
-            if bare.startswith(("limit_req ", "limit_conn ")):
-                for token in bare.rstrip(";").split():
-                    name = token[len("zone="):] if token.startswith("zone=") else None
-                    if name is None and token not in ("limit_req", "limit_conn"):
-                        # limit_conn writes the zone as a bare first argument.
-                        name = token if bare.startswith("limit_conn ") else None
-                    if name and name not in declared:
-                        missing.add(name)
-                        out.append(f"# {bare}")
-                        out.append(f"# ^ the zone {name!r} was not in what you "
-                                   f"pasted, and nginx will not load a config "
-                                   f"that names a zone that does not exist.")
-                        break
-                else:
-                    out.append(line)
+            name = _zone_named(bare) if bare.startswith(
+                ("limit_req ", "limit_conn ")) else None
+            if name and name not in declared:
+                missing.add(name)
+                out.append(f"# {bare}")
+                out.append(f"# ^ the zone {name!r} was not in what you "
+                           f"pasted, and nginx will not load a config "
+                           f"that names a zone that does not exist.")
                 continue
             out.append(line)
         return "\n".join(out)
