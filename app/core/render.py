@@ -2948,7 +2948,8 @@ map $cookie_{cookie} $sticky_set_{var} {{
             # `strip`, not the column, or a mount would get the location's
             # trailing slash and not the one on proxy_pass that does the work.
             lines.extend(self._proxy_lines(
-                loc.pool, cfg, indent=8, strip_prefix=strip))
+                loc.pool, cfg, indent=8, strip_prefix=strip,
+                regex_location=loc.match_type in ("regex", "regex_i")))
             if mount:
                 lines.extend(self._mount_redirect_lines(
                     path if path.endswith("/") else path + "/",
@@ -3002,7 +3003,74 @@ map $cookie_{cookie} $sticky_set_{var} {{
             f"{pad}return 503;",
         ]
 
-    def _proxy_lines(self, pool, cfg, indent=8, strip_prefix=False) -> list:
+    @staticmethod
+    def _backend_path(cfg) -> str:
+        """
+        Where the application sits on the backend, tidied up, or empty.
+
+        Always a leading and a trailing slash.  The trailing one is what makes
+        nginx swap the matched part of the path rather than glue the two
+        together, and asking somebody to remember it is asking for the bug the
+        strip prefix checkbox already exists to avoid.
+        """
+        value = (cfg.get("backend_path") or "").strip()
+        if not value:
+            return ""
+        if not value.startswith("/"):
+            value = "/" + value
+        if not value.endswith("/"):
+            value += "/"
+        return value
+
+    def _backend_path_redirect_lines(self, backend_path, already_set, indent=8) -> list:
+        """
+        Put the backend's own path back off the redirects it sends.
+
+        A backend that thinks it lives at /shop/ redirects to /shop/basket/,
+        and without this the visitor's address bar grows a path that is none of
+        their business and that the site does not answer on.
+
+        Four rules, because a backend can say where it sent you four ways: an
+        absolute URL with our name on it in either scheme, a plain path, or an
+        absolute URL with something else in the host part.
+
+        That last one is not a corner case and it is why the catch all is here.
+        A backend listening on a port of its own answers with that port in the
+        Location, so a rule scoped to $host alone reads
+        http://site:8080/shop/thing, does not match, and the path stays on.
+        Watched it do exactly that on a real nginx while this was being built,
+        which is the only reason it is written this way.
+
+        The catch all is last on purpose.  nginx takes the first rule that
+        matches, so the three scoped ones answer first when they apply, and the
+        pattern only gets a look when the host is not one we named.
+
+        Worth knowing about the catch all: it matches any host with this path
+        on it, so a backend redirecting to somebody else's site that happens to
+        use the same path would have that turned into a local path.  With a
+        distinctive path that cannot happen, and with a plain one like /shop/
+        it is possible but needs the other site to share the path.  A rule set
+        by hand is written above all of these and wins outright, which is the
+        way out if it ever does happen.
+        """
+        pad = " " * indent
+        lines = []
+        if already_set:
+            lines.append(f"{pad}# Redirect rewriting is set here too, and it is written")
+            lines.append(f"{pad}# above, so it is tried before these.")
+        lines.append(f"{pad}# The backend builds redirects from the path it thinks it")
+        lines.append(f"{pad}# is under.  Take it back off.")
+        for scheme in ("http", "https"):
+            lines.append(f"{pad}proxy_redirect {scheme}://$host{backend_path} /;")
+        lines.append(f"{pad}proxy_redirect {backend_path} /;")
+        lines.append(f"{pad}# And when the backend names itself, or its own port, in the")
+        lines.append(f"{pad}# Location.  Last, so the three above answer first.")
+        lines.append(f"{pad}proxy_redirect "
+                     f"~^https?://[^/]+{backend_path}(.*)$ /$1;")
+        return lines
+
+    def _proxy_lines(self, pool, cfg, indent=8, strip_prefix=False,
+                     regex_location=False) -> list:
         if not self._pool_has_servers(pool):
             return self._empty_pool_lines(pool, indent)
 
@@ -3018,7 +3086,48 @@ map $cookie_{cookie} $sticky_set_{var} {{
         # /lb/thing and answers 404, which reads like the backend being broken
         # rather than the path being passed on whole.
         tail = "/" if strip_prefix else ""
-        lines = [f"{pad}proxy_pass {scheme}://{_safe_name(pool.name)}{tail};"]
+
+        # The backend sitting under a path of its own.
+        #
+        # This is the other half of the strip above and it goes in the same
+        # place, on proxy_pass, for one reason worth writing down: a rewrite
+        # rule that does this has to be written at the site level, where it
+        # runs before nginx has picked a location, so it rewrites the
+        # certificate challenge and the error pages along with everything else.
+        # People then carve those back out by hand and the site works until the
+        # next thing that needs carving out.  Watched it happen on a live
+        # fleet, twice, for the same site.
+        #
+        # A URI on proxy_pass is the content phase, inside one location, so
+        # nothing else on the site can see it.
+        # Set on the pool, because it is a fact about the backend rather than
+        # about any one site pointed at it, and overridden on a site or a path
+        # for the case where the same backend is reached two ways.  The pool is
+        # also simply where people look: the first attempt at setting this was
+        # typing the path onto a member's address, which is host and port, and
+        # being told the port was not valid.
+        backend_path = self._backend_path(cfg)
+        if not backend_path:
+            try:
+                backend_path = self._backend_path(pool.setting_map())
+            except Exception:  # a pool with no settings blob at all
+                backend_path = ""
+        lines = []
+        if backend_path and regex_location:
+            # nginx refuses a URI on proxy_pass in a regex location, and would
+            # refuse the whole config with it, which takes every site on the
+            # node down and not just this one.  A rewrite inside the location
+            # does the same job and is still confined to the location, so it
+            # cannot reach the challenge or the error pages.
+            lines.append(f"{pad}# This path is matched by a pattern, and nginx will not take a")
+            lines.append(f"{pad}# path on proxy_pass in one.  Same result, written the way")
+            lines.append(f"{pad}# nginx allows here, and still only inside this block.")
+            lines.append(f"{pad}rewrite ^(.*)$ {backend_path.rstrip('/')}$1 break;")
+            lines.append(f"{pad}proxy_pass {scheme}://{_safe_name(pool.name)};")
+        elif backend_path:
+            lines.append(f"{pad}proxy_pass {scheme}://{_safe_name(pool.name)}{backend_path};")
+        else:
+            lines.append(f"{pad}proxy_pass {scheme}://{_safe_name(pool.name)}{tail};")
 
         backend_name = getattr(pool, "backend_name", "") or ""
         is_site = getattr(pool, "backend_kind", "servers") == "site"
@@ -3073,6 +3182,32 @@ map $cookie_{cookie} $sticky_set_{var} {{
         lines.append(f"{pad}proxy_set_header X-Forwarded-Proto $scheme;")
         lines.append(f"{pad}proxy_set_header X-Forwarded-Host $host;")
         lines.append(f"{pad}proxy_set_header X-Forwarded-Port $server_port;")
+
+        # Anything set by hand goes first, because nginx takes the first
+        # proxy_redirect that matches and stops looking.
+        #
+        # It used to be written after the two generated below, which meant that
+        # on a pool with a backend name a hand written rule could never fire:
+        # the generated rule matched, nginx stopped, and the setting somebody
+        # had filled in did nothing at all.  The mount path already knew to put
+        # the hand written one first.  This one did not.
+        #
+        # Two arguments, so it goes through the same writer as a rewrite rule
+        # rather than being quoted whole, which would turn "/guacamole/ /" into
+        # a single nonsense argument.
+        hand_redirect = (cfg.get("proxy_redirect") or "").strip()
+        if hand_redirect:
+            try:
+                lines.append(f"{pad}proxy_redirect "
+                             f"{directive_args(hand_redirect, 'proxy_redirect')};")
+            except ValueError as exc:
+                log.warning("dropping proxy_redirect: %s", exc)
+                lines.append(f"{pad}# proxy_redirect left out, {exc}")
+                hand_redirect = ""
+
+        if backend_path:
+            lines.extend(self._backend_path_redirect_lines(
+                backend_path, already_set=bool(hand_redirect), indent=indent))
 
         if is_site and backend_name:
             # Their redirects point at their own name.  Left alone, the first
@@ -3138,22 +3273,16 @@ map $cookie_{cookie} $sticky_set_{var} {{
                 text = emit(feature, value) if feature else esc(value)
                 lines.append(f"{pad}{key} {text};")
 
-        # Rewriting what the backend says about itself.  Both take two
-        # arguments, so they go through the same writer as a rewrite rule
-        # rather than being quoted whole, which would turn "/guacamole/ /" into
-        # a single nonsense argument.
-        #
-        # These only mean anything while proxying, which is why they are here
-        # rather than in the general settings pass.
-        for key in ("proxy_cookie_path", "proxy_redirect"):
-            value = (cfg.get(key) or "").strip()
-            if not value:
-                continue
+        # proxy_cookie_path, since the redirect half of this pair has already
+        # been written further up where the order matters.
+        value = (cfg.get("proxy_cookie_path") or "").strip()
+        if value:
             try:
-                lines.append(f"{pad}{key} {directive_args(value, key)};")
+                lines.append(f"{pad}proxy_cookie_path "
+                             f"{directive_args(value, 'proxy_cookie_path')};")
             except ValueError as exc:
-                log.warning("dropping %s: %s", key, exc)
-                lines.append(f"{pad}# {key} left out, {exc}")
+                log.warning("dropping proxy_cookie_path: %s", exc)
+                lines.append(f"{pad}# proxy_cookie_path left out, {exc}")
 
         for key in ("proxy_buffering", "proxy_request_buffering", "proxy_intercept_errors",
                     "proxy_ssl_verify", "proxy_ssl_server_name"):

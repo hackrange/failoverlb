@@ -2770,6 +2770,14 @@ def _validate_pool_settings(raw) -> dict:
         # with the same exporter on the same port, and one field per member is
         # how it ends up half filled in.
         "member_metrics_url": "url",
+
+        # Where the application sits on these backends, when it is not at the
+        # root.  It belongs here because it is a fact about the backend and not
+        # about any one site pointed at it, and because this is where people
+        # look for it: the first attempt at setting it was typing the path onto
+        # a member address, which is host and port and gets refused for the
+        # want of a valid port.  A site can still override it.
+        "backend_path": "path",
     }
 
     cleaned = {}
@@ -2817,6 +2825,42 @@ def _validate_pool_settings(raw) -> dict:
             if bad_target:
                 raise HTTPException(status_code=400, detail=bad_target)
 
+            cleaned[key] = text
+        elif expected == "path":
+            # A path on the backend, not a URL and not a host.  The slashes are
+            # put right here rather than asked of whoever typed it, because the
+            # trailing one is what makes nginx swap the matched part of the
+            # path instead of gluing the two together, and that is exactly the
+            # kind of one character difference nobody should have to know.
+            text = str(value or "").strip()
+            if not text:
+                cleaned[key] = ""
+                continue
+
+            # Checked before the slashes are put right, or a whole URL becomes
+            # a path called /http://host:8080/shop/ and renders a proxy_pass
+            # nobody meant.  Said plainly, because pasting the backend's URL in
+            # here is the obvious thing to try.
+            if "://" in text or text.lower().startswith(("http:", "https:")):
+                raise HTTPException(
+                    status_code=400,
+                    detail=("that is a URL.  This field is only the path the "
+                            "application sits under on the backend, like "
+                            "/shop/.  Where to reach the backend is the member "
+                            "address and port"))
+
+            if not text.startswith("/"):
+                text = "/" + text
+            if not text.endswith("/"):
+                text += "/"
+            if len(text) > 300:
+                raise HTTPException(status_code=400, detail="that path is too long")
+            if not re.fullmatch(r"/[A-Za-z0-9._~\-/%@!$&'()*+,;=]*", text):
+                raise HTTPException(
+                    status_code=400,
+                    detail=("that has to be a path, like /shop/.  No scheme, no "
+                            "host and no port: this is where the application "
+                            "sits on the backend, not how to reach it"))
             cleaned[key] = text
         else:
             text = str(value)

@@ -2976,6 +2976,48 @@ register(
     ),
 
     Feature(
+        key="backend_path",
+        label="Backend lives under this path",
+        category="proxy",
+        directive="proxy_pass",
+        contexts=("server", "location"),
+        type="string",
+        default="",
+        pattern=r"^/",
+        placeholder="/shop/",
+        help=HelpText(
+            summary="The application is not at the root of the backend.  Say "
+                    "where it is and we put the path on for you.",
+            detail=(
+                "The opposite of taking a prefix off.  Your visitors ask for "
+                "/basket and the backend wants /shop/basket, because the "
+                "application is installed under a path or sits behind a token "
+                "in the URL.\n\n"
+                "Set it here rather than writing a rewrite rule.  A rewrite "
+                "rule for this has to go at the site level, which means it "
+                "runs before nginx has picked a location and so rewrites "
+                "everything: the certificate challenge and your error pages "
+                "included.  People then carve those back out with a negative "
+                "lookahead and the site works until the next thing gets added "
+                "that also needs carving out.\n\n"
+                "This goes on proxy_pass instead, inside the one location that "
+                "proxies, so nothing else on the site can see it.  The matching "
+                "proxy_redirect is written for you, so a backend that redirects "
+                "to its own path does not push the path into your visitor's "
+                "address bar.  Anything you set yourself is written first and "
+                "still wins."
+            ),
+            use_cases=[
+                "An application installed under /app on the backend",
+                "A backend that expects a fixed token or tenant in the path",
+            ],
+            example="/shop/",
+            example_config="proxy_pass http://your_pool/shop/;",
+            docs_url=f"{D}/http/ngx_http_proxy_module.html#proxy_pass",
+        ),
+    ),
+
+    Feature(
         key="proxy_redirect",
         label="Rewrite redirect locations",
         category="proxy",

@@ -213,6 +213,24 @@
         </div>
       </div>
 
+      <div class="field" style="margin-bottom:14px">
+        <label for="p-backendpath">Where the application sits on these backends</label>
+        <input type="text" id="p-backendpath" class="mono"
+               value="{{ settings.get('backend_path','') }}"
+               placeholder="/shop/">
+        <div class="hint">
+          Leave this empty unless the application is not at the root.  If your
+          visitors ask for <span class="mono">/basket</span> and the backend
+          wants <span class="mono">/shop/basket</span>, put
+          <span class="mono">/shop/</span> here.  A path only: no scheme, no
+          host and no port, because this is where the application sits and not
+          how to reach it.  The redirects the backend sends get the path taken
+          back off on the way out, so it never reaches your visitor's address
+          bar.  A site or a path can override this if the same backend is
+          reached two ways.
+        </div>
+      </div>
+
       <div class="checkline">
         <input type="checkbox" id="p-backendtls" {{ 'checked' if pool.uses_backend_tls }}>
         <label for="p-backendtls">
@@ -1102,6 +1120,7 @@ document.addEventListener("DOMContentLoaded", function () {
           slow_start_enabled: chk("ss-enabled"),
           slow_start_seconds: num("ss-seconds"),
           member_metrics_url: str("mm-url"),
+          backend_path: str("p-backendpath"),
           adaptive_weight_enabled: chk("aw-enabled"),
           adaptive_base_weight: num("aw-base"),
           adaptive_min_weight: num("aw-min"),
