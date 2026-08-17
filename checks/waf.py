@@ -340,18 +340,26 @@ def _render_with_paths(paths):
     return rendered_with(mutate).get(TARGET_FILE, "")
 
 
-_out = _render_with_paths(["/upload", "/trice/*.git/*"])
-check("a plain path still uses the cheap operator",
-      "@beginsWith /upload" in _out,
-      "every request would pay for a regular expression it does not need")
-check("a path with a star renders as a regular expression",
-      "@rx ^/trice/[^/]*\\.git/[^/]*" in _out,
-      f"beginsWith would compare the star literally and never match.  "
-      f"Got: {[l for l in _out.splitlines() if 'trice' in l]}")
-check("the dot in .git is escaped in the rendered rule",
-      "\\.git" in _out,
-      "an unescaped dot matches any character, so the exclusion would also "
-      "cover paths nobody chose")
+# Same guard as the positive model below: with no module there is no rules
+# file, so these would read an empty string and report three failures about
+# nothing.  The translation itself is checked above without a render.
+if not built:
+    skip("the exclusions through a real render",
+         "no modsecurity module on this node, so there is no rules file to "
+         "read.  The glob translation above is checked either way.")
+else:
+    _out = _render_with_paths(["/upload", "/trice/*.git/*"])
+    check("a plain path still uses the cheap operator",
+          "@beginsWith /upload" in _out,
+          "every request would pay for a regular expression it does not need")
+    check("a path with a star renders as a regular expression",
+          "@rx ^/trice/[^/]*\\.git/[^/]*" in _out,
+          f"beginsWith would compare the star literally and never match.  "
+          f"Got: {[l for l in _out.splitlines() if 'trice' in l]}")
+    check("the dot in .git is escaped in the rendered rule",
+          "\\.git" in _out,
+          "an unescaped dot matches any character, so the exclusion would also "
+          "cover paths nobody chose")
 
 
 # ---------------------------------------------------------------------------
@@ -375,6 +383,7 @@ check("the dot in .git is escaped in the rendered rule",
 print()
 print("  the positive model")
 
+
 def _render_surface(entries, positive, methods=None):
     def mutate(session):
         profile = WafProfile(name="check-waf-surface-scratch",
@@ -394,88 +403,98 @@ def _render_surface(entries, positive, methods=None):
     return rendered_with(mutate).get(TARGET_FILE, "")
 
 
-_off = _render_surface(["/about"], "off")
-check("off writes no surface rules at all",
-      "tx.fw_allowed" not in _off,
-      "a site with the surface off must be exactly as it was before this "
-      "feature existed")
+# Only when the module is here.  Without it the renderer writes no rules
+# file at all, which is correct and is checked further up, but every
+# assertion below then reads an empty string: three reported a failure
+# that was not real, and the fourth crashed on it and took the eight
+# after it with it.  A check that stops silently is worse than none.
+if not built:
+    skip("the positive model",
+         "no modsecurity module on this node, so there is no rules file "
+         "to read.  Run this on a node with the module built.")
+else:
+    _off = _render_surface(["/about"], "off")
+    check("off writes no surface rules at all",
+          "tx.fw_allowed" not in _off,
+          "a site with the surface off must be exactly as it was before this "
+          "feature existed")
 
-_report = _render_surface(["/about", "/user/*/profile"], "report")
-check("report sets the flag to zero before anything else",
-      'setvar:tx.fw_allowed=0' in _report)
-check("report allows the paths it was given",
-      "^/about/?$" in _report and "^/user/[^/]*/profile/?$" in _report,
-      "the wildcard has to survive into the rule or every object made after "
-      "the walk is refused")
-check("every path rule tolerates a trailing slash",
-      _report.count("/?$") >= 2,
-      "nginx hands back /about or /about/ depending on the link, and a model "
-      "that allowed one and refused the other would be reported as broken")
-check("report refuses nothing",
-      "deny" not in _report.split("# The allowed surface")[1],
-      "report mode exists so somebody can see the gaps before they cost "
-      "anything, and a report that denies is not a report")
-check("report still says what it would have refused",
-      "log" in _report and "would have been refused" in _report,
-      "a report that logs nothing tells nobody anything")
+    _report = _render_surface(["/about", "/user/*/profile"], "report")
+    check("report sets the flag to zero before anything else",
+          'setvar:tx.fw_allowed=0' in _report)
+    check("report allows the paths it was given",
+          "^/about/?$" in _report and "^/user/[^/]*/profile/?$" in _report,
+          "the wildcard has to survive into the rule or every object made after "
+          "the walk is refused")
+    check("every path rule tolerates a trailing slash",
+          _report.count("/?$") >= 2,
+          "nginx hands back /about or /about/ depending on the link, and a model "
+          "that allowed one and refused the other would be reported as broken")
+    check("report refuses nothing",
+          "deny" not in _report.split("# The allowed surface")[1],
+          "report mode exists so somebody can see the gaps before they cost "
+          "anything, and a report that denies is not a report")
+    check("report still says what it would have refused",
+          "log" in _report and "would have been refused" in _report,
+          "a report that logs nothing tells nobody anything")
 
-_enforce = _render_surface(["/about"], "enforce")
-check("enforce actually denies",
-      "deny,status:403" in _enforce)
-check("the deny is the last word, after the rule set and the exclusions",
-      _enforce.index("tx.fw_allowed") > _enforce.index("Include"),
-      "a rule read before the rule set is included is read too early, which "
-      "is the silent failure this file already warns about twice")
-check("the deny names the method and path it refused",
-      "%{REQUEST_METHOD}" in _enforce and "%{REQUEST_FILENAME}" in _enforce,
-      "without this the log says something was refused and not what")
-check("the path is matched on REQUEST_FILENAME, not REQUEST_URI",
-      "REQUEST_FILENAME" in _enforce and 'SecRule REQUEST_URI "@rx ^/' not in _enforce,
-      "REQUEST_URI carries the query string, so /search?q=a and /search?q=b "
-      "would be two different pages")
+    _enforce = _render_surface(["/about"], "enforce")
+    check("enforce actually denies",
+          "deny,status:403" in _enforce)
+    check("the deny is the last word, after the rule set and the exclusions",
+          _enforce.index("tx.fw_allowed") > _enforce.index("Include"),
+          "a rule read before the rule set is included is read too early, which "
+          "is the silent failure this file already warns about twice")
+    check("the deny names the method and path it refused",
+          "%{REQUEST_METHOD}" in _enforce and "%{REQUEST_FILENAME}" in _enforce,
+          "without this the log says something was refused and not what")
+    check("the path is matched on REQUEST_FILENAME, not REQUEST_URI",
+          "REQUEST_FILENAME" in _enforce and 'SecRule REQUEST_URI "@rx ^/' not in _enforce,
+          "REQUEST_URI carries the query string, so /search?q=a and /search?q=b "
+          "would be two different pages")
 
-_methods = _render_surface(["/about"], "enforce", methods=["GET", "POST"])
-check("the methods a path answers are enforced",
-      "^(?:GET|POST)$" in _methods,
-      "a POST to a page that only ever served GET is exactly what a positive "
-      "model is for")
+    _methods = _render_surface(["/about"], "enforce", methods=["GET", "POST"])
+    check("the methods a path answers are enforced",
+          "^(?:GET|POST)$" in _methods,
+          "a POST to a page that only ever served GET is exactly what a positive "
+          "model is for")
 
-_empty = _render_surface([], "enforce")
-check("an empty surface refuses to write itself rather than refusing the site",
-      "tx.fw_allowed" not in _empty and "no surface" in _empty,
-      "a default deny with nothing allowed refuses every request, so this has "
-      "to be left out and said out loud in the config")
+    _empty = _render_surface([], "enforce")
+    check("an empty surface refuses to write itself rather than refusing the site",
+          "tx.fw_allowed" not in _empty and "no surface" in _empty,
+          "a default deny with nothing allowed refuses every request, so this has "
+          "to be left out and said out loud in the config")
 
-# And through real nginx, because a rule set that is right in a string and
-# will not load is worth nothing.
-def _surface_files():
-    def mutate(session):
-        profile = WafProfile(name="check-waf-surface-nginx",
-                             learned_from_site=TARGET_NAME)
-        session.add(profile)
-        session.flush()
-        for path, methods in (("/about", ["GET", "HEAD"]),
-                              ("/user/*/profile", ["GET"]),
-                              ("/api/**/edit", ["POST", "PUT"])):
-            session.add(WafSurfaceEntry(profile_id=profile.id, path=path,
-                                        methods=json_set(methods)))
-        session.add(WafExclusion(profile_id=profile.id, rule_id=930110,
-                                 path="/upload"))
-        host = session.get(VirtualHost, TARGET_ID)
-        cfg = host.setting_map()
-        cfg["waf_mode"] = "block"
-        cfg["waf_paranoia"] = "custom:check-waf-surface-nginx"
-        cfg["waf_positive"] = "enforce"
-        host.settings = json_set(cfg)
-    return rendered_with(mutate)
+    # And through real nginx, because a rule set that is right in a string and
+    # will not load is worth nothing.
+    def _surface_files():
+        def mutate(session):
+            profile = WafProfile(name="check-waf-surface-nginx",
+                                 learned_from_site=TARGET_NAME)
+            session.add(profile)
+            session.flush()
+            for path, methods in (("/about", ["GET", "HEAD"]),
+                                  ("/user/*/profile", ["GET"]),
+                                  ("/api/**/edit", ["POST", "PUT"])):
+                session.add(WafSurfaceEntry(profile_id=profile.id, path=path,
+                                            methods=json_set(methods)))
+            session.add(WafExclusion(profile_id=profile.id, rule_id=930110,
+                                     path="/upload"))
+            host = session.get(VirtualHost, TARGET_ID)
+            cfg = host.setting_map()
+            cfg["waf_mode"] = "block"
+            cfg["waf_paranoia"] = "custom:check-waf-surface-nginx"
+            cfg["waf_positive"] = "enforce"
+            host.settings = json_set(cfg)
+        return rendered_with(mutate)
 
 
-_files = _surface_files()
-_ok = agent({"verb": "write_staging", "files": _files}).get("ok")
-_out = agent({"verb": "test_staging"}).get("data", {})
-check("nginx loads a site enforcing a surface, with exclusions underneath it",
-      bool(_ok) and bool(_out.get("ok")),
-      (_out.get("output") or "").strip())
+    _files = _surface_files()
+    _ok = agent({"verb": "write_staging", "files": _files}).get("ok")
+    _out = agent({"verb": "test_staging"}).get("data", {})
+    check("nginx loads a site enforcing a surface, with exclusions underneath it",
+          bool(_ok) and bool(_out.get("ok")),
+          (_out.get("output") or "").strip())
 
 print()
 failed = [r for r in results if not r[1]]
