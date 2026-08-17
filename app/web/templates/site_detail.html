@@ -2038,7 +2038,39 @@ document.addEventListener("DOMContentLoaded", function () {
     // Only send settings if the tab was opened.  Sending an empty object
     // because the controls were never built would wipe every setting on the
     // site, which is a nasty way to lose a config.
-    if (catalog) body.settings = collectSettings(document.getElementById("settings-holder"));
+    //
+    // The same trap one step in, which cost somebody their rewrites: the tab
+    // being open does not mean every control was built.  renderSettings leaves
+    // out the advanced ones unless the box is ticked, and leaves out anything
+    // the filter box does not match.  A settings put replaces the whole blob,
+    // so collecting only what is on screen deletes the rest.  Turning HTTP/3
+    // on with advanced hidden dropped the site's rewrite rules; typing
+    // "rewrite" in the filter and saving dropped HTTP/3 straight back.
+    //
+    // So read the settings back and merge onto them, the way the firewall and
+    // geo panels already do, and only touch keys whose control actually
+    // existed.  A control that was built and left empty still means clear it,
+    // which is what collectSettings leaving it out has always meant.
+    if (catalog) {
+      const holder = document.getElementById("settings-holder");
+      const shown = collectSettings(holder);
+      let fresh;
+      try {
+        fresh = await NFM.api("/hosts/" + HOST_ID);
+      } catch (err) {
+        // Better to save nothing than to save a blob built on a guess.
+        NFM.toast("Could not read the site back, so nothing was saved: " +
+                  err.message, "bad");
+        return;
+      }
+      const merged = Object.assign({}, fresh.settings || {});
+      holder.querySelectorAll("[data-setting]").forEach(function (el) {
+        const key = el.getAttribute("data-setting");
+        if (Object.prototype.hasOwnProperty.call(shown, key)) merged[key] = shown[key];
+        else delete merged[key];
+      });
+      body.settings = merged;
+    }
 
     saveBtn.disabled = true;
     try {
