@@ -1084,15 +1084,37 @@ map $cookie_{cookie} $sticky_set_{var} {{
         that happens to match this path would otherwise send the error page off
         to a backend.
 
-        Nothing else goes in these blocks on purpose.  Each is a leaf that reads
-        one file off the disk, so there is no proxying and nothing in here that
-        can see the rest of the config.
+        Nothing goes in these blocks except reading the file and stepping out
+        of the way of the site's own gate.  Each is a leaf that reads one file
+        off the disk, so there is no proxying and nothing in here that can see
+        the rest of the config.
         """
         lines = []
         for folder, name in sorted({(c["folder"], c["template"].name)
                                     for c in choices if c}):
             lines.append(f"    location ^~ {error_pages.URI_PREFIX}/{_safe_name(name)}/ {{")
             lines.append("        internal;")
+            # The site's own gate must not be applied to the page that explains
+            # the gate.  Fetching an error page is an internal redirect, and an
+            # internal redirect runs the access phase again, so a visitor
+            # refused by the allow list was refused a second time on the way to
+            # being told why.  nginx will not recurse into an error page, so it
+            # gave up and served its own: a site with a template applied showed
+            # the stock grey 403 to exactly the people the template was written
+            # for.  Same again for a password prompt and its 401.
+            #
+            # Proved on a real nginx, and the tell is in the log: "access
+            # forbidden by rule" twice for one request, the second one for the
+            # error page.
+            #
+            # Safe because of the line above.  internal means the only way in
+            # is one of our own error_page rules, so opening this location up
+            # exposes nothing: a request straight off the wire for this path
+            # gets a 404 whatever these two lines say.  Access directives are
+            # inherited only when the location sets none of its own, so naming
+            # one here replaces the site's list rather than adding to it.
+            lines.append("        allow all;")
+            lines.append("        auth_basic off;")
             lines.append(f"        alias {MANAGED_ROOT}/{folder}/;")
             lines.append("        default_type text/html;")
             lines.append("    }")

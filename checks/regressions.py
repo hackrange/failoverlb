@@ -11,6 +11,7 @@ person, rather than being quietly left out.
     docker exec -i nginx-fleet-manager python < checks/regressions.py
 """
 import json
+import re as _re
 import socket
 import ssl
 import sys
@@ -1025,8 +1026,44 @@ check("the page location is internal", "        internal;" in _conf,
       "without it anybody can fetch the 500 page off a site that is perfectly "
       "well, and it is a prefix match so it is reachable by name")
 
+# The site's gate must not be applied to the page explaining the gate.
+#
+# An internal redirect runs the access phase again, so a visitor refused by the
+# allow list was refused a second time on the way to being told why, and nginx,
+# which will not recurse into an error page, served its own instead.  A site
+# with a template showed the stock grey 403 to exactly the people the template
+# was written for.  The password prompt did the same with its 401, and sent the
+# WWW-Authenticate header twice while it was at it.
+#
+# Both proved on a real nginx: without these two lines a denied request logs
+# "access forbidden by rule" twice and gets 153 bytes of nginx; with them it
+# gets the template and keeps the 403.
+# Pulled out with a pattern rather than by splitting on a fixed string.  The
+# split that used to be here looked for "__nfm_error/ {", which never appears:
+# the template's name sits in the middle of that path.  So the split found
+# nothing, took the whole file, and the assertion below it passed on the wrong
+# text for as long as it has existed.  Exactly the failure this file is for.
+_ep_match = _re.search(r"location \^~ /__nfm_error/[^ ]+ \{(.*?)\n    \}", _conf, _re.S)
+_ep_block = _ep_match.group(1) if _ep_match else ""
+check("the error page location can actually be found in the config",
+      bool(_ep_match),
+      "every assertion below reads this block, so without it they are all "
+      "passing on an empty string")
+check("the error page location steps out of the site's allow list",
+      "allow all;" in _ep_block,
+      "a visitor the allow list refuses cannot be shown the page that says so")
+
+check("and out of the way of a password prompt",
+      "auth_basic off;" in _ep_block,
+      "the 401 page is behind the very password the 401 is asking for")
+
+check("opening it up is safe because it stays internal",
+      "internal;" in _ep_block,
+      "allow all without internal would hand the error pages to anybody who "
+      "guessed the path, which is how the 500 page of a healthy site leaks")
+
 check("nothing but reading a file happens in that location",
-      "proxy_pass" not in _conf.split("__nfm_error/ {")[-1].split("}")[0],
+      "proxy_pass" not in _ep_block,
       "it is served from a location that must not be able to see the rest of "
       "the config")
 
