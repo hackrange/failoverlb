@@ -264,6 +264,104 @@ else:
           "a mount rendered without: " + "; ".join(_absent))
 
 
+# What the importer makes has to be config nginx will load.
+#
+# It was not.  A real config came in and the next apply died on
+# `"proxy_buffering" directive is duplicate`, on a file nobody had hand edited,
+# which is the worst place to meet an error: the import reported success, the
+# rows looked right on the page, and the failure surfaced later somewhere else.
+#
+# Two causes, both of them the same mistake of doing a job twice:
+#
+#   A path kept verbatim what the site had already lifted into a setting.  The
+#   renderer writes the site's proxy settings into every path that proxies, so
+#   the block held proxy_buffering from the setting and again from the text.
+#
+#   Every path was imported as a path row and then the whole block was copied
+#   into the site's custom config as well, so the server held two `location`
+#   blocks for the same path.
+#
+# Checked by importing and rendering rather than by reading the importer,
+# because the duplication is only visible once the two halves are put together.
+_IMPORT_SAMPLE = """
+upstream importcheck_app { server 10.0.0.11:8080; }
+upstream importcheck_mon { server 10.0.0.12:8081; }
+server {
+    listen 80;
+    server_name importcheck.example.com;
+    client_max_body_size 64M;
+    location / {
+        proxy_pass http://importcheck_app/underapath/;
+        proxy_set_header Host $host;
+        proxy_buffering off;
+        proxy_cookie_path /o/ /;
+        proxy_hide_header X-Powered-By;
+    }
+    location /monitoring {
+        proxy_pass http://importcheck_mon/monitoring/;
+        proxy_set_header Host $host;
+        proxy_buffering off;
+        proxy_cookie_path /o/ /;
+        allow 198.51.100.10;
+        deny all;
+    }
+}
+"""
+
+# nginx allows these more than once in a block, so seeing two is not a fault.
+_REPEATABLE = {
+    "add_header", "proxy_set_header", "rewrite", "allow", "deny", "error_page",
+    "location", "proxy_redirect", "sub_filter", "more_clear_headers",
+    "more_set_headers", "proxy_hide_header", "ssl_conf_command", "listen",
+    "include", "set", "if", "server", "upstream", "limit_req", "limit_conn",
+    "return", "try_files", "map", "proxy_cache_valid",
+}
+
+
+def _import_the_sample(session):
+    from app.core.importer import analyse, apply_plan
+    apply_plan(session, analyse(_IMPORT_SAMPLE))
+    session.flush()
+    host = session.query(VirtualHost).filter(
+        VirtualHost.name == "importcheck.example.com").one()
+    # The importer lands everything switched off on purpose, so it has to be
+    # switched on here or the render has nothing to say.
+    host.enabled = True
+    for loc in host.locations:
+        loc.enabled = True
+
+
+def _duplicated_in_a_block(conf: str) -> list:
+    """Directive names appearing twice inside one block, ignoring repeatables."""
+    out = []
+    for chunk in conf.split("\n    location ")[1:]:
+        head = chunk.split("{", 1)[0].strip()
+        body = chunk.split("{", 1)[1].split("\n    }", 1)[0] if "{" in chunk else ""
+        names = [ln.strip().split()[0] for ln in body.splitlines()
+                 if ln.strip() and not ln.strip().startswith(("#", "}"))]
+        for name in set(names):
+            if names.count(name) > 1 and name not in _REPEATABLE:
+                out.append(f"location {head}: {name} x{names.count(name)}")
+    return out
+
+
+try:
+    _imported = rendered_with(_import_the_sample)
+except Exception as _exc:                                    # noqa: BLE001
+    skip("an imported config is config nginx will load", f"import failed: {_exc}")
+else:
+    _site = _imported.get("sites/importcheck.example.com.conf", "")
+    _dupes = _duplicated_in_a_block(_site)
+    check("an imported config has no directive twice in one block", not _dupes,
+          "; ".join(_dupes))
+    check("an imported config keeps each path once",
+          _site.count("location /monitoring") == 1,
+          f"location /monitoring appears {_site.count('location /monitoring')} "
+          f"times, and nginx refuses two blocks for one path")
+    _ok, _said = nginx_accepts(_imported)
+    check("an imported config is config nginx will load", _ok, _said)
+
+
 # Stapling is only written for a certificate that names a responder.
 #
 # It used to be written for anything from Lets Encrypt, which was right when

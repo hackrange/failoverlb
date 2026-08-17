@@ -26,6 +26,7 @@ as a separate step they choose.
 """
 import logging
 import re
+from functools import lru_cache
 
 from app.core.nginx_parser import (
     ParseError,
@@ -254,6 +255,19 @@ def _verbatim(block, settings: dict, extra_drop=()) -> str:
     return serialize(kept) if kept else ""
 
 
+@lru_cache(maxsize=1)
+def _settable_on_a_path() -> frozenset:
+    """
+    Catalog keys a location block is allowed to hold.
+
+    Imported inside the function because the catalog pulls in a good deal and
+    this module is also read by the parser tests, which have no need of it.
+    """
+    from app.catalog import all_features
+    return frozenset(k for k, f in all_features().items()
+                     if "location" in f.contexts)
+
+
 def _commented(text: str, why: str) -> str:
     """
     Keep config we cannot place, commented out, with the reason.
@@ -352,7 +366,35 @@ def _read_location(loc, pools_by_raw_name: dict, site: dict) -> dict:
     else:
         spec["mode"] = "static"
 
-    leftover = _verbatim(loc, {}, extra_drop=(
+    # What this path does that the catalog models, lifted into its own settings
+    # so it renders from there rather than being kept verbatim as well.
+    #
+    # Filtered to what a path may actually hold.  extract_settings reads a block
+    # without knowing which kind it is, and a server only setting stored on a
+    # path is refused the next time somebody saves that path.
+    lifted = {k: v for k, v in (extract_settings(loc) or {}).items()
+              if k in _settable_on_a_path()}
+    if lifted:
+        spec["settings"] = lifted
+
+    # Drop from the verbatim leftover anything that is going to be written into
+    # this block anyway: the path's own settings, and the site's, which the
+    # renderer writes into every proxying path underneath it.
+    #
+    # This is what the empty dict here used to skip, and it is why an imported
+    # config would not load.  The site lifted proxy_buffering into a setting,
+    # the renderer wrote it into the path, and the path kept its own copy
+    # verbatim as well, so the block held the directive twice.  nginx does not
+    # take a duplicate of that one: it refuses the whole config, so the import
+    # looked fine and the next apply failed on a file nobody had hand edited.
+    #
+    # Safe to drop rather than keep, because the value is not lost.  Anything of
+    # the path's own is in `lifted` and renders from there, and a path's setting
+    # beats the site's, so a path that disagreed with its site still wins.
+    already = dict((site or {}).get("settings") or {})
+    already.update(lifted)
+
+    leftover = _verbatim(loc, already, extra_drop=(
         "proxy_pass", "proxy_set_header", "proxy_http_version", "root", "alias",
         "return",
     ))
@@ -526,15 +568,37 @@ def _read_server(block, pools_by_raw_name: dict, index: int) -> dict:
                 "there is no setting here for it.\n" + leftover
             )
 
+    # The site's own settings, worked out before the paths are read.
+    #
+    # Order matters here and it did not used to.  A path has to know what the
+    # site will already write into it, because the renderer puts the site's
+    # proxy settings into every path that proxies.  Read the paths first and
+    # they cannot know, so a directive the site turned into a setting gets kept
+    # verbatim on the path as well and the block ends up holding it twice.
+    site["settings"] = extract_settings(block) or {}
+
+    # The rewrite and cookie settings worked out from the main location's
+    # proxy_pass path.  Merged after the block's own settings and never over
+    # them, so anything actually written in the config wins over what we
+    # inferred from a path.
+    for key, value in (site.pop("settings_seed", {}) or {}).items():
+        site["settings"].setdefault(key, value)
+
     # Every location that does something, as a path on the site.
     #
     # This used to keep one backend and report the rest as not brought over.
     # The first real config anybody imported had a restricted health endpoint on
     # its own path, so the very first file hit that wall.
     real_locations = [l for l in locations if not _is_acme_location(l)]
+    became_a_path = set()
     if len(real_locations) > 1:
-        site["locations"] = [_read_location(l, pools_by_raw_name, site) for l in real_locations]
-        site["locations"] = [l for l in site["locations"] if l]
+        specs = []
+        for l in real_locations:
+            spec = _read_location(l, pools_by_raw_name, site)
+            if spec:
+                specs.append(spec)
+                became_a_path.add(id(l))
+        site["locations"] = specs
         if site["locations"]:
             site["notes"].append(
                 f"{len(site['locations'])} paths were brought over as paths on "
@@ -548,6 +612,13 @@ def _read_server(block, pools_by_raw_name: dict, index: int) -> dict:
             # We write our own, on every node, whenever a certificate is issued.
             # Carrying somebody else's copy across would leave two.
             continue
+        if id(loc) in became_a_path:
+            # It is already a path on this site, so copying the block in here as
+            # well would put two `location` blocks with the same path in one
+            # server, and nginx refuses that outright.  This is the other half
+            # of why an imported config would not load: the paths arrived
+            # correctly and then every one of them was written a second time.
+            continue
         # The whole block, as written.  Not filtered: a location whose body is
         # only a root, or only an allow, is still a location that does
         # something, and an earlier version dropped exactly those because every
@@ -556,15 +627,8 @@ def _read_server(block, pools_by_raw_name: dict, index: int) -> dict:
         body = serialize(loc.block or [])
         site["custom_config"] += f"\n# kept from the imported config\nlocation {path} {{\n{body}}}\n"
 
-    # ---- settings we understand, and everything else kept verbatim
-    site["settings"] = extract_settings(block) or {}
-
-    # The rewrite and cookie settings worked out from the main location's
-    # proxy_pass path.  Merged after the block's own settings and never over
-    # them, so anything actually written in the config wins over what we
-    # inferred from a path.
-    for key, value in (site.pop("settings_seed", {}) or {}).items():
-        site["settings"].setdefault(key, value)
+    # ---- everything else kept verbatim
+    # The settings themselves were worked out above, before the paths were read.
     extra = ["http2"]
     if site["mode"] == "static" and site["document_root"]:
         extra.append("root")
@@ -911,6 +975,11 @@ def apply_plan(session, plan: dict, chosen_sites=None, chosen_pools=None) -> dic
                 redirect_target=loc.get("redirect_target"),
                 redirect_code=loc.get("redirect_code") or 301,
                 custom_config=loc.get("custom_config") or "",
+                # Lifted from the imported block.  Without this the path's own
+                # settings were worked out, used to decide what not to keep
+                # verbatim, and then thrown away, which loses the value instead
+                # of moving it.
+                settings=json_set(loc.get("settings") or {}),
                 enabled=True,
                 sort_order=order * 10,
             ))
