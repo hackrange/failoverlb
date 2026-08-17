@@ -2414,6 +2414,33 @@ map $cookie_{cookie} $sticky_set_{var} {{
             lines.append(f"{pad}    break;")
             lines.append(f"{pad}}}")
 
+            # And keep our own error pages out of them, for the same reason in
+            # a different disguise.
+            #
+            # Serving an error page is an internal redirect, and nginx restarts
+            # an internal redirect at the server rewrite phase, so the rules
+            # below run a second time on the page meant to explain the first
+            # error.  A rule like ^/(.*)$ /app/$1 turns /__nfm_error/x/404.html
+            # into /app/__nfm_error/x/404.html, the internal location that
+            # serves the page stops matching, and nginx, which will not recurse
+            # into an error page, gives up and serves its own stock page.
+            #
+            # Same defect the country test had, and it reads the same way from
+            # the outside: the template is applied, the config looks right, and
+            # the visitor gets the plain nginx page with nothing in the log
+            # naming the rewrite that did it.
+            #
+            # $uri, not $request_uri.  During an internal redirect $request_uri
+            # still holds what the client asked for, so a $request_uri test
+            # never sees the error page path at all and this guard would do
+            # nothing.  That is the whole reason it is written differently from
+            # the challenge guard above.
+            lines.append(f"{pad}# Same for our own error pages, which arrive here "
+                         "as an internal redirect.")
+            lines.append(f"{pad}if ($uri ~ ^{error_pages.URI_PREFIX}/) {{")
+            lines.append(f"{pad}    break;")
+            lines.append(f"{pad}}}")
+
         for rule in rules:
             try:
                 lines.append(f"{pad}rewrite {directive_args(rule, 'rewrite rule')};")
