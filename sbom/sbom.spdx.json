@@ -1,0 +1,957 @@
+{
+  "spdxVersion": "SPDX-2.3",
+  "dataLicense": "CC0-1.0",
+  "SPDXID": "SPDXRef-DOCUMENT",
+  "name": "failover-lb-3be25e6-dirty",
+  "documentNamespace": "https://failoverlb.net/sbom/spdx/3be25e6142a47bd6324a79b37caaf1766abe62d6",
+  "creationInfo": {
+    "creators": [
+      "Tool: tools/sbom.py",
+      "Organization: Failover LB"
+    ],
+    "created": "1970-01-01T00:00:00Z",
+    "comment": "The created time is fixed so the same commit always produces the same document.  The commit in the namespace is the identity of this build."
+  },
+  "packages": [
+    {
+      "SPDXID": "SPDXRef-python-0",
+      "name": "python",
+      "versionInfo": "3.12-slim-bookworm",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "supplier": "NOASSERTION",
+      "comment": "[container] the image the manager runs in",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:docker/python@3.12-slim-bookworm"
+        }
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-fastapi-1",
+      "name": "fastapi",
+      "versionInfo": "0.115.6",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "supplier": "NOASSERTION",
+      "comment": "[application] pinned in requirements.txt",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:pypi/fastapi@0.115.6"
+        }
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-uvicorn-2",
+      "name": "uvicorn",
+      "versionInfo": "0.34.0",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "supplier": "NOASSERTION",
+      "comment": "[application] pinned in requirements.txt",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:pypi/uvicorn@0.34.0"
+        }
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-starlette-3",
+      "name": "starlette",
+      "versionInfo": "0.41.3",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "supplier": "NOASSERTION",
+      "comment": "[application] pinned in requirements.txt",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:pypi/starlette@0.41.3"
+        }
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-python-multipart-4",
+      "name": "python-multipart",
+      "versionInfo": "0.0.30",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "supplier": "NOASSERTION",
+      "comment": "[application] pinned in requirements.txt",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:pypi/python-multipart@0.0.30"
+        }
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-itsdangerous-5",
+      "name": "itsdangerous",
+      "versionInfo": "2.2.0",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "supplier": "NOASSERTION",
+      "comment": "[application] pinned in requirements.txt",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:pypi/itsdangerous@2.2.0"
+        }
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-Jinja2-6",
+      "name": "Jinja2",
+      "versionInfo": "3.1.5",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "supplier": "NOASSERTION",
+      "comment": "[application] pinned in requirements.txt",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:pypi/jinja2@3.1.5"
+        }
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-MarkupSafe-7",
+      "name": "MarkupSafe",
+      "versionInfo": "3.0.2",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "supplier": "NOASSERTION",
+      "comment": "[application] pinned in requirements.txt",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:pypi/markupsafe@3.0.2"
+        }
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-SQLAlchemy-8",
+      "name": "SQLAlchemy",
+      "versionInfo": "2.0.36",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "supplier": "NOASSERTION",
+      "comment": "[application] pinned in requirements.txt",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:pypi/sqlalchemy@2.0.36"
+        }
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-alembic-9",
+      "name": "alembic",
+      "versionInfo": "1.14.0",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "supplier": "NOASSERTION",
+      "comment": "[application] pinned in requirements.txt",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:pypi/alembic@1.14.0"
+        }
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-pydantic-10",
+      "name": "pydantic",
+      "versionInfo": "2.10.4",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "supplier": "NOASSERTION",
+      "comment": "[application] pinned in requirements.txt",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:pypi/pydantic@2.10.4"
+        }
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-pydantic-settings-11",
+      "name": "pydantic-settings",
+      "versionInfo": "2.7.0",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "supplier": "NOASSERTION",
+      "comment": "[application] pinned in requirements.txt",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:pypi/pydantic-settings@2.7.0"
+        }
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-argon2-cffi-12",
+      "name": "argon2-cffi",
+      "versionInfo": "23.1.0",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "supplier": "NOASSERTION",
+      "comment": "[application] pinned in requirements.txt",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:pypi/argon2-cffi@23.1.0"
+        }
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-pyotp-13",
+      "name": "pyotp",
+      "versionInfo": "2.9.0",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "supplier": "NOASSERTION",
+      "comment": "[application] pinned in requirements.txt",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:pypi/pyotp@2.9.0"
+        }
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-PyJWT-14",
+      "name": "PyJWT",
+      "versionInfo": "2.13.0",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "supplier": "NOASSERTION",
+      "comment": "[application] pinned in requirements.txt",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:pypi/pyjwt@2.13.0"
+        }
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-qrcode-15",
+      "name": "qrcode",
+      "versionInfo": "8.0",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "supplier": "NOASSERTION",
+      "comment": "[application] pinned in requirements.txt",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:pypi/qrcode@8.0"
+        }
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-cryptography-16",
+      "name": "cryptography",
+      "versionInfo": "44.0.0",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "supplier": "NOASSERTION",
+      "comment": "[application] pinned in requirements.txt",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:pypi/cryptography@44.0.0"
+        }
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-httpx-17",
+      "name": "httpx",
+      "versionInfo": "0.28.1",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "supplier": "NOASSERTION",
+      "comment": "[application] pinned in requirements.txt",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:pypi/httpx@0.28.1"
+        }
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-dnspython-18",
+      "name": "dnspython",
+      "versionInfo": "2.7.0",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "supplier": "NOASSERTION",
+      "comment": "[application] pinned in requirements.txt",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:pypi/dnspython@2.7.0"
+        }
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-APScheduler-19",
+      "name": "APScheduler",
+      "versionInfo": "3.11.0",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "supplier": "NOASSERTION",
+      "comment": "[application] pinned in requirements.txt",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:pypi/apscheduler@3.11.0"
+        }
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-prometheus-client-20",
+      "name": "prometheus-client",
+      "versionInfo": "0.21.1",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "supplier": "NOASSERTION",
+      "comment": "[application] pinned in requirements.txt",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:pypi/prometheus-client@0.21.1"
+        }
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-pyzipper-21",
+      "name": "pyzipper",
+      "versionInfo": "0.3.6",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "supplier": "NOASSERTION",
+      "comment": "[application] pinned in requirements.txt",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:pypi/pyzipper@0.3.6"
+        }
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-pycryptodomex-22",
+      "name": "pycryptodomex",
+      "versionInfo": "3.21.0",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "supplier": "NOASSERTION",
+      "comment": "[application] pinned in requirements.txt",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:pypi/pycryptodomex@3.21.0"
+        }
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-nginx-23",
+      "name": "nginx",
+      "versionInfo": "1.30.4",
+      "downloadLocation": "https://nginx.org/download/nginx-1.30.4.tar.gz",
+      "filesAnalyzed": false,
+      "supplier": "NOASSERTION",
+      "comment": "[nginx] built from source so the module set can be chosen",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:generic/nginx@1.30.4"
+        }
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-openssl-24",
+      "name": "openssl",
+      "versionInfo": "3.5.7",
+      "downloadLocation": "https://github.com/openssl/openssl/releases/download/openssl-3.5.7/openssl-3.5.7.tar.gz",
+      "filesAnalyzed": false,
+      "supplier": "NOASSERTION",
+      "comment": "[nginx] pinned at 3.5 or later for the QUIC API and ML-KEM, which is what makes the post quantum key exchange possible",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:generic/openssl@3.5.7"
+        }
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-modsecurity-25",
+      "name": "modsecurity",
+      "versionInfo": "3.0.16",
+      "downloadLocation": "https://github.com/owasp-modsecurity/ModSecurity",
+      "filesAnalyzed": false,
+      "supplier": "NOASSERTION",
+      "comment": "[nginx] the web application firewall engine, built only when asked for",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:generic/modsecurity@3.0.16"
+        }
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-ngx-devel-kit-26",
+      "name": "ngx_devel_kit",
+      "versionInfo": "master",
+      "downloadLocation": "https://github.com/vision5/ngx_devel_kit",
+      "filesAnalyzed": false,
+      "supplier": "NOASSERTION",
+      "comment": "[nginx] compiled into the nginx binary.  Tracks a branch rather than a tag, so two builds on different days are not the same build",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:github/vision5/ngx_devel_kit@master"
+        }
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-lua-nginx-module-27",
+      "name": "lua-nginx-module",
+      "versionInfo": "v0.10.28",
+      "downloadLocation": "https://github.com/openresty/lua-nginx-module",
+      "filesAnalyzed": false,
+      "supplier": "NOASSERTION",
+      "comment": "[nginx] compiled into the nginx binary",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:github/openresty/lua-nginx-module@v0.10.28"
+        }
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-echo-nginx-module-28",
+      "name": "echo-nginx-module",
+      "versionInfo": "v0.63",
+      "downloadLocation": "https://github.com/openresty/echo-nginx-module",
+      "filesAnalyzed": false,
+      "supplier": "NOASSERTION",
+      "comment": "[nginx] compiled into the nginx binary",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:github/openresty/echo-nginx-module@v0.63"
+        }
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-headers-more-nginx-module-29",
+      "name": "headers-more-nginx-module",
+      "versionInfo": "v0.40",
+      "downloadLocation": "https://github.com/openresty/headers-more-nginx-module",
+      "filesAnalyzed": false,
+      "supplier": "NOASSERTION",
+      "comment": "[nginx] compiled into the nginx binary",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:github/openresty/headers-more-nginx-module@v0.40"
+        }
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-ngx-fancyindex-30",
+      "name": "ngx-fancyindex",
+      "versionInfo": "v0.5.2",
+      "downloadLocation": "https://github.com/aperezdc/ngx-fancyindex",
+      "filesAnalyzed": false,
+      "supplier": "NOASSERTION",
+      "comment": "[nginx] compiled into the nginx binary",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:github/aperezdc/ngx-fancyindex@v0.5.2"
+        }
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-ngx-cache-purge-31",
+      "name": "ngx_cache_purge",
+      "versionInfo": "master",
+      "downloadLocation": "https://github.com/nginx-modules/ngx_cache_purge",
+      "filesAnalyzed": false,
+      "supplier": "NOASSERTION",
+      "comment": "[nginx] compiled into the nginx binary.  Tracks a branch rather than a tag, so two builds on different days are not the same build",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:github/nginx-modules/ngx_cache_purge@master"
+        }
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-nginx-dav-ext-module-32",
+      "name": "nginx-dav-ext-module",
+      "versionInfo": "v3.0.0",
+      "downloadLocation": "https://github.com/arut/nginx-dav-ext-module",
+      "filesAnalyzed": false,
+      "supplier": "NOASSERTION",
+      "comment": "[nginx] compiled into the nginx binary",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:github/arut/nginx-dav-ext-module@v3.0.0"
+        }
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-subs-filter-33",
+      "name": "subs-filter",
+      "versionInfo": "master",
+      "downloadLocation": "https://github.com/yaoweibin/ngx_http_substitutions_filter_module",
+      "filesAnalyzed": false,
+      "supplier": "NOASSERTION",
+      "comment": "[nginx] compiled into the nginx binary.  Tracks a branch rather than a tag, so two builds on different days are not the same build",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:github/yaoweibin/ngx_http_substitutions_filter_module@master"
+        }
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-upload-progress-34",
+      "name": "upload-progress",
+      "versionInfo": "master",
+      "downloadLocation": "https://github.com/masterzen/nginx-upload-progress-module",
+      "filesAnalyzed": false,
+      "supplier": "NOASSERTION",
+      "comment": "[nginx] compiled into the nginx binary.  Tracks a branch rather than a tag, so two builds on different days are not the same build",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:github/masterzen/nginx-upload-progress-module@master"
+        }
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-auth-pam-35",
+      "name": "auth-pam",
+      "versionInfo": "master",
+      "downloadLocation": "https://github.com/sto/ngx_http_auth_pam_module",
+      "filesAnalyzed": false,
+      "supplier": "NOASSERTION",
+      "comment": "[nginx] compiled into the nginx binary.  Tracks a branch rather than a tag, so two builds on different days are not the same build",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:github/sto/ngx_http_auth_pam_module@master"
+        }
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-geoip2-36",
+      "name": "geoip2",
+      "versionInfo": "master",
+      "downloadLocation": "https://github.com/leev/ngx_http_geoip2_module",
+      "filesAnalyzed": false,
+      "supplier": "NOASSERTION",
+      "comment": "[nginx] compiled into the nginx binary.  Tracks a branch rather than a tag, so two builds on different days are not the same build",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:github/leev/ngx_http_geoip2_module@master"
+        }
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-nchan-37",
+      "name": "nchan",
+      "versionInfo": "master",
+      "downloadLocation": "https://github.com/slact/nchan",
+      "filesAnalyzed": false,
+      "supplier": "NOASSERTION",
+      "comment": "[nginx] compiled into the nginx binary.  Tracks a branch rather than a tag, so two builds on different days are not the same build",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:github/slact/nchan@master"
+        }
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-upstream-fair-38",
+      "name": "upstream-fair",
+      "versionInfo": "master",
+      "downloadLocation": "https://github.com/itoffshore/nginx-upstream-fair",
+      "filesAnalyzed": false,
+      "supplier": "NOASSERTION",
+      "comment": "[nginx] compiled into the nginx binary.  Tracks a branch rather than a tag, so two builds on different days are not the same build",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:github/itoffshore/nginx-upstream-fair@master"
+        }
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-modsecurity-nginx-39",
+      "name": "modsecurity-nginx",
+      "versionInfo": "v1.0.4",
+      "downloadLocation": "https://github.com/owasp-modsecurity/ModSecurity-nginx",
+      "filesAnalyzed": false,
+      "supplier": "NOASSERTION",
+      "comment": "[nginx] built as a loadable module, present only when the firewall was asked for",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:github/owasp-modsecurity/ModSecurity-nginx@v1.0.4"
+        }
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-luajit2-40",
+      "name": "luajit2",
+      "versionInfo": "master",
+      "downloadLocation": "https://github.com/openresty/luajit2",
+      "filesAnalyzed": false,
+      "supplier": "NOASSERTION",
+      "comment": "[nginx] the lua runtime the lua module needs",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:github/openresty/luajit2@master"
+        }
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-lua-resty-core-41",
+      "name": "lua-resty-core",
+      "versionInfo": "v0.1.31",
+      "downloadLocation": "https://github.com/openresty/lua-resty-core",
+      "filesAnalyzed": false,
+      "supplier": "NOASSERTION",
+      "comment": "[nginx] the lua runtime the lua module needs",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:github/openresty/lua-resty-core@v0.1.31"
+        }
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-lua-resty-lrucache-42",
+      "name": "lua-resty-lrucache",
+      "versionInfo": "v0.15",
+      "downloadLocation": "https://github.com/openresty/lua-resty-lrucache",
+      "filesAnalyzed": false,
+      "supplier": "NOASSERTION",
+      "comment": "[nginx] the lua runtime the lua module needs",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:github/openresty/lua-resty-lrucache@v0.15"
+        }
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-owasp-crs-43",
+      "name": "owasp-crs",
+      "versionInfo": "fetched at run time, lts or latest track",
+      "downloadLocation": "https://github.com/coreruleset/coreruleset",
+      "filesAnalyzed": false,
+      "supplier": "NOASSERTION",
+      "comment": "[data] the firewall rules.  Chosen by track and updated on a schedule, so the version on a node is a property of that node rather than of this release.  The GUI reports what each node actually has.",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:github/coreruleset/coreruleset"
+        }
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-geolite2-country-44",
+      "name": "geolite2-country",
+      "versionInfo": "fetched at run time",
+      "downloadLocation": "https://www.maxmind.com/",
+      "filesAnalyzed": false,
+      "supplier": "NOASSERTION",
+      "comment": "[data] the country database for geo blocking.  Fetched with the operator's own credentials and never redistributed with this product."
+    }
+  ],
+  "relationships": [
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-python-0"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-fastapi-1"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-uvicorn-2"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-starlette-3"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-python-multipart-4"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-itsdangerous-5"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-Jinja2-6"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-MarkupSafe-7"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-SQLAlchemy-8"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-alembic-9"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-pydantic-10"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-pydantic-settings-11"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-argon2-cffi-12"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-pyotp-13"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-PyJWT-14"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-qrcode-15"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-cryptography-16"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-httpx-17"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-dnspython-18"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-APScheduler-19"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-prometheus-client-20"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-pyzipper-21"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-pycryptodomex-22"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-nginx-23"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-openssl-24"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-modsecurity-25"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-ngx-devel-kit-26"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-lua-nginx-module-27"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-echo-nginx-module-28"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-headers-more-nginx-module-29"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-ngx-fancyindex-30"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-ngx-cache-purge-31"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-nginx-dav-ext-module-32"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-subs-filter-33"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-upload-progress-34"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-auth-pam-35"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-geoip2-36"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-nchan-37"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-upstream-fair-38"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-modsecurity-nginx-39"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-luajit2-40"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-lua-resty-core-41"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-lua-resty-lrucache-42"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-owasp-crs-43"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-geolite2-country-44"
+    }
+  ]
+}
