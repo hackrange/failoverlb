@@ -2471,6 +2471,75 @@ map $cookie_{cookie} $sticky_set_{var} {{
             lines.append(f'{pad}proxy_set_header Accept-Encoding "";')
         return lines
 
+    # The attributes a page uses to point at itself.  Only these three, because
+    # these are the ones a site writes from the root, and each extra rule costs
+    # a pass over every byte of HTML that goes out.
+    #
+    # Deliberately not `url(`, which needs `sub_filter_types` widened to reach a
+    # stylesheet and comes in three quoting styles.  A site that needs it can say
+    # so in Response text replacement on the path, which is a field now.
+    MOUNT_ATTRIBUTES = ("href", "src", "action")
+
+    def _mount_settings(self, loc_only, mount_prefix) -> dict:
+        """
+        The rewrite rules a mounted site needs, added to whatever it already has.
+
+        A site mounted under /shop still writes `href="/basket/"`, and under the
+        mount that resolves against the hosting site, misses this location and is
+        answered by whatever owns its root.  So the page comes through unstyled
+        and every link walks off the mount, which reads as the mount being broken
+        rather than as the links being absolute.
+
+        The prefix is the path, so there is nothing to ask anybody.
+
+        These go in front of any hand written rule, because a rule somebody wrote
+        for this path is the more specific statement and should see the result of
+        the general ones.  Note that nginx's sub module replaces in a single pass
+        rather than cascading, so a rule cannot re-match what an earlier rule
+        produced, and a prefix cannot be added twice.
+
+        That single pass is also the limit of this: a backend that already knows
+        it lives under the prefix writes `href="/shop/basket/"` itself, and these
+        rules would make it `/shop/shop/basket/`.  Such a backend does not want a
+        mount, it wants the plain proxy, which is what the checkbox says.
+        """
+        out = dict(loc_only)
+        existing = list(out.get("sub_filter_rules") or [])
+        generated = [f"""'{attr}="/' '{attr}="{mount_prefix}'"""
+                     for attr in self.MOUNT_ATTRIBUTES]
+        out["sub_filter_rules"] = generated + [r for r in existing
+                                               if r not in generated]
+        return out
+
+    def _mount_redirect_lines(self, mount_prefix, already_set=False,
+                              indent=8) -> list:
+        """
+        Put the prefix back on a redirect the backend built without it.
+
+        A backend answers a URL missing its trailing slash with a redirect, and
+        it builds that from the Host header, which carries no prefix.  So asking
+        for /shop/basket gets `Location: http://www.example.com/basket/` and the
+        visitor leaves the mount on the first such URL and does not come back.
+
+        Both schemes, because which one the backend names depends on whether it
+        has been told there is TLS in front of it, and being wrong here is
+        invisible until somebody types a URL without the slash.
+
+        nginx takes the first proxy_redirect that matches, so a rule set by hand
+        on this path is written before these and keeps winning.
+        """
+        pad = " " * indent
+        if already_set:
+            lines = [f"{pad}# Redirect rewriting is set on this path, and it is",
+                     f"{pad}# written above, so it is tried before these."]
+        else:
+            lines = []
+        lines.append(f"{pad}# The backend builds redirects from the Host header,")
+        lines.append(f"{pad}# which carries no prefix.  Put it back on.")
+        for scheme in ("http", "https"):
+            lines.append(f"{pad}proxy_redirect {scheme}://$host/ {mount_prefix};")
+        return lines
+
     def _limit_lines(self, cfg, indent=4) -> list:
         """
         The limit_req and limit_conn lines for whatever level we are at.
@@ -2710,10 +2779,24 @@ map $cookie_{cookie} $sticky_set_{var} {{
         # line redirect anybody would write by hand.  Both halves are needed
         # and forgetting the second is why the bare path 404s while every link
         # under it works.
-        strip = bool(getattr(loc, "strip_prefix", False))
+        #
+        # Mounting a whole site is strip_prefix plus the repairs that go with it,
+        # so it turns the strip on rather than being a second way to ask for it.
+        mount = (bool(getattr(loc, "mount_site", False))
+                 and (loc.path or "").strip("/") != "")
+        strip = bool(getattr(loc, "strip_prefix", False)) or mount
+
+        # The trailing slash is optional for a plain strip and it is not optional
+        # for a mount, so a mount gets it on `preferential` too.  Without it the
+        # doubled slash goes upstream on every request, and whether that works at
+        # all is up to the backend: Apache tolerates it, plenty of things do not.
+        # Widening the guard is safe because a mount is new, so there is no
+        # existing config whose rendering this changes.
+        slashable = loc.match_type == "prefix" or (mount and loc.match_type == "preferential")
+
         path = loc.path
         lines = []
-        if strip and loc.match_type == "prefix" and not path.endswith("/"):
+        if strip and slashable and not path.endswith("/"):
             lines.append(f"    location = {path} {{")
             lines.append(f"        return 301 {path}/;")
             lines.append("    }")
@@ -2752,6 +2835,17 @@ map $cookie_{cookie} $sticky_set_{var} {{
         # template covering 404 would silently serve the stock 502 page while
         # the rest of the site served a proper one.
         loc_only = loc.setting_map()
+
+        # A mount's own rewrite rules go in here, next to any the person wrote,
+        # so `_sub_filter_lines` renders the lot in one place and writes
+        # `sub_filter_once off` and the Accept-Encoding line exactly once.  Doing
+        # it any other way means either duplicating those two or forgetting them,
+        # and forgetting them is the failure that leaves the config valid and the
+        # filter doing nothing.
+        if mount:
+            loc_only = self._mount_settings(loc_only, path if path.endswith("/")
+                                            else path + "/")
+
         if error_choice:
             lines.extend(self._error_page_rules(
                 error_choice, indent=8, extra=site_error))
@@ -2802,9 +2896,15 @@ map $cookie_{cookie} $sticky_set_{var} {{
             loc_only, indent=8, proxying=(loc.mode == "proxy" and loc.pool is not None)))
 
         if loc.mode == "proxy" and loc.pool:
+            # `strip`, not the column, or a mount would get the location's
+            # trailing slash and not the one on proxy_pass that does the work.
             lines.extend(self._proxy_lines(
-                loc.pool, cfg, indent=8,
-                strip_prefix=bool(getattr(loc, "strip_prefix", False))))
+                loc.pool, cfg, indent=8, strip_prefix=strip))
+            if mount:
+                lines.extend(self._mount_redirect_lines(
+                    path if path.endswith("/") else path + "/",
+                    already_set=bool((cfg.get("proxy_redirect") or "").strip()),
+                    indent=8))
         elif loc.mode == "static":
             if loc.alias:
                 lines.append(f"        alias {esc(loc.alias)};")

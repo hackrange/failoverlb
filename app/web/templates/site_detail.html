@@ -1234,9 +1234,18 @@ document.addEventListener("DOMContentLoaded", function () {
     });
   }
 
-  function control(f) {
-    const val = saved[f.key] !== undefined ? saved[f.key] : f.default;
-    const id = "s-" + f.key;
+  // Used for the site's settings tab and for a path's, so the ids, the values it
+  // reads and the context the ? button asks about are all arguments.  The
+  // defaults are the site, which is what every existing caller wants.
+  //
+  // The ids matter more than they look.  Both sets of controls are in the page
+  // at the same time once a path dialog is open, and two elements sharing an id
+  // means the label stops working and the wrong control gets read.
+  function control(f, opts) {
+    opts = opts || {};
+    const store = opts.saved || saved;
+    const val = store[f.key] !== undefined ? store[f.key] : f.default;
+    const id = (opts.idPrefix || "s-") + f.key;
     const disabled = f.available ? "" : " disabled";
 
     let input = "";
@@ -1256,7 +1265,7 @@ document.addEventListener("DOMContentLoaded", function () {
               '" data-setting="' + f.key + '" data-type="bool"' + guard +
               (val ? " checked" : "") + disabled + '>' +
               '<label for="' + id + '">' + NFM.escapeHtml(f.label) + "</label>" +
-              help(f) + "</div>";
+              help(f, opts.helpContext) + "</div>";
       return input;
     }
 
@@ -1294,7 +1303,7 @@ document.addEventListener("DOMContentLoaded", function () {
     }
 
     return '<div class="field">' +
-           '<label for="' + id + '">' + NFM.escapeHtml(f.label) + help(f) + "</label>" +
+           '<label for="' + id + '">' + NFM.escapeHtml(f.label) + help(f, opts.helpContext) + "</label>" +
            input +
            (f.directive ? '<div class="hint mono">' + NFM.escapeHtml(f.directive) + "</div>" : "") +
            (f.available ? "" : '<div class="hint" style="color:var(--bad)">' +
@@ -1302,17 +1311,21 @@ document.addEventListener("DOMContentLoaded", function () {
            "</div>";
   }
 
-  function help(f) {
+  function help(f, context) {
     return ' <button class="help-btn" data-help="' + NFM.escapeHtml(f.key) +
-           '" data-help-context="server" aria-label="Help">?</button>';
+           '" data-help-context="' + (context || "server") + '" aria-label="Help">?</button>';
   }
 
   document.getElementById("show-advanced").addEventListener("change", renderSettings);
   document.getElementById("setting-filter").addEventListener("input", renderSettings);
 
-  function collectSettings() {
+  // Scoped to a container on purpose.  This used to read the whole document,
+  // which was fine while the site tab was the only thing that had settings, and
+  // is not once a path dialog is open with a set of its own: saving the site
+  // would have swept the path's controls into the site's settings.
+  function collectSettings(root) {
     const out = {};
-    document.querySelectorAll("[data-setting]").forEach(function (el) {
+    (root || document).querySelectorAll("[data-setting]").forEach(function (el) {
       const key = el.getAttribute("data-setting");
       const type = el.getAttribute("data-type");
 
@@ -1724,12 +1737,29 @@ document.addEventListener("DOMContentLoaded", function () {
         <select id="l-pool"><option value="">none</option>${poolOpts}</select></div>
       <div class="field" data-lmode="proxy">
         <div class="checkline">
+          <input type="checkbox" id="l-mount" ${l.mount_site ? "checked" : ""}>
+          <label for="l-mount">Serve a whole website here</label>
+        </div>
+        <div class="hint">For putting an entire site under this path when the
+          site itself has no idea it is not at the root.  Everything it needs
+          gets written for you: the path comes off, the links and assets in the
+          HTML are pointed back under
+          <code id="l-mount-prefix">this path</code>, the backend is asked not to
+          compress so those can be rewritten at all, and its redirects get the
+          path put back on.
+          <br>Needs <strong>Starts with this</strong> above and a pool.  Leave it
+          off if the backend already knows what prefix it lives under: it will be
+          writing correct links itself, and these would prefix them twice.</div></div>
+      <div class="field" data-lmode="proxy">
+        <div class="checkline">
           <input type="checkbox" id="l-strip" ${l.strip_prefix ? "checked" : ""}>
           <label for="l-strip">Take this path off before sending it on</label>
         </div>
-        <div class="hint">For a backend that knows nothing about the prefix it
-          is being served under.  With this on, <code>/api/users</code> reaches
-          the backend as <code>/users</code>.
+        <div class="hint">Just the path, with nothing else changed.  With this on,
+          <code>/api/users</code> reaches the backend as <code>/users</code>.
+          Right on its own for an API or a health check, where there is no HTML
+          and so nothing to rewrite.  Serving a whole website needs the box above
+          instead, which includes this.
           <br>Leave it off when the backend has been told what prefix it lives
           under, because then it is expecting the whole path and taking it off
           gives it one it has no route for.  The giveaway is a page that loads
@@ -1757,8 +1787,20 @@ document.addEventListener("DOMContentLoaded", function () {
       <div class="field"><label for="l-errorpage">Error pages for this path</label>
         <select id="l-errorpage"><option value="">Whatever the site uses</option>${errOpts}</select>
         <div class="hint">${errHint}</div></div>
+      <div class="field">
+        <div class="checkline">
+          <input type="checkbox" id="l-show-settings">
+          <label for="l-show-settings">Settings for this path only</label>
+        </div>
+        <div class="hint">The same settings as the site's tab, set on this path
+          instead.  A path only needs its own where it should differ from the
+          site, so this starts closed and anything left alone is inherited.</div>
+        <div id="l-settings-holder" hidden></div></div>
       <div class="field"><label for="l-custom">Extra config for this path</label>
-        <textarea id="l-custom" rows="3" spellcheck="false">${NFM.escapeHtml(l.custom_config || "")}</textarea></div>
+        <textarea id="l-custom" rows="3" spellcheck="false">${NFM.escapeHtml(l.custom_config || "")}</textarea>
+        <div class="hint">Written into this path's block as typed.  Look above
+          first: a setting has help, gets checked before it saves, and writes the
+          lines that go with it, none of which this box can do.</div></div>
       <div class="checkline">
         <input type="checkbox" id="l-enabled" ${l.enabled !== false ? "checked" : ""}>
         <label for="l-enabled">Enabled</label></div>`;
@@ -1817,6 +1859,16 @@ document.addEventListener("DOMContentLoaded", function () {
     body.redirect_target = v("l-target").trim() || null;
     body.redirect_code = parseInt(v("l-code") || "301", 10);
     body.strip_prefix = (document.getElementById("l-strip") || {}).checked || false;
+    body.mount_site = (document.getElementById("l-mount") || {}).checked || false;
+
+    // Only send settings once the controls have been built, and never an empty
+    // object because the section was left closed.  Sending {} would wipe every
+    // setting the path already had, which is the same trap the site save has a
+    // comment about, one level down.
+    const lHolder = document.getElementById("l-settings-holder");
+    if (lHolder && lHolder.getAttribute("data-built") === "yes") {
+      body.settings = collectSettings(lHolder);
+    }
     return body;
   }
 
@@ -1829,6 +1881,90 @@ document.addEventListener("DOMContentLoaded", function () {
     syncModeFields();
     const sel = document.getElementById("l-mode");
     if (sel) sel.addEventListener("change", syncModeFields);
+
+    // Say the prefix back in the mount hint as it is typed.  "pointed back under
+    // /shop/" is a different sentence from "pointed back under this path": it is
+    // the one that lets somebody check the answer before saving.
+    const mountBox = document.getElementById("l-mount");
+    const pathBox = document.getElementById("l-path");
+    const prefixOut = document.getElementById("l-mount-prefix");
+
+    function syncMountHint() {
+      if (!prefixOut) return;
+      const p = (pathBox.value || "").trim().replace(/\/+$/, "");
+      prefixOut.textContent = p ? p + "/" : "this path";
+    }
+
+    // A mount needs a prefix match, and the API refuses anything else.  Saying so
+    // here, and fixing it on the spot, beats a 400 explaining what could have
+    // been set for them.
+    function syncMountMatch() {
+      if (!mountBox || !mountBox.checked || !sel) return;
+      const m = document.getElementById("l-match");
+      if (m && m.value !== "prefix" && m.value !== "preferential") {
+        m.value = "prefix";
+        NFM.toast("Serving a whole site needs a prefix match, so that is set now",
+                  "warn");
+      }
+      if (sel.value !== "proxy") {
+        sel.value = "proxy";
+        syncModeFields();
+        NFM.toast("Serving a whole site means proxying to a pool, so that is set now",
+                  "warn");
+      }
+    }
+
+    if (pathBox) { pathBox.addEventListener("input", syncMountHint); }
+    if (mountBox) { mountBox.addEventListener("change", syncMountMatch); }
+    syncMountHint();
+
+    // The path's own settings, built from the catalog the first time somebody
+    // asks for them.  Closed by default: most paths want the site's settings and
+    // a form of sixty odd controls in a dialog would bury the four fields that
+    // decide what the path does.
+    const showSettings = document.getElementById("l-show-settings");
+    const lHolder = document.getElementById("l-settings-holder");
+    if (showSettings && lHolder) {
+      showSettings.addEventListener("change", async function () {
+        lHolder.hidden = !showSettings.checked;
+        if (!showSettings.checked || lHolder.getAttribute("data-built") === "yes") return;
+
+        lHolder.innerHTML = '<div class="hint">Loading the settings...</div>';
+        let locCatalog;
+        try {
+          locCatalog = await NFM.api("/catalog?context=location");
+        } catch (err) {
+          // Left unbuilt on purpose, so the save cannot send an empty settings
+          // object and wipe what the path already had.
+          lHolder.innerHTML = '<div class="notice bad"><div>' +
+            NFM.escapeHtml(err.message) + "</div></div>";
+          return;
+        }
+
+        const savedHere = (existing && existing.settings) || {};
+        const byCat = {};
+        locCatalog.features.forEach(function (f) {
+          (byCat[f.category] = byCat[f.category] || []).push(f);
+        });
+
+        let html = "";
+        locCatalog.categories.forEach(function (cat) {
+          const feats = byCat[cat.key];
+          if (!feats || !feats.length) return;
+          html += '<div class="mt"><div class="small faint"><strong>' +
+                  NFM.escapeHtml(cat.label) + "</strong></div>";
+          feats.forEach(function (f) {
+            html += control(f, { idPrefix: "ls-", saved: savedHere,
+                                 helpContext: "location" });
+          });
+          html += "</div>";
+        });
+
+        lHolder.innerHTML = html ||
+          '<div class="hint">Nothing on this build can be set per path.</div>';
+        lHolder.setAttribute("data-built", "yes");
+      });
+    }
 
     document.getElementById("l-save").addEventListener("click", async function () {
       const body = collectPath();
@@ -1902,7 +2038,7 @@ document.addEventListener("DOMContentLoaded", function () {
     // Only send settings if the tab was opened.  Sending an empty object
     // because the controls were never built would wipe every setting on the
     // site, which is a nasty way to lose a config.
-    if (catalog) body.settings = collectSettings();
+    if (catalog) body.settings = collectSettings(document.getElementById("settings-holder"));
 
     saveBtn.disabled = true;
     try {

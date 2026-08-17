@@ -6500,11 +6500,11 @@ async def import_apply(request: Request, g: ObjectGuard = Depends(changing)):
 # Paths within a site
 # ==============================================================================
 
-LOCATION_FIELDS = (
-    "path", "match_type", "mode", "document_root", "alias",
-    "redirect_target", "redirect_code", "custom_config", "enabled",
-    "sort_order", "strip_prefix",
-)
+# There was a LOCATION_FIELDS tuple here that read exactly like the list of what
+# a path accepts and was referenced by nothing at all.  It is gone rather than
+# updated: a list nothing reads cannot be wrong in a way anybody notices, so it
+# drifts, and then somebody trusts it.  `_apply_location_fields` below is the
+# only answer to what a path accepts.
 
 MATCH_TYPES = {"prefix", "exact", "preferential", "regex", "regex_i"}
 LOCATION_MODES = {"proxy", "static", "redirect", "deny"}
@@ -6528,6 +6528,14 @@ def _location_json(loc) -> dict:
         "custom_config": loc.custom_config or "",
         "enabled": bool(loc.enabled),
         "sort_order": loc.sort_order or 0,
+        # Stored, written and accepted on the way in, and left out of here,
+        # which is the shape of bug that undoes itself.  The path editor reads
+        # this to draw the checkbox, so the box came back clear on every reload
+        # however it was saved, and the next save of that path posted the clear
+        # box back and turned the setting off.  Nobody unticked anything: the
+        # site simply started 404ing again after an unrelated edit.
+        "strip_prefix": bool(loc.strip_prefix),
+        "mount_site": bool(loc.mount_site),
         "settings": loc.setting_map(),
     }
 
@@ -6574,8 +6582,31 @@ def _apply_location_fields(loc, payload, g):
 
     if "strip_prefix" in payload:
         loc.strip_prefix = bool(payload.get("strip_prefix"))
+    if "mount_site" in payload:
+        loc.mount_site = bool(payload.get("mount_site"))
     if "sort_order" in payload:
         loc.sort_order = int(payload.get("sort_order") or 0)
+
+    # A mount only means anything where a path can have something under it.  On
+    # an exact or a regex match there is no prefix to take off and no set of URLs
+    # beneath it, so the rewriting would fire on one URL and mislead about the
+    # rest.  Refused rather than ignored, because a checkbox that saves and does
+    # nothing is the bug this whole area has already had once.
+    if loc.mount_site and loc.match_type not in ("prefix", "preferential"):
+        raise HTTPException(
+            status_code=400,
+            detail="serving a whole site under a path needs a prefix match, "
+                   f"and this path is set to {loc.match_type}")
+    if loc.mount_site and loc.mode != "proxy":
+        raise HTTPException(
+            status_code=400,
+            detail="serving a whole site under a path means proxying to a pool, "
+                   f"and this path is set to {loc.mode}")
+    if loc.mount_site and (loc.path or "").strip("/") == "":
+        raise HTTPException(
+            status_code=400,
+            detail="a path of / is already the root, so there is no prefix to "
+                   "serve a site under")
 
     if "settings" in payload and isinstance(payload["settings"], dict):
         # Validated the same way a site's are, and against the same catalog, so

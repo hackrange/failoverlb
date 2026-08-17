@@ -463,6 +463,23 @@ class Location(Base):
     # like /lb in the first place.
     strip_prefix = Column(Boolean, default=False)
 
+    # Serve a whole site that thinks it lives at its own root under this path.
+    #
+    # This is strip_prefix and then everything else that turns out to be needed,
+    # which is the part nobody expects.  A site mounted under /shop still writes
+    # its own links from the root, so the page arrives styled by a stylesheet at
+    # /assets that this site does not serve, and every link leaves the mount.
+    # Its redirects name the host without the prefix, so the first URL missing a
+    # trailing slash sends the visitor off the mount for good.
+    #
+    # Every one of those repairs is derivable from the path, so none of them is a
+    # question worth asking.  The renderer builds them in _mount_settings.
+    #
+    # Separate from strip_prefix rather than replacing it, because taking the
+    # path off is still right on its own for an API or a health check, where
+    # there is no HTML and nothing to rewrite.
+    mount_site = Column(Boolean, default=False)
+
     def setting_map(self):
         return json_get(self.settings, {})
 

@@ -38,7 +38,7 @@ from app.models import (
     Location, MapBlock, MemberState, Pool, PoolMember, StreamServer,
     VirtualHost, json_set,
 )
-from app.web.routes_api import render_current
+from app.web.routes_api import _location_json, render_current
 
 SOCKET = "/run/nginxmgr/agent.sock"
 
@@ -134,6 +134,10 @@ with session_scope() as s:
     have_https = s.query(VirtualHost).filter(VirtualHost.listen_https.is_(True)).count()
     have_443 = [p for p in s.query(Pool).all()
                 if any(m.enabled and m.port == 443 for m in p.members)]
+    # A pool with something in it, for the checks that need a real proxy_pass
+    # rather than the 503 an empty pool renders.
+    filled_pool = next((p.id for p in s.query(Pool).all()
+                        if any(m.enabled for m in p.members)), None)
 
 print()
 print("  certificates")
@@ -177,6 +181,85 @@ else:
     check("a site with a path still answers for the root", root_covered,
           "no location / was written, so anything outside the path falls "
           "through to whatever nginx serves by default")
+
+
+# Every field a path stores has to come back out of the API that reads it.
+#
+# strip_prefix was stored, rendered and accepted by the API, and left out of the
+# JSON the API gives back.  That is a bug that undoes itself: the editor reads
+# the JSON to draw its checkbox, so the box was clear on every reload however it
+# had been saved, and the next save of that path posted the clear box and turned
+# the setting off.  The site started 404ing again after an edit to something
+# else entirely, and nobody had touched the setting.
+#
+# Asked by walking the model's own columns rather than by naming the fields
+# here, because a list here would have the same hole as the one it is checking.
+# Not by walking LOCATION_FIELDS, which looks like the list of what a path
+# accepts and is referenced by nothing at all, so it can drift from the function
+# that really does the accepting without anybody noticing.
+#
+# Anything deliberately not given back goes in the set below with a reason next
+# to it, so leaving a field out stays a decision rather than an oversight.
+_NOT_RETURNED = {
+    # Which site the path belongs to.  It is in the URL the editor asked, so
+    # sending it back would only be telling the caller what it already said.
+    "host_id",
+}
+
+_columns = {c.name for c in Location.__table__.columns} - _NOT_RETURNED
+_returned = set(_location_json(Location(
+    path="/x", match_type="prefix", mode="proxy", enabled=True, sort_order=10)))
+
+_write_only = sorted(_columns - _returned)
+check("a path gives back every field it stores", not _write_only,
+      f"stored and never returned: {', '.join(_write_only)}.  The editor reads "
+      f"this JSON, so whatever is missing reads as empty and gets written back "
+      f"as empty on the next save of that path")
+
+
+# A mount has to write every repair, because nobody asked for them by name.
+#
+# This is the whole bargain of the feature.  A person ticks one box instead of
+# writing six directives, which means they are not going to notice when one of
+# the six stops being written: they never knew it was there.  Each one fails
+# quietly and differently.  No trailing slash on proxy_pass and the backend gets
+# a path it has no route for.  No sub_filter and the page arrives unstyled.  No
+# Accept-Encoding and the sub_filter is there and does nothing, because the body
+# came back gzipped.  No proxy_redirect and one URL without a trailing slash
+# sends the visitor off the mount and they do not come back.
+if not have_sites or not filled_pool:
+    skip("a mount writes every repair it promised",
+         "needs a site and a pool with a backend in it")
+else:
+    def add_a_mount(session):
+        host = session.query(VirtualHost).first()
+        session.add(Location(host_id=host.id, path="/mountcheck",
+                             match_type="prefix", mode="proxy",
+                             pool_id=filled_pool, mount_site=True,
+                             enabled=True, sort_order=5))
+
+    _files = rendered_with(add_a_mount)
+    _conf = "".join(c for p, c in _files.items() if p.startswith("sites/"))
+    _block = _conf.split("location /mountcheck/")[1].split("\n    }")[0] \
+        if "location /mountcheck/" in _conf else ""
+
+    # The trailing slash on proxy_pass is the whole of "take the path off", and
+    # it is one character, so it is worth looking at the line itself rather than
+    # searching the block for a substring that could come from anywhere.
+    _pp = [ln.strip() for ln in _block.splitlines()
+           if ln.strip().startswith("proxy_pass ")]
+
+    _wanted = {
+        "the bare path redirects to the slash": "location = /mountcheck {" in _conf,
+        "the path comes off at proxy_pass": bool(_pp) and _pp[0].endswith("/;"),
+        "the links get rewritten": "sub_filter 'href=\"/' 'href=\"/mountcheck/'" in _block,
+        "every match is replaced, not just the first": "sub_filter_once off;" in _block,
+        "the backend is asked not to compress": 'proxy_set_header Accept-Encoding "";' in _block,
+        "redirects get the prefix put back": "proxy_redirect http://$host/ /mountcheck/;" in _block,
+    }
+    _absent = sorted(k for k, ok in _wanted.items() if not ok)
+    check("a mount writes every repair it promised", not _absent,
+          "a mount rendered without: " + "; ".join(_absent))
 
 
 # Stapling is only written for a certificate that names a responder.
