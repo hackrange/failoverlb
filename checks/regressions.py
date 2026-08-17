@@ -14,6 +14,7 @@ import json
 import socket
 import ssl
 import sys
+import urllib.error
 import urllib.request
 
 import datetime as _dt
@@ -31,6 +32,7 @@ from app.core import certs as cert_tools
 from app.core import error_pages
 from app.core import hostnames
 from app.core.render import Renderer
+from app.config import get_settings
 from app.core.capabilities import fleet_capabilities
 from app.db import session_scope
 from app.models import (
@@ -1618,6 +1620,62 @@ for name in sites:
             check(f"{name} answers without an error", True)
         else:
             check(f"{name} answers without an error", False, str(exc))
+
+# The clone URL we hand out has to clone, for somebody with no account.
+#
+# The Cluster page builds "add a node" from settings.repo_url, and the shipped
+# default had no namespace in it.  That does not 404.  GitLab answers 401 for a
+# path it will not show you, so it never confirms whether a private project is
+# there, and git reads the 401 as "log in" and asks for a password.  So a wrong
+# URL presents as a private repository, and the first thing anybody adding a node
+# met was a password prompt they had no password for.
+#
+# Asked anonymously and against the real host, because the failure is entirely
+# about what a stranger gets.  Any credential on this box would hide it.
+#
+# Three things had to be got right here or the check passes on a page that is
+# not a repository at all:
+#
+#   Do not follow redirects.  The first version of this used urlopen's default,
+#   which follows, so a 302 to a sign in page came back 200 and the check went
+#   green against a URL git cannot clone.
+#
+#   Send a git user agent.  GitLab answers this endpoint differently depending
+#   on who is asking, so testing it as curl tests something a visitor does and
+#   git never does.
+#
+#   Look at the content type, not the status.  200 only says something answered.
+#   `application/x-git-upload-pack-advertisement` is the one answer that means a
+#   clone would actually work.
+_GIT_CT = "application/x-git-upload-pack-advertisement"
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_repo = get_settings().repo_url
+_refs = f"{_repo.rstrip('/')}/info/refs?service=git-upload-pack"
+try:
+    _opener = urllib.request.build_opener(
+        _NoRedirect, urllib.request.HTTPSHandler(context=ssl.create_default_context()))
+    _req = urllib.request.Request(_refs, headers={"User-Agent": "git/2.39.2"})
+    with _opener.open(_req, timeout=15) as r:
+        _code, _ctype = r.status, (r.headers.get("Content-Type") or "")
+    check("the clone url the cluster page hands out can be cloned",
+          _code == 200 and _ctype.startswith(_GIT_CT),
+          f"{_refs} answered {_code} as {_ctype or 'no content type'}, "
+          f"and a clone needs 200 as {_GIT_CT}")
+except urllib.error.HTTPError as exc:
+    check("the clone url the cluster page hands out can be cloned", False,
+          f"{_repo} answered {exc.code}."
+          + ("  401 from GitLab means the path is one it will not show you, which "
+             "is far more often a missing namespace in the url than a repository "
+             "that has genuinely gone private." if exc.code == 401 else ""))
+except Exception as exc:
+    skip("the clone url the cluster page hands out can be cloned",
+         f"could not reach {_repo} from this node: {exc}")
 
 print()
 failed = [name for name, ok, _ in results if not ok]
