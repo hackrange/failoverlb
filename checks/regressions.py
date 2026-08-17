@@ -985,6 +985,42 @@ check("pictures are inlined rather than fetched",
       "an error page that has to fetch something can be broken at exactly the "
       "moment the site is already in trouble")
 
+# Where the token sits decides what it has to turn into, and getting this wrong
+# is not subtle: a bare data: address written into the body of the page renders
+# as a screenful of base64.  Reported from a farm by somebody who did exactly
+# what the help text and the upload toast both tell you to do, which is put
+# {{image:name}} in the page.
+_placements = [
+    ("on its own in the body", "<p>{{image:logo}}</p>",
+     lambda out: '<img src="data:image/png;base64,' in out and 'alt="logo"' in out,
+     "the address came out as text for the visitor to read"),
+    ("inside an img tag somebody wrote", '<img src="{{image:logo}}">',
+     lambda out: out.count("<img") == 1 and "<img src=\"data:image/png" in out,
+     "a tag inside a tag, so the page is broken markup"),
+    ("inside a CSS url()", "<style>body{background:url({{image:logo}})}</style>",
+     lambda out: "url(data:image/png;base64," in out and "<img" not in out,
+     "an img tag inside a stylesheet, which shows nothing at all"),
+    ("inside a style block on its own line",
+     "<style>\n.logo { background-image: url(\n{{image:logo}}\n); }\n</style>",
+     lambda out: "<img" not in out,
+     "a style block is still CSS however it is laid out"),
+    ("in a single quoted attribute", "<img src='{{image:logo}}'>",
+     lambda out: out.count("<img") == 1,
+     "only double quotes were handled, so single quotes got a nested tag"),
+]
+for _label, _html, _ok, _why in _placements:
+    _out = error_pages.render_page(_template("placement", [404], _html, _logo),
+                                   404, error_pages.images_for(
+                                       _template("placement", [404], _html, _logo)))
+    check(f"a picture {_label} comes out right", _ok(_out), f"{_why}: {_out[:120]}")
+
+# A name with no upload behind it still must not leave the token on screen.
+_missing = error_pages.render_page(
+    _template("placement", [404], "<p>{{image:gone}}</p>"), 404, {})
+check("a picture that was never uploaded leaves nothing behind",
+      "{{" not in _missing and "<img" not in _missing,
+      f"the visitor reads the placeholder: {_missing[:120]}")
+
 check("the page location is internal", "        internal;" in _conf,
       "without it anybody can fetch the 500 page off a site that is perfectly "
       "well, and it is a prefix match so it is reachable by name")

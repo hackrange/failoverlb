@@ -142,7 +142,9 @@ PLACEHOLDER_HELP = [
     ("{{message}}", "What that code is called, like Not Found."),
     ("{{explain}}", "A plain sentence about what happened, for the codes that "
                     "have one.  Empty for the ones that do not."),
-    ("{{image:name}}", "A picture you uploaded, dropped straight into the page."),
+    ("{{image:name}}", "A picture you uploaded.  On its own in the page it "
+                       "becomes the picture.  Inside src=\"...\" or a CSS "
+                       "url() it becomes just the address, so either works."),
 ]
 
 _IMAGE_TOKEN = re.compile(r"\{\{image:([A-Za-z0-9._-]{1,128})\}\}")
@@ -230,6 +232,47 @@ def data_uri(content_type: str, encoded: str) -> str:
     return f"data:{content_type};base64,{encoded}"
 
 
+def _needs_bare_uri(text: str, pos: int) -> bool:
+    """
+    Is the token at this offset somewhere that wants the address on its own?
+
+    Three places want the bare data: address and nothing around it:
+
+      inside a quoted attribute, which is <img src="{{image:logo}}">
+      inside a CSS url(), which is background: url({{image:logo}})
+      anywhere in a <style> block, which is the same thing spread over lines
+
+    Everywhere else the person has written the token into the body of the page
+    on its own, and what they mean by that is "put the picture here".  A bare
+    data: address there renders as a screenful of base64, which is what a
+    person reported after following the help text to the letter.
+    """
+    before = text[:pos]
+
+    # In a style block: count the tags, because a </style> closes it.
+    if before.count("<style") > before.count("</style"):
+        return True
+
+    # In a url(), allowing a quote and spaces after the bracket.
+    if re.search(r"url\(\s*[\"']?\s*$", before):
+        return True
+
+    # In a tag at all?  If the last angle bracket before us opened one.
+    opened = before.rfind("<")
+    if opened == -1 or before.rfind(">") > opened:
+        return False
+
+    # In a tag, so in a quoted value if the quotes so far are unbalanced.
+    quote = None
+    for char in before[opened:]:
+        if quote:
+            if char == quote:
+                quote = None
+        elif char in "\"'":
+            quote = char
+    return quote is not None
+
+
 def render_page(template, code: int, images_by_name: dict = None) -> str:
     """
     Fill one template in for one status code.
@@ -248,7 +291,13 @@ def render_page(template, code: int, images_by_name: dict = None) -> str:
             # which beats leaving the site short of an error page.  The name
             # comes out rather than staying in as a visible {{image:...}}.
             return ""
-        return data_uri(found["content_type"], found["data"])
+        uri = data_uri(found["content_type"], found["data"])
+        if _needs_bare_uri(text, match.start()):
+            return uri
+        # On its own in the page, so write the tag as well.  The help text and
+        # the toast after an upload both say to put the token in the page, and
+        # taking them at their word used to print the data: address as text.
+        return f'<img src="{uri}" alt="{html_mod.escape(name)}">'
 
     text = _IMAGE_TOKEN.sub(swap_image, text)
     text = text.replace("{{code}}", html_mod.escape(str(int(code))))
