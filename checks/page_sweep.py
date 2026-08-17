@@ -23,11 +23,25 @@ from app.db import session_scope
 from app.models import AuthSource, User, UserRole
 
 # Pages the sidebar offers, plus the ones you reach from them.
+#
+# Nine of these were missing for a long time and nobody could see it, because
+# the coverage test that would have said so only runs when checks/ is readable
+# from inside the container, which it is not on a normal run.  So the list sat
+# short while the check reported a skip.  Anything added to routes_pages
+# belongs here as well.
+#
+# The auth ones are worth having despite being odd to sweep: /auth/oidc/start
+# begins a sign in and /auth/oidc/callback expects query arguments it will not
+# get here.  Neither should raise for the want of them, and a 302 or a 400 is
+# a pass.  Only a 500 is a failure.
 PAGES = [
     "/", "/sites", "/pools", "/zones", "/error-pages", "/waf-profiles", "/certificates",
     "/cluster", "/utilization", "/maps", "/streams",
     "/upgrade", "/parity", "/account", "/settings", "/users", "/audit",
     "/changes",
+    "/authorities", "/backup", "/change-password", "/enroll", "/gslb",
+    "/import", "/tunnel",
+    "/auth/oidc/start", "/auth/oidc/callback",
 ]
 
 # Read only endpoints.  Anything that writes is left alone on purpose: this
