@@ -30,6 +30,7 @@ from app.catalog import CATEGORIES, all_features, plus_only_features, validate_v
 from app.catalog.registry import get_feature
 from app.config import get_settings
 from app.core import audit, certs, error_pages, hostnames, settings_store
+from app.core import repair as config_repair
 from app.core.acme import AcmeError, get_cert_manager, pick_issuing_node, resolve_domain
 from app.core.agent_client import AgentError, get_agent
 from app.core.capabilities import fleet_capabilities, get_local_capabilities
@@ -3328,6 +3329,69 @@ async def preview(g: ObjectGuard = Depends(guard)):
         "unchanged": bool(current and current.checksum == checksum),
         "files": files,
         "current_version": current.version if current else 0,
+    }
+
+
+@router.post("/repair")
+async def repair(request: Request, g: ObjectGuard = Depends(changing)):
+    """
+    Work out what would have to come out for nginx to take this config.
+
+    Two steps on purpose, and this is the first one.  With no `confirm` it
+    changes nothing and gives back the list of lines it would comment out, each
+    with the reason nginx gave, so somebody can read it before agreeing.  With
+    `confirm` it makes those same changes and stops there: it does not apply, so
+    the config still has to be pushed the normal way and still gets staged and
+    tested on every node first.
+
+    Not folded into apply.  Apply goes to the whole fleet and its audit entry
+    says "applied", so a directive quietly disappearing inside it would be a
+    change nobody sanctioned and nobody could find afterwards.  The ones that go
+    missing here are exactly the ones worth noticing: `ssl_verify_client` and
+    `ssl_protocols` are real controls, and a config error turning into weaker
+    TLS without a word is a worse outcome than an apply that fails loudly.
+    """
+    g.require("edit_sites")
+    payload = await request.json() if await request.body() else {}
+    confirm = bool(payload.get("confirm"))
+
+    def render():
+        files, _checksum, _snapshot = render_current(g.session)
+        return files
+
+    async def test(files):
+        """Stage it and ask nginx.  Staging only, so nothing goes live."""
+        agent = get_agent()
+        await agent.write_staging(files)
+        answer = await agent.test_staging()
+        return bool(answer.get("ok")), str(answer.get("output") or "")
+
+    try:
+        result = await config_repair.plan_repair(g.session, render, test)
+    except AgentError as exc:
+        raise HTTPException(status_code=400,
+                            detail=f"could not check the config: {exc}")
+
+    if confirm and result["changes"]:
+        g.session.commit()
+        for change in result["changes"]:
+            audit.record("config.repair", user=g.user, object_type="site",
+                         object_name=change["site"],
+                         detail=f"{change['where']}: took out {change['line']} "
+                                f"because nginx said {change['reason']}")
+        log.warning("%s repaired %d line(s) of config", g.user.username,
+                    len(result["changes"]))
+    else:
+        # Worked out against the session and deliberately not kept.
+        g.session.rollback()
+
+    return {
+        "already_loads": result["ok"],
+        "would_load_after": result["fixed"],
+        "changes": result["changes"],
+        "kept": bool(confirm and result["changes"]),
+        "nginx_said": result["output"],
+        "could_not_repair": result["unrepairable"],
     }
 
 

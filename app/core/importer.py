@@ -35,7 +35,8 @@ from app.core.nginx_parser import (
     parse,
     serialize,
 )
-from app.models import Location, Pool, PoolMember, VirtualHost, json_set
+from app.models import (ConnLimitZone, Location, Pool, PoolMember,
+                        RateLimitZone, VirtualHost, json_set)
 
 log = logging.getLogger("nfm.importer")
 
@@ -668,6 +669,41 @@ def _read_server(block, pools_by_raw_name: dict, index: int) -> dict:
     return site
 
 
+def _read_zone(d) -> dict:
+    """
+    A limit_req_zone or limit_conn_zone declaration, as a row we can make.
+
+        limit_req_zone $binary_remote_addr zone=one:10m rate=5r/s;
+
+    The key is everything before `zone=`, because it can be more than one token
+    once somebody uses a map or a couple of variables.
+    """
+    args = [_unquote(a) for a in _args(d)]
+    if not args:
+        return None
+
+    name = size = rate = None
+    key_parts = []
+    for arg in args:
+        if arg.startswith("zone="):
+            spec = arg[len("zone="):]
+            name, _, size = spec.partition(":")
+        elif arg.startswith("rate="):
+            rate = arg[len("rate="):]
+        else:
+            key_parts.append(arg)
+
+    if not name:
+        return None
+
+    return {
+        "name": name,
+        "key": " ".join(key_parts) or "$binary_remote_addr",
+        "zone_size": size or "10m",
+        "rate": rate or "10r/s",
+    }
+
+
 def _is_acme_location(loc) -> bool:
     path = " ".join(_unquote(a) for a in _args(loc))
     return "acme-challenge" in path
@@ -698,6 +734,7 @@ def analyse(text: str) -> dict:
             scopes.append(top)
 
     upstream_blocks, server_blocks, skipped = [], [], []
+    zones = {"rate": [], "conn": []}
     for scope in scopes:
         holder = scope.directives if hasattr(scope, "directives") else scope.block
         for d in holder or []:
@@ -705,6 +742,16 @@ def analyse(text: str) -> dict:
                 upstream_blocks.append(d)
             elif d.name == "server" and d.is_block:
                 server_blocks.append(d)
+            elif d.name in ("limit_req_zone", "limit_conn_zone"):
+                # The declaration lives in http, and a `limit_req` inside a
+                # location is useless without it: nginx refuses the config with
+                # "zero size shared memory zone".  Bringing the declaration over
+                # is the only way the rule that referenced it still means
+                # anything, and most people paste a server block on its own, so
+                # the declaration is often not even here to bring.
+                spec = _read_zone(d)
+                if spec:
+                    zones["rate" if d.name == "limit_req_zone" else "conn"].append(spec)
             elif d.name in ("stream", "mail") and d.is_block:
                 skipped.append({
                     "what": f"the {d.name} block",
@@ -861,13 +908,71 @@ def analyse(text: str) -> dict:
                 f"out, so it will be made as a site with nothing behind it."
             )
 
+    # A rate limit rule that names a zone nobody declared is not config, it is a
+    # config that will not load: nginx answers "zero size shared memory zone".
+    #
+    # It happens on almost every paste, because `limit_req` sits in the location
+    # and `limit_req_zone` sits up in http, so pasting a server block brings the
+    # rule and leaves the declaration behind.  Commented out with the reason
+    # rather than dropped, so somebody can make the zone on the Zones page and
+    # put the line back, and rather than left alone, which is the version that
+    # takes the next apply down.
+    declared = {z["name"] for z in zones["rate"]} | {z["name"] for z in zones["conn"]}
+    for site in folded:
+        missing = _blank_dangling_zones(site, declared)
+        for name in sorted(missing):
+            warnings.append(
+                f"{site['name']} rate limits against a zone called {name!r}, and "
+                f"no limit_req_zone for it was in what you pasted.  Those lines "
+                f"were commented out, because nginx will not load a config that "
+                f"names a zone that does not exist.  Make the zone on the Zones "
+                f"page and put them back if you want the limit."
+            )
+
     return {
         "ok": True,
         "sites": folded,
         "pools": pools,
+        "zones": zones,
         "skipped": skipped,
         "warnings": warnings,
     }
+
+
+def _blank_dangling_zones(site: dict, declared: set) -> set:
+    """
+    Comment out limit_req/limit_conn lines naming a zone that is not coming with
+    them.  Gives back the zone names it had to do that for.
+    """
+    missing = set()
+
+    def sweep(text):
+        out = []
+        for line in (text or "").splitlines():
+            bare = line.strip()
+            if bare.startswith(("limit_req ", "limit_conn ")):
+                for token in bare.rstrip(";").split():
+                    name = token[len("zone="):] if token.startswith("zone=") else None
+                    if name is None and token not in ("limit_req", "limit_conn"):
+                        # limit_conn writes the zone as a bare first argument.
+                        name = token if bare.startswith("limit_conn ") else None
+                    if name and name not in declared:
+                        missing.add(name)
+                        out.append(f"# {bare}")
+                        out.append(f"# ^ the zone {name!r} was not in what you "
+                                   f"pasted, and nginx will not load a config "
+                                   f"that names a zone that does not exist.")
+                        break
+                else:
+                    out.append(line)
+                continue
+            out.append(line)
+        return "\n".join(out)
+
+    site["custom_config"] = sweep(site.get("custom_config"))
+    for loc in site.get("locations") or []:
+        loc["custom_config"] = sweep(loc.get("custom_config"))
+    return missing
 
 
 def apply_plan(session, plan: dict, chosen_sites=None, chosen_pools=None) -> dict:
@@ -882,6 +987,22 @@ def apply_plan(session, plan: dict, chosen_sites=None, chosen_pools=None) -> dic
 
     want_pools = set(chosen_pools) if chosen_pools is not None else None
     want_sites = set(chosen_sites) if chosen_sites is not None else None
+
+    # The shared memory zones first, because a site that rate limits refers to
+    # one by name and the reference is worth nothing without the declaration.
+    # Anything already there under that name is left alone, same bargain as
+    # pools and sites: an import does not overwrite what somebody is running.
+    for kind, model in (("rate", RateLimitZone), ("conn", ConnLimitZone)):
+        for spec in (plan.get("zones") or {}).get(kind) or []:
+            if session.query(model).filter(model.name == spec["name"]).first():
+                existed.append(f"zone {spec['name']}")
+                continue
+            row = model(name=spec["name"], description="imported",
+                        key=spec["key"], zone_size=spec["zone_size"])
+            if kind == "rate":
+                row.rate = spec["rate"]
+            session.add(row)
+    session.flush()
 
     pool_ids = {}
     for spec in plan.get("pools") or []:

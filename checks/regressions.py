@@ -304,6 +304,10 @@ server {
         proxy_cookie_path /o/ /;
         allow 198.51.100.10;
         deny all;
+        # Names a zone that is not in this paste, because limit_req_zone lives
+        # up in http and a pasted server block leaves it behind.  nginx answers
+        # "zero size shared memory zone" and refuses the lot.
+        limit_req zone=importcheck_absent burst=10 nodelay;
     }
 }
 """
