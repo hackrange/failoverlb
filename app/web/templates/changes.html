@@ -16,6 +16,9 @@
 <div class="card">
   <div class="card-head">
     <h2>Waiting to be applied</h2>
+    {% if can('edit_sites') %}
+      <button class="btn" id="changes-repair">Check and repair</button>
+    {% endif %}
     {% if can('apply_config') %}
       <button class="btn primary" id="changes-apply">Apply config</button>
     {% endif %}
@@ -144,6 +147,103 @@ document.addEventListener("DOMContentLoaded", function () {
 
   loadPending();
 
+  // ---- check and repair ----
+  //
+  // Two steps, and the first one changes nothing.  Asking first is the whole
+  // point: what comes out here is config somebody wrote and meant, and a few of
+  // them are real controls.  `ssl_verify_client` disappearing without a word
+  // would be a config error quietly becoming weaker TLS.
+  //
+  // Deliberately not folded into Apply.  Apply goes to every node and its audit
+  // entry says "applied", so a directive vanishing inside it would be a change
+  // nobody sanctioned and nobody could find afterwards.
+  const repairBtn = document.getElementById("changes-repair");
+
+  function repairList(changes) {
+    let html = "<div class='help-section'><p>nginx will not load this config. "
+             + "These lines are why.  Commenting them out is what would make it "
+             + "load.  Nothing is deleted, so you can put any of them back "
+             + "somewhere they are allowed.</p></div>";
+    changes.forEach(function (c) {
+      html += '<div class="field">'
+           +  '<label>' + NFM.escapeHtml(c.site) + " <span class='faint small'>"
+           +  NFM.escapeHtml(c.where) + "</span></label>"
+           +  '<pre style="margin:0">' + NFM.escapeHtml(c.line) + "</pre>"
+           +  '<div class="hint">nginx said: ' + NFM.escapeHtml(c.reason) + "</div>"
+           +  "</div>";
+    });
+    return html;
+  }
+
+  async function runRepair(confirm) {
+    return await NFM.api("/repair", { method: "POST", body: { confirm: !!confirm } });
+  }
+
+  if (repairBtn) {
+    repairBtn.addEventListener("click", async function () {
+      repairBtn.disabled = true;
+      const original = repairBtn.textContent;
+      repairBtn.textContent = "Checking...";
+      try {
+        const r = await runRepair(false);
+
+        if (r.already_loads) {
+          NFM.toast("nginx already takes this config, so there is nothing to repair", "ok");
+          return;
+        }
+        if (!r.changes.length) {
+          NFM.openModal(
+            "This one needs a person",
+            "",
+            "<div class='help-section'><p>nginx will not load this config, and "
+            + "taking a line out is not what would fix it.</p></div>"
+            + '<pre style="white-space:pre-wrap">'
+            + NFM.escapeHtml(r.could_not_repair || r.nginx_said) + "</pre>");
+          return;
+        }
+
+        let body = repairList(r.changes);
+        if (!r.would_load_after) {
+          // Worth saying plainly rather than letting somebody agree to a repair
+          // and then find the apply still fails.
+          body += "<div class='notice bad'><div>Taking these out is not enough "
+               +  "on its own, so the config still will not load afterwards.  "
+               +  "What is left:</div><pre style='white-space:pre-wrap'>"
+               +  NFM.escapeHtml(r.nginx_said) + "</pre></div>";
+        }
+        body += '<div class="mt"><button class="btn primary" id="repair-go">'
+             +  "Comment these out</button> "
+             +  '<button class="btn" id="repair-cancel">Leave it alone</button></div>';
+
+        NFM.openModal("Repair this config", "", body, true);
+
+        document.getElementById("repair-cancel").addEventListener("click", NFM.closeModal);
+        document.getElementById("repair-go").addEventListener("click", async function () {
+          const go = document.getElementById("repair-go");
+          go.disabled = true;
+          go.textContent = "Working...";
+          try {
+            const done = await runRepair(true);
+            NFM.closeModal();
+            NFM.toast(done.changes.length + " line"
+                      + (done.changes.length === 1 ? "" : "s")
+                      + " commented out.  Look at the diff, then apply.", "ok");
+            setTimeout(function () { window.location.reload(); }, 1200);
+          } catch (err) {
+            NFM.toast(err.message, "bad");
+            go.disabled = false;
+            go.textContent = "Comment these out";
+          }
+        });
+      } catch (err) {
+        NFM.toast(err.message, "bad");
+      } finally {
+        repairBtn.disabled = false;
+        repairBtn.textContent = original;
+      }
+    });
+  }
+
   const applyBtn = document.getElementById("changes-apply");
   if (applyBtn) {
     applyBtn.addEventListener("click", async function () {
@@ -165,6 +265,15 @@ document.addEventListener("DOMContentLoaded", function () {
         }
       } catch (err) {
         NFM.toast(err.message, "bad");
+        // The moment somebody actually needs the repair is the moment an apply
+        // has just failed, and that is exactly when they are least likely to go
+        // looking for a button.  Say it here instead.
+        const said = String(err.message || "");
+        if (repairBtn && /not allowed here|is duplicate|unknown directive|duplicate location|shared memory zone/.test(said)) {
+          setTimeout(function () {
+            NFM.toast("Check and repair can work out what to take out", "warn");
+          }, 1600);
+        }
       } finally {
         applyBtn.disabled = false;
         applyBtn.textContent = original;
