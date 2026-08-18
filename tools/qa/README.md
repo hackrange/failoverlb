@@ -39,10 +39,34 @@ Run them in order.  `t15_failover.py` moves the active role and is deliberately
 last of the original set; `t17` and `t18` were added by the access lists and
 roles round and are safe to run after it.
 
-`t17_access_lists.py` needs **two source addresses that reach the same nginx**,
+`t17_access_lists.py` needs **source addresses that reach the same nginx**,
 which is what lets it prove a rule tells one address from another rather than
 just rendering.  It uses `127.0.0.1` and whatever `QA_LB01` is set to, so it has
 to run on a node rather than from a laptop.
+
+The refusal half of the management rules is not in that suite, and cannot be.
+Every address it can send from is one of the node's, and the allow list a
+management only site renders is generated from the node roster, which holds
+every address each node has.  So it is always on the list.  Adding a spare
+address to the loopback does not get round it: that was tried, and within the
+minute the fleet had picked it up as another of the node's addresses and was
+allowing it.
+
+`t19_outside_address.py` does that half instead.  Run it **without**
+`--network host`, so the container is on a bridge and its source address
+belongs to no node:
+
+```bash
+docker run --rm -v "$PWD/tools/qa:/qa" -e QA_LB01=<node address> \
+  nfm-docs:latest python /qa/t19_outside_address.py
+```
+
+It needs no account and drives no browser, which is just as well: the admin
+allow list would refuse it from there, which is the allow list working.  Run it
+after `t17_access_lists.py`, which leaves the site switched on and writes what
+it needs into `evidence/outside-handoff.json`.  It reads its own source address
+off the socket, checks it against the allow lines the fleet really rendered,
+and only then believes a refusal.
 
 `t18_roles.py` creates one account per role, signs in as each in its own
 browser, and removes them at the end.  It never touches the account the harness
@@ -89,6 +113,7 @@ chmod -R a+rX /var/www/qa-static
 | `t15_failover.py` | Moving the active role by hand, watched second by second. |
 | `t17_access_lists.py` | Allow and deny lists, basic auth and the forwarded address settings, each judged by a real request from two different source addresses. |
 | `t18_roles.py` | Viewer, operator and admin, checked twice each: the control missing from the page, and the route behind it refusing. |
+| `t19_outside_address.py` | The one thing the others cannot be: a stranger.  Runs on a bridge network and proves a management only site turns it away while the open site beside it serves it. |
 | `report.py` | Turns the evidence into the test plan document. |
 | `cleanup.py` | Removes everything a run created. |
 

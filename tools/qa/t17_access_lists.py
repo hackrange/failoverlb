@@ -20,13 +20,20 @@ Both are the same nginx and the same site.  They differ only in where the
 request appears to come from, which is exactly the thing an access list decides
 on, so a rule that discriminates between them is a rule that is really running.
 
-What this cannot do, said out loud rather than faked: this fleet's management
-networks contain both of those addresses, so a rule that allows the management
-networks allows both of them.  The tests that need an address outside every
-management network use the forwarded address machinery to present one, and the
-tests that cannot are marked as needing a person.
+What this cannot do, said out loud rather than faked: both of those addresses
+are the node's own, and the roster puts every address a node has on the allow
+list, so a rule that allows the management networks allows both of them.  This
+suite can therefore never be an outsider.  Putting a spare address on the
+loopback does not get round it either, because that just becomes another node
+address and the fleet allowed it within the minute.
+
+So the refusal half of the management rules is handed to
+`t19_outside_address.py`, which runs from a container on a bridge network and
+is a real outsider.  `ACL-15` leaves the site switched on and writes what t19
+needs into `evidence/outside-handoff.json`.
 """
 import json
+import pathlib
 import sys
 import time
 sys.path.insert(0, "/qa")
@@ -68,29 +75,6 @@ def set_acl(**fields):
         print(f"      !! the access list save was refused: {res['status']} "
               f"{str(res['body'])[:200]}", flush=True)
     return res
-
-
-def server_rules(cfg):
-    """
-    Only the access control lines that apply to the whole server.
-
-    Searching the whole file is how a check here passes for the wrong reason,
-    and it did twice.  Every site config already carries `deny all;` inside the
-    block that hides dotfiles, so "the site denies everything" was true of a
-    site that denied nobody.  The certificate challenge and the internal error
-    page both say `allow all;`, so "the site allows nothing" was false of a
-    site that allowed nothing.
-
-    Server level lines sit at exactly four spaces of indent and a location's at
-    eight, which is the only thing that tells them apart in a rendered file.
-    """
-    keep = ("allow ", "deny ", "auth_basic", "set_real_ip_from",
-            "real_ip_header", "real_ip_recursive")
-    return "\n".join(
-        line for line in cfg.splitlines()
-        if line.startswith("    ") and not line.startswith("     ")
-        and line.strip().startswith(keep)
-    )
 
 
 def get(ip, path="/", **kw):
@@ -211,7 +195,7 @@ t.ok("the site accepted the access list", res["status"] == 200, res)
 back = r.api("GET", f"/hosts/{SID}")["body"]
 t.ok("and gives it back when asked", back.get("access_list_id") == ACL_ID, back.get("access_list_id"))
 cfg = t.site_config(SITE, "the site config with a deny all list on it")
-rules = server_rules(cfg)
+rules = qa.server_rules(cfg)
 t.proof("the rules that apply to the whole server", rules or "[none]")
 t.ok("the server denies everything", "deny all;" in rules, rules)
 t.ok("and allows nothing", "allow " not in rules, rules)
@@ -234,15 +218,15 @@ t = r.test("ACL-04", "Access lists", "An allow list that tells two addresses apa
 t.step(f"allow {LOOPBACK} only")
 set_acl(allow=[f"{LOOPBACK}/32"])
 cfg = t.site_config(SITE, f"the config allowing {LOOPBACK} only")
-t.ok(f"the server allows {LOOPBACK}", f"allow {LOOPBACK}/32;" in server_rules(cfg), server_rules(cfg))
+t.ok(f"the server allows {LOOPBACK}", f"allow {LOOPBACK}/32;" in qa.server_rules(cfg), qa.server_rules(cfg))
 r.apply("qa: allow loopback only")
 both(t, f"only {LOOPBACK} allowed", 200, 403)
 
 t.step(f"now swap it over and allow {LB01} only")
 set_acl(allow=[f"{LB01}/32"])
 cfg = t.site_config(SITE, f"the config allowing {LB01} only")
-t.ok(f"the server allows {LB01}", f"allow {LB01}/32;" in server_rules(cfg), server_rules(cfg))
-t.ok(f"and no longer allows {LOOPBACK}", f"allow {LOOPBACK}/32;" not in server_rules(cfg), server_rules(cfg))
+t.ok(f"the server allows {LB01}", f"allow {LB01}/32;" in qa.server_rules(cfg), qa.server_rules(cfg))
+t.ok(f"and no longer allows {LOOPBACK}", f"allow {LOOPBACK}/32;" not in qa.server_rules(cfg), qa.server_rules(cfg))
 r.apply("qa: allow the lan address only")
 both(t, f"only {LB01} allowed", 403, 200)
 t.shot("site-settings-with-the-access-list-attached")
@@ -264,19 +248,19 @@ set_acl(allow=[], include_management=True)
 cfg = t.site_config(SITE, "the config with the management tick box on")
 nodes = [n["address"] for n in (r.api("GET", "/cluster")["body"].get("nodes") or [])]
 t.proof("the node roster the config should have been built from", json.dumps(nodes, indent=2))
-rules = server_rules(cfg)
+rules = qa.server_rules(cfg)
 t.proof("the rules that apply to the whole server", rules or "[none]")
 for address in nodes:
     t.ok(f"the roster address {address} is allowed", f"allow {address};" in rules,
          rules)
-t.ok("and it still denies whatever is not matched", "deny all;" in server_rules(cfg), server_rules(cfg))
+t.ok("and it still denies whatever is not matched", "deny all;" in qa.server_rules(cfg), qa.server_rules(cfg))
 r.apply("qa: include management")
 both(t, "management networks allowed", 200, 200)
 
 t.step("turn it back off and prove the roster lines go away")
 set_acl(include_management=False)
 cfg = t.site_config(SITE, "the config with the management tick box off")
-rules = server_rules(cfg)
+rules = qa.server_rules(cfg)
 for address in nodes:
     t.ok(f"the roster address {address} is gone", f"allow {address};" not in rules,
          rules)
@@ -297,7 +281,7 @@ t = r.test("ACL-06", "Access lists", "Default allow with a deny list",
 t.step(f"default allow, deny {LB01}")
 set_acl(default_action="allow", allow=[], deny=[f"{LB01}/32"])
 cfg = t.site_config(SITE, "the config for default allow with one deny")
-rules = server_rules(cfg)
+rules = qa.server_rules(cfg)
 t.proof("the rules that apply to the whole server", rules or "[none]")
 t.ok(f"the server denies {LB01}", f"deny {LB01}/32;" in rules, rules)
 t.ok("and does not deny everything", "deny all;" not in rules, rules)
@@ -326,7 +310,7 @@ set_acl(default_action="deny", allow=[f"{LB01}/32"], deny=[f"{LB01}/32"])
 cfg = t.site_config(SITE, "the config with the same address in both lists")
 allow_at = cfg.find(f"allow {LB01}/32;")
 deny_at = cfg.find(f"deny {LB01}/32;")
-t.ok("both lines are in the config", allow_at >= 0 and deny_at >= 0, server_rules(cfg))
+t.ok("both lines are in the config", allow_at >= 0 and deny_at >= 0, qa.server_rules(cfg))
 t.ok("the allow is written first, which is what decides it", allow_at < deny_at,
      f"allow at {allow_at}, deny at {deny_at}")
 r.apply("qa: the same address in both lists")
@@ -354,8 +338,8 @@ t.proof("the access list with basic auth on", json.dumps(back, indent=2))
 t.ok("basic auth reads back as on", back.get("basic_auth_enabled") is True, back)
 t.ok("and the user is listed", "qa-visitor" in (back.get("basic_auth_users") or []), back)
 cfg = t.site_config(SITE, "the config with basic auth on")
-t.ok("the server asks for a password", "auth_basic " in server_rules(cfg), server_rules(cfg))
-t.ok("and points at a password file", "auth_basic_user_file" in server_rules(cfg), server_rules(cfg))
+t.ok("the server asks for a password", "auth_basic " in qa.server_rules(cfg), qa.server_rules(cfg))
+t.ok("and points at a password file", "auth_basic_user_file" in qa.server_rules(cfg), qa.server_rules(cfg))
 r.apply("qa: basic auth on")
 
 import base64 as _b64
@@ -426,9 +410,9 @@ set_acl(default_action="deny", allow=["203.0.113.7/32"], deny=[],
         use_real_ip=True, real_ip_header="X-Forwarded-For",
         real_ip_from=[f"{LB01}/32"])
 cfg = t.site_config(SITE, "the config that trusts a forwarded address")
-t.ok("the config names the trusted proxy", f"set_real_ip_from {LB01}/32;" in cfg, server_rules(cfg))
-t.ok("and names the header it reads", "real_ip_header X-Forwarded-For;" in cfg, server_rules(cfg))
-t.ok("and reads the chain from our end", "real_ip_recursive on;" in cfg, server_rules(cfg))
+t.ok("the config names the trusted proxy", f"set_real_ip_from {LB01}/32;" in cfg, qa.server_rules(cfg))
+t.ok("and names the header it reads", "real_ip_header X-Forwarded-For;" in cfg, qa.server_rules(cfg))
+t.ok("and reads the chain from our end", "real_ip_recursive on;" in cfg, qa.server_rules(cfg))
 r.apply("qa: trusted forwarded address")
 
 claimed = get(LB01, headers={"X-Forwarded-For": "203.0.113.7"})
@@ -465,7 +449,7 @@ set_acl(real_ip_from=[f"{LOOPBACK}/32"])
 cfg = t.site_config(SITE, "the config trusting only the loopback address")
 t.ok(f"the config trusts {LOOPBACK} and not {LB01}",
      f"set_real_ip_from {LOOPBACK}/32;" in cfg and f"set_real_ip_from {LB01}/32;" not in cfg,
-     server_rules(cfg))
+     qa.server_rules(cfg))
 r.apply("qa: forwarded address from an untrusted source")
 
 spoof = get(LB01, headers={"X-Forwarded-For": "203.0.113.7"})
@@ -494,7 +478,7 @@ t = r.test("ACL-12", "Access lists", "Trusting every address, and what it costs"
 t.step("set the trusted proxy list to 0.0.0.0/0")
 set_acl(real_ip_from=["0.0.0.0/0"])
 cfg = t.site_config(SITE, "the config trusting every address")
-t.ok("the config carries the wildcard", "set_real_ip_from 0.0.0.0/0;" in cfg, server_rules(cfg))
+t.ok("the config carries the wildcard", "set_real_ip_from 0.0.0.0/0;" in cfg, qa.server_rules(cfg))
 r.apply("qa: the wildcard trusted proxy")
 anyone = get(LB01, headers={"X-Forwarded-For": "203.0.113.7"})
 t.proof("a source that was not named, claiming an allowed address", qa.summarise(anyone))
@@ -580,30 +564,75 @@ t.close()
 # ---------------------------------------------------------------- ACL-15
 
 t = r.test("ACL-15", "Access lists", "A management only site",
-           "Switch a site to management access only and prove the config is "
-           "built from the roster with a deny on the end.",
+           "Switch a site to management access only and prove the allow lines "
+           "are built from the node roster with a deny on the end, and that "
+           "the fleet's own addresses still get in.",
            "The tick box for a site nobody outside the fleet should ever see.  "
            "It is a different code path from an access list and does not use "
            "one at all.",
-           "The config allows every node and every management network and then "
-           "denies the rest.")
+           "Every node and every management network is allowed, everything "
+           "else is denied, and both of this suite's addresses get through.")
 t.step("switch the site to management access only")
 res = r.api("PUT", f"/hosts/{SID}", {"admin_only": True})
 t.ok("the site accepted it", res["status"] == 200, res)
 cfg = t.site_config(SITE, "the config for a management only site")
-rules = server_rules(cfg)
+rules = qa.server_rules(cfg)
 t.proof("the rules that apply to the whole server", rules or "[none]")
 for address in nodes:
     t.ok(f"the roster address {address} is allowed", f"allow {address};" in rules, rules)
 t.ok("and everything else is denied", "deny all;" in rules, rules)
 r.apply("qa: management only site")
 both(t, "management only site, from inside the management networks", 200, 200)
-t.note("both of this harness's source addresses are inside this fleet's "
-       "management networks, so the refusal side of this cannot be measured "
-       "from here.  Needs a person on an outside address.")
-t.step("switch it back")
-r.api("PUT", f"/hosts/{SID}", {"admin_only": False})
-r.apply("qa: management only off again")
+
+# The refusal half needs a source address outside every management network,
+# and this suite has none.  It runs in the node's own network namespace, so
+# every address it can use is one of the node's, and the roster puts every
+# address a node has on the allow list.  Putting a spare address on the
+# loopback does not help either: that just makes it another node address, and
+# the fleet allowed it within a minute.  Found out the hard way.
+#
+# So the site is left switched on, and t19_outside_address.py finishes the
+# test from a container on a bridge network, which is a genuine outsider.
+# Everything it needs to judge its own answer goes in this file, the rules
+# included, so it can prove it was not on the list before it believes a
+# refusal.
+# A control site alongside it, open to everybody, so the outsider can prove
+# it reached this nginx at all.  Without one, a 403 from a single site could
+# just as well be a name that resolves nowhere, a site that is down, or a
+# container that cannot route to the node.
+CONTROL = "qa-acl-open"
+CONTROL_HOST = f"{CONTROL}.{qa.DOMAIN}"
+old_control = find("hosts", CONTROL)
+if old_control:
+    r.api("DELETE", f"/hosts/{old_control['id']}")
+res = r.api("POST", "/hosts",
+            {"name": CONTROL, "server_names": [CONTROL_HOST], "mode": "static",
+             "document_root": qa.STATIC_DIR, "listen_http": True,
+             "listen_https": False, "force_https": False})
+t.ok("the open control site was created", res["status"] in (200, 201), res)
+r.apply("qa: the open control site next to the locked one")
+t.proof("the open control site, asked from inside the fleet",
+        qa.summarise(qa.probe(CONTROL_HOST, "/", ip=LB01, scheme="http")))
+
+HANDOFF = pathlib.Path("/qa/evidence/outside-handoff.json")
+HANDOFF.write_text(json.dumps({
+    "site": SITE,
+    "hostname": HOST,
+    "node": LB01,
+    "server_rules": rules,
+    "expect": 403,
+    "control_site": CONTROL,
+    "control_hostname": CONTROL_HOST,
+    "control_expect": 200,
+    "why": "a site set to management access only, asked for by somebody who "
+           "is not the management, with an open site beside it so the "
+           "outsider can show it reached this nginx",
+}, indent=2))
+t.step("left switched on, with the rules handed to t19_outside_address.py")
+t.note("the refusal half is measured by t19_outside_address.py, which runs "
+       "from outside the node's own network.  This suite cannot be an "
+       "outsider: every address it has is one of the node's, and every "
+       "address a node has is on the roster, so it is always on the list.")
 t.close()
 
 

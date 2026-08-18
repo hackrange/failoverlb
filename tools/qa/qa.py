@@ -18,6 +18,7 @@ import datetime
 import hashlib
 import hmac
 import http.client
+import ipaddress
 import json
 import os
 import pathlib
@@ -75,7 +76,7 @@ def totp(secret):
 
 def probe(hostname, path="/", ip=None, scheme="https", port=None,
           method="GET", headers=None, body=None, timeout=15,
-          follow=False, alpn=None):
+          follow=False, alpn=None, source=None):
     """
     One request straight at a node, with the Host header and SNI we choose.
 
@@ -83,6 +84,12 @@ def probe(hostname, path="/", ip=None, scheme="https", port=None,
     headers, must not follow a redirect unless asked, and must be able to ask
     for a name the DNS does not point here.  A redirect followed silently is how
     a check goes green against a sign in page.
+
+    `source` picks which of this box's addresses the connection goes out from,
+    which is the only way to test a rule that decides on where somebody is
+    coming from.  Every address this harness normally has is inside the fleet's
+    own management networks, so without it there is no way to be an outsider
+    and the refusal half of every management rule goes untested.
     """
     ip = ip or NODE_IP
     port = port or (443 if scheme == "https" else 80)
@@ -91,7 +98,8 @@ def probe(hostname, path="/", ip=None, scheme="https", port=None,
     headers.setdefault("User-Agent", "failover-lb-qa/1.0")
     headers.setdefault("Connection", "close")
 
-    sock = socket.create_connection((ip, port), timeout)
+    sock = socket.create_connection((ip, port), timeout,
+                                    source_address=(source, 0) if source else None)
     negotiated = None
     if scheme == "https":
         ctx = ssl.create_default_context()
@@ -119,7 +127,9 @@ def probe(hostname, path="/", ip=None, scheme="https", port=None,
             pass
 
     out = {
-        "request": f"{method} {path} HTTP/1.1  ->  {scheme}://{ip}:{port}  Host: {hostname}",
+        "request": (f"{method} {path} HTTP/1.1  ->  {scheme}://{ip}:{port}  "
+                    f"Host: {hostname}"
+                    + (f"  from {source}" if source else "")),
         "request_headers": headers,
         "status": resp.status,
         "reason": resp.reason,
@@ -252,6 +262,54 @@ def dns_query(name, ip, port=5353, qtype=1, timeout=5):
         "answers": answers,
         "raw": data.hex(),
     }
+
+
+def covered_by(address, rules):
+    """
+    Would any allow line in this config let that address through.
+
+    Asked of the config the product itself rendered, rather than of a list
+    written down in a test.  A test that refuses an address has to know the
+    address was not on the list, or the refusal proves nothing, and the list is
+    generated from the node roster so it is not something a test can predict.
+    """
+    who = ipaddress.ip_address(address)
+    for line in rules.splitlines():
+        word = line.strip()
+        if not word.startswith("allow "):
+            continue
+        target = word[6:].rstrip(";").strip()
+        if target == "all":
+            return True
+        try:
+            if who in ipaddress.ip_network(target, strict=False):
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def server_rules(cfg):
+    """
+    Only the access control lines that apply to the whole server.
+
+    Searching a whole config file is how a check passes for the wrong reason,
+    and it did twice in the access list round.  Every site config already
+    carries `deny all;` inside the block that hides dotfiles, so "the site
+    denies everything" was true of a site that denied nobody.  The certificate
+    challenge and the internal error page both say `allow all;`, so "the site
+    allows nothing" was false of a site that allowed nothing.
+
+    Server level lines sit at exactly four spaces of indent and a location's at
+    eight, which is the only thing that tells them apart in a rendered file.
+    """
+    keep = ("allow ", "deny ", "auth_basic", "set_real_ip_from",
+            "real_ip_header", "real_ip_recursive")
+    return "\n".join(
+        line for line in cfg.splitlines()
+        if line.startswith("    ") and not line.startswith("     ")
+        and line.strip().startswith(keep)
+    )
 
 
 def summarise(p, body_chars=400):
