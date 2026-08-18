@@ -211,6 +211,31 @@ AUTH_MODES = ("local", "both", "oidc")
 # snapshot so they travel on every apply.
 FLEET_KEYS = tuple(k for k, spec in EDITABLE.items() if spec.get("fleet"))
 
+# Internal values that still have to be the same on every node.
+#
+# `INTERNAL` below is deliberately off the settings page, and for most of it
+# that is the end of the story: it is this node's own bookkeeping.  These two
+# are not.  They describe what the *fleet* is, and a node that does not have
+# them makes the wrong decision the moment it becomes the active one.
+#
+# `waf_module` is the one that bites.  Every rebuild reads it so an unrelated
+# version upgrade does not quietly drop the WAF module, which is exactly the
+# promise its own comment makes further down.  That promise only held on the
+# node somebody happened to click on.  Fail over to the other node, upgrade
+# nginx from there, and it rebuilds without the module; every site running the
+# WAF then fails its config test, and since an apply is all or nothing that is
+# the whole fleet unable to apply anything.  Found on 18 August, on a fleet
+# where lb01 said True and lb02 said None.
+#
+# They travel in the config snapshot with everything else, so a standby that
+# has never been clicked on still knows what the fleet is.
+INTERNAL_FLEET_KEYS = ("waf_module", "waf_crs_last_install")
+
+# What may cross the wire in a snapshot, in one place, because capture and
+# restore reading two different lists is how a setting travels out and is
+# refused on arrival.
+SNAPSHOT_KEYS = FLEET_KEYS + INTERNAL_FLEET_KEYS
+
 
 # Settings the app keeps for itself.  Not on the GUI's editable list, because
 # nobody should be typing these, but they still need somewhere to live that
@@ -427,7 +452,7 @@ def capture_fleet() -> list:
     the far end would store and never be able to read.
     """
     out = []
-    for key in FLEET_KEYS:
+    for key in SNAPSHOT_KEYS:
         with session_scope() as session:
             row = session.query(SystemSetting).filter(
                 SystemSetting.key == key).first()
@@ -461,7 +486,7 @@ def restore_fleet(rows) -> int:
     # lines up, so the builtin is not the builtin in here.  The check caught
     # this, which is the only reason it is not still sitting in the one code
     # path that runs during a failover and nowhere else.
-    allowed = {*FLEET_KEYS}
+    allowed = {*SNAPSHOT_KEYS}
     written = 0
     with session_scope() as session:
         for row in rows:

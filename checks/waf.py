@@ -25,8 +25,8 @@ import sys
 
 from app.core.render import CRS_ROOT, _safe_name
 from app.db import session_scope
-from app.models import (WafExclusion, WafProfile, WafSession, WafSurfaceEntry,
-                        VirtualHost, json_set)
+from app.models import (SystemSetting, WafExclusion, WafProfile, WafSession,
+                        WafSurfaceEntry, VirtualHost, json_set)
 from app.web.routes_api import render_current
 
 SOCKET = "/run/nginxmgr/agent.sock"
@@ -575,6 +575,60 @@ else:
           f"waf_mode is {_mode}")
     check("and no session was left running",
           not _left, [(w.id, w.started_at) for w in _left])
+
+# =============================================================================
+print()
+print("  the setting that says this fleet wants the module")
+
+# It records that nginx here is built with the WAF, and every later rebuild
+# reads it so an unrelated version upgrade does not quietly drop the module.
+# That promise only held on the node somebody clicked on: the key lives in the
+# internal list, the snapshot only carried the editable fleet keys, so the
+# other node never heard about it.
+#
+# The cost is not subtle.  Fail over, upgrade nginx from the node that now
+# holds the role, and it rebuilds without the module.  Every site running the
+# WAF then fails its config test, and an apply is all or nothing, so nothing
+# on the fleet can be applied at all.
+# Imported by name rather than assumed, so a build without the fix fails this
+# with a sentence instead of a traceback.  A check that dies on an ImportError
+# tells whoever runs it that the check is broken, when what is broken is the
+# thing it was written to catch.
+try:
+    from app.core.settings_store import (INTERNAL_FLEET_KEYS, SNAPSHOT_KEYS,
+                                         capture_fleet, restore_fleet)
+except ImportError:
+    from app.core.settings_store import FLEET_KEYS, capture_fleet, restore_fleet
+
+    INTERNAL_FLEET_KEYS, SNAPSHOT_KEYS = (), FLEET_KEYS
+
+check("waf_module is on the list of things a snapshot carries",
+      "waf_module" in SNAPSHOT_KEYS, SNAPSHOT_KEYS)
+
+_captured = {row["key"] for row in capture_fleet()}
+with session_scope() as _s:
+    _has_row = _s.query(SystemSetting).filter(
+        SystemSetting.key == "waf_module").first() is not None
+
+if _has_row:
+    check("and a snapshot taken here really contains it",
+          "waf_module" in _captured, sorted(_captured))
+else:
+    skip("and a snapshot taken here really contains it",
+         "this node has no waf_module row yet, so there is nothing to capture")
+
+# Capture and restore reading two different lists is how a setting travels out
+# and is refused on arrival, which is silent at both ends.  Asserted on the
+# lists themselves rather than by restoring anything: a check that proved this
+# by writing the keys would have to write a value, and the only value it could
+# safely invent is the one that wipes the real one.
+import inspect as _inspect
+
+_restore_src = _inspect.getsource(restore_fleet)
+check("what a snapshot may carry is the same list at both ends",
+      set(INTERNAL_FLEET_KEYS) <= set(SNAPSHOT_KEYS)
+      and "SNAPSHOT_KEYS" in _restore_src,
+      "capture and restore are not reading the same list")
 
 print()
 failed = [r for r in results if not r[1]]
