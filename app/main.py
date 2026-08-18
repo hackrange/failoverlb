@@ -21,6 +21,7 @@ import logging
 import os
 import ssl
 import sys
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -676,6 +677,7 @@ async def lifespan(app: FastAPI):
     # unreachable peer must not sit in startup waiting for a timeout.
     async def _settle_role():
         cluster = get_cluster()
+        began = time.monotonic()
         try:
             await cluster.send_heartbeats()
         except Exception as exc:
@@ -684,6 +686,18 @@ async def lifespan(app: FastAPI):
             await cluster.run_election()
         except Exception as exc:
             log.warning("the first election did not run: %s", exc)
+
+        # Worth a line of its own.  This is the window in which the node
+        # refuses config changes after a restart, and until it was measured
+        # nobody knew it was there at all: it was filed as a node that
+        # "briefly believed it was a standby" with no cause.  Saying how long
+        # it took, every time, means the next person can see it rather than
+        # deduce it.
+        with session_scope() as session:
+            me = cluster.self_node(session)
+            role = me.role.value if me else "not in the roster"
+        log.info("roles settled %.1f seconds after startup, this node is %s",
+                 time.monotonic() - began, role)
 
     asyncio.create_task(_settle_role())
 
