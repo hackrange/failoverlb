@@ -1206,6 +1206,7 @@ map $cookie_{cookie} $sticky_set_{var} {{
         if host.listen_http:
             lines.append(self._render_http_block(host, names, cfg,
                                                  cert if usable else None,
+                                                 acl,
                                                  error_lines=error_lines,
                                                  site_error=site_error,
                                                  loc_errors=loc_errors))
@@ -1300,8 +1301,20 @@ map $cookie_{cookie} $sticky_set_{var} {{
         lines.append("}")
         return "\n".join(lines)
 
-    def _render_http_block(self, host, names, cfg, cert=None, error_lines=None,
-                           site_error=None, loc_errors=None) -> str:
+    def _render_http_block(self, host, names, cfg, cert=None, acl=None,
+                           error_lines=None, site_error=None,
+                           loc_errors=None) -> str:
+        """
+        The plain http server.
+
+        The access list belongs here just as much as it does on the https
+        block, and for a long time it was only passed to that one.  A site
+        serving over http with an access list on it rendered every rule the
+        page showed on 443 and none of them on 80, so the list looked applied
+        and the site answered anybody who asked for it without the s.  Worse
+        where there is no certificate at all, because then http is the only
+        way in and the whole list was doing nothing.
+        """
         default = " default_server" if host.default_server else ""
         lines = [
             "server {",
@@ -1321,6 +1334,11 @@ map $cookie_{cookie} $sticky_set_{var} {{
         lines.append("    location ^~ /.well-known/acme-challenge/ {")
         lines.append("        root /var/www/certbot;")
         lines.append('        default_type "text/plain";')
+        # And never let an access list shut it either.  The rules below apply
+        # to the whole server block, so a site allowing one office would
+        # otherwise refuse the certificate authority and stop being able to
+        # renew.  Same reason the internal error page location says this.
+        lines.append("        allow all;")
         lines.append("        try_files $uri =404;")
         lines.append("    }")
         lines.append("")
@@ -1336,6 +1354,14 @@ map $cookie_{cookie} $sticky_set_{var} {{
         # config, which is the least surprising thing to do while somebody is
         # still in the middle of setting the site up.
         if host.force_https and host.listen_https and cert:
+            # A redirect only block never reaches _render_body, so the rules
+            # are written here instead.  An address the site does not accept
+            # has no business being told where the site really lives, and it
+            # would be refused by the https block a moment later anyway.
+            acl_lines = self._access_control(acl, host)
+            if acl_lines:
+                lines.extend(acl_lines)
+                lines.append("")
             lines.append("    location / {")
             lines.append("        return 301 https://$host$request_uri;")
             lines.append("    }")
@@ -1345,7 +1371,7 @@ map $cookie_{cookie} $sticky_set_{var} {{
                 lines.append("    # there is no https server to redirect to.  Serving over http until")
                 lines.append("    # one is issued, rather than sending everybody to a dead port.")
                 lines.append("")
-            lines.extend(self._render_body(host, cfg, tls=False,
+            lines.extend(self._render_body(host, cfg, tls=False, acl=acl,
                                            error_lines=error_lines,
                                            site_error=site_error,
                                            loc_errors=loc_errors))

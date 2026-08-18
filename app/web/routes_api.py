@@ -5684,11 +5684,26 @@ async def update_access_list(acl_id: str, request: Request,
 async def delete_access_list(acl_id: str, g: ObjectGuard = Depends(changing)):
     acl = g.get(AccessList, acl_id, "edit_access_lists")
 
-    users = g.session.query(VirtualHost).filter(VirtualHost.access_list_id == acl.id).all()
-    if users:
+    # Everything that can point at an access list, not just sites.
+    #
+    # This used to ask about sites alone, so a list protecting one path, or a
+    # tcp service, could be deleted out from under it.  The row kept its
+    # access_list_id, the id no longer existed, and the next render quietly
+    # dropped every rule: the path went from protected to public with nothing
+    # said and nothing to see on the page.  Protecting a path rather than a
+    # whole site is the normal shape for an admin area, so it was easy to
+    # reach.
+    used_by = [h.name for h in g.session.query(VirtualHost)
+               .filter(VirtualHost.access_list_id == acl.id).all()]
+    used_by += [f"{loc.host.name}{loc.path}" if loc.host else f"path {loc.path}"
+                for loc in g.session.query(Location)
+                .filter(Location.access_list_id == acl.id).all()]
+    used_by += [f"stream {s.name}" for s in g.session.query(StreamServer)
+                .filter(StreamServer.access_list_id == acl.id).all()]
+    if used_by:
         raise HTTPException(
             status_code=409,
-            detail=f"still used by: {', '.join(h.name for h in users)}",
+            detail=f"still used by: {', '.join(used_by)}",
         )
 
     name = acl.name
