@@ -34,7 +34,7 @@ ORDER = ["t01_settings", "t02_pools", "t03_sites", "t04_paths", "t05_catalog",
          "t10_geo_login", "t11_import_repair", "t12_versions_certs",
          "t13_maps_streams_cluster", "t14_gslb", "t15_failover",
          "t16_safety", "t17_access_lists", "t18_roles",
-         "t19_outside_address", "t20_waf_surface"]
+         "t19_outside_address", "t20_waf_surface", "t21_waf"]
 
 INK = RGBColor(0x1a, 0x1a, 0x1a)
 GREY = RGBColor(0x60, 0x60, 0x60)

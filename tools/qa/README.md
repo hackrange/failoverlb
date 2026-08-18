@@ -68,6 +68,12 @@ it needs into `evidence/outside-handoff.json`.  It reads its own source address
 off the socket, checks it against the allow lines the fleet really rendered,
 and only then believes a refusal.
 
+`t21_waf.py` needs the modsecurity module built into nginx and the rule set
+installed on every node.  Without them it is not worth running: `t20` covers
+what the product says when the engine is missing, and `checks/waf.py` says
+which of its own checks it had to skip.  The suite sends real attacks at a
+throwaway site and puts the site back to no firewall at the end.
+
 `t18_roles.py` creates one account per role, signs in as each in its own
 browser, and removes them at the end.  It never touches the account the harness
 signs in as or the break glass admin.  One thing that will look like a defect
@@ -115,6 +121,7 @@ chmod -R a+rX /var/www/qa-static
 | `t18_roles.py` | Viewer, operator and admin, checked twice each: the control missing from the page, and the route behind it refusing. |
 | `t19_outside_address.py` | The one thing the others cannot be: a stranger.  Runs on a bridge network and proves a management only site turns it away while the open site beside it serves it. |
 | `t20_waf_surface.py` | What the product says about a WAF its nginx cannot run: the tab hidden, both doors to the setting refusing, and every other setting still saving. |
+| `t21_waf.py` | The firewall with a real engine under it: four ordinary attacks refused, four ordinary requests served, the threshold measured, a learning round attributed, an exclusion proved. |
 | `report.py` | Turns the evidence into the test plan document. |
 | `cleanup.py` | Removes everything a run created. |
 
