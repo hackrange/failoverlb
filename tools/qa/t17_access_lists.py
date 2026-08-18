@@ -55,8 +55,18 @@ def find_acl(name):
 
 
 def set_acl(**fields):
-    """Change the access list under test and give back what came out."""
+    """
+    Change the access list under test and give back what came out.
+
+    Shouts if the save was refused.  An earlier version of this suite ignored
+    the answer, so a save that came back 400 left the list on the previous
+    test's settings and the next check measured the wrong thing while looking
+    like it had measured the right one.
+    """
     res = r.api("PUT", f"/access-lists/{ACL_ID}", fields)
+    if res["status"] != 200:
+        print(f"      !! the access list save was refused: {res['status']} "
+              f"{str(res['body'])[:200]}", flush=True)
     return res
 
 
@@ -601,6 +611,49 @@ else:
     t.ok("and that message names the path too",
          "/sub" in str(res.get("body")) or SITE in str(res.get("body")),
          res.get("body"))
+t.close()
+
+
+# ---------------------------------------------------------------- ACL-17
+
+t = r.test("ACL-17", "Access lists", "Trusting a forwarded address with nobody named",
+           "Try to turn the forwarded address setting on without naming a "
+           "single proxy, and check the tool refuses rather than saving "
+           "something that does nothing.",
+           "It is the easy half of the setting to fill in and the easy half to "
+           "forget.  With nothing named, nginx trusts no source, so the header "
+           "is ignored and every visitor is judged on the address the "
+           "connection really came from.  The tick box says otherwise, and "
+           "somebody puts a CDN in front and cannot work out why their allow "
+           "list sees the CDN.",
+           "The save is refused with a message naming the fix, and the list is "
+           "left as it was.")
+t.step("make a fresh list to try it on")
+res = r.api("POST", "/access-lists",
+            {"name": "qa_acl_inert", "allow": ["10.0.0.0/8"],
+             "default_action": "deny", "include_management": False})
+t.ok("the list was created", res["status"] in (200, 201), res)
+INERT = res["body"]["id"]
+
+t.step("turn the forwarded address setting on and name nobody")
+res = r.api("PUT", f"/access-lists/{INERT}",
+            {"use_real_ip": True, "real_ip_from": []})
+t.proof("turning it on with an empty proxy list", json.dumps(res, indent=2)[:600])
+t.ok("the save is refused", res["status"] == 400, res)
+t.ok("and the message says what to do about it",
+     "trusted proxy" in str(res.get("body")).lower(), res.get("body"))
+
+t.step("and the same save with a proxy named is accepted")
+res = r.api("PUT", f"/access-lists/{INERT}",
+            {"use_real_ip": True, "real_ip_from": [f"{LB01}/32"]})
+t.proof("the same save with a proxy named", json.dumps(res, indent=2)[:400])
+t.ok("naming a proxy makes it acceptable", res["status"] == 200, res)
+
+back = find_acl("qa_acl_inert")
+t.ok("and it reads back on with the proxy stored",
+     back.get("use_real_ip") is True and back.get("real_ip_from") == [f"{LB01}/32"],
+     back)
+r.api("DELETE", f"/access-lists/{INERT}")
 t.close()
 
 

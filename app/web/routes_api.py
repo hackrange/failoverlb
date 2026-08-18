@@ -5754,6 +5754,32 @@ def _apply_acl_fields(acl, payload: dict):
             validate_cidr(proxy)
         acl.real_ip_from = json.dumps(proxies)
 
+    # Trusting a forwarded address with nobody named to trust it from.
+    #
+    # It is not dangerous, it is inert: without a set_real_ip_from line nginx
+    # trusts no source, so the header is ignored and the rules are applied to
+    # the address the connection really came from.  Which is exactly the
+    # problem.  The tick box is on, the page says the forwarded address is
+    # being used, and it is not, so somebody puts their CDN in front and
+    # wonders why every visitor arrives wearing the CDN's address.
+    #
+    # A setting that is saved, redisplayed and does nothing is worse than no
+    # setting.  Refused here with the fix in the message, the same as the
+    # other four values this API refuses.  One access list on this fleet was
+    # already sitting in exactly this state, found by the access list round.
+    # Only when this save is actually about the forwarded address, so that an
+    # unrelated edit to a list that is already in this state is not refused
+    # for something the person did not touch.  That is the shape of bug this
+    # project has shipped twice: saving one setting undoing another.
+    touched = "use_real_ip" in payload or "real_ip_from" in payload
+    if touched and acl.use_real_ip and not acl.trusted_proxies():
+        raise HTTPException(
+            status_code=400,
+            detail="trusting a forwarded address needs at least one trusted "
+                   "proxy, or the header is ignored and the setting does "
+                   "nothing.  Add the address of whatever sits in front, or "
+                   "turn the setting off.")
+
     # Basic auth users.  The password is hashed here and the plain one never
     # stored, same as any other password in this tool.
     if "add_user" in payload:
