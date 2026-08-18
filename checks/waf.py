@@ -25,7 +25,7 @@ import sys
 
 from app.core.render import CRS_ROOT, _safe_name
 from app.db import session_scope
-from app.models import (WafExclusion, WafProfile, WafSurfaceEntry,
+from app.models import (WafExclusion, WafProfile, WafSession, WafSurfaceEntry,
                         VirtualHost, json_set)
 from app.web.routes_api import render_current
 
@@ -495,6 +495,86 @@ else:
     check("nginx loads a site enforcing a surface, with exclusions underneath it",
           bool(_ok) and bool(_out.get("ok")),
           (_out.get("output") or "").strip())
+
+# =============================================================================
+print()
+print("  the two doors to waf_mode, on a fleet that has no engine")
+
+# Setting waf_mode directly is refused when the module is missing.  Starting a
+# learning session writes waf_mode itself, and for a while went round that
+# check: it answered success, stored "watching" on a site that cannot watch
+# anything, and whoever ran the round exercised their whole application before
+# finding out nothing had been collected.  The stored mode was the worse half,
+# because it sits there until somebody builds the module and then that site
+# quietly starts watching.
+#
+# Both doors are asked the same question here.  On a node that does have the
+# module this says so and moves on, because then both should open.
+from fastapi.testclient import TestClient
+
+from app.catalog.registry import get_feature
+from app.core.capabilities import fleet_capabilities
+from app.models import AuthSource, User, UserRole
+
+
+def _client():
+    from app.main import create_gui_app
+    from app.web import routes_pages, routes_api, security
+
+    ghost = User(id=-1, username="check-waf", role=UserRole.ADMIN,
+                 source=AuthSource.LOCAL, enabled=True,
+                 totp_enrolled=True, must_change_password=False)
+    routes_pages.page_user = lambda request, db: ghost
+    routes_pages.require_page_user = lambda request, db: ghost
+    routes_api.get_user = lambda request, db: ghost
+    security.client_ip = lambda request: "127.0.0.1"
+    client = TestClient(create_gui_app(), raise_server_exceptions=False)
+    client.get("/")
+    # Header and cookie both.  TestClient keeps the cookie the page set in its
+    # own jar and does not put it back on the request, so a write sent with the
+    # header alone comes back "CSRF cookie missing" and every refusal below
+    # would be about the token rather than about the engine.
+    token = client.cookies.get("nfm_csrf") or ""
+    return client, {"X-CSRF-Token": token, "Cookie": f"nfm_csrf={token}"}
+
+
+_feature = get_feature("waf_mode")
+_caps = fleet_capabilities()
+_available = bool(_feature and _feature.is_available(_caps.modules, _caps.version_tuple))
+
+if _available:
+    skip("both doors to waf_mode refuse without an engine",
+         "this fleet has the module, so both doors should open.  Run this on a "
+         "node without it to check the refusals.")
+else:
+    _client_, _head = _client()
+
+    _direct = _client_.request("PUT", f"/api/hosts/{TARGET_ID}",
+                               json={"settings": {"waf_mode": "watching"}},
+                               headers=_head)
+    check("setting waf_mode directly is refused", _direct.status_code == 400,
+          f"{_direct.status_code} {_direct.text[:200]}")
+
+    _session = _client_.request(
+        "POST", f"/api/waf/sessions/{TARGET_ID}/start",
+        json={"addresses": ["203.0.113.7/32"], "note": "checks/waf.py"},
+        headers=_head)
+    check("starting a learning session is refused too",
+          _session.status_code == 400,
+          f"{_session.status_code} {_session.text[:300]}")
+    check("and the refusal says what would have to happen",
+          "modsecurity" in _session.text.lower(), _session.text[:300])
+
+    with session_scope() as _s:
+        _host = _s.get(VirtualHost, TARGET_ID)
+        _mode = (_host.setting_map().get("waf_mode") or "off")
+        _left = (_s.query(WafSession)
+                 .filter(WafSession.host_id == TARGET_ID,
+                         WafSession.ended_at.is_(None)).all())
+    check("the site was not left with a mode it cannot honour", _mode == "off",
+          f"waf_mode is {_mode}")
+    check("and no session was left running",
+          not _left, [(w.id, w.started_at) for w in _left])
 
 print()
 failed = [r for r in results if not r[1]]

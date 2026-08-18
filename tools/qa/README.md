@@ -114,6 +114,7 @@ chmod -R a+rX /var/www/qa-static
 | `t17_access_lists.py` | Allow and deny lists, basic auth and the forwarded address settings, each judged by a real request from two different source addresses. |
 | `t18_roles.py` | Viewer, operator and admin, checked twice each: the control missing from the page, and the route behind it refusing. |
 | `t19_outside_address.py` | The one thing the others cannot be: a stranger.  Runs on a bridge network and proves a management only site turns it away while the open site beside it serves it. |
+| `t20_waf_surface.py` | What the product says about a WAF its nginx cannot run: the tab hidden, both doors to the setting refusing, and every other setting still saving. |
 | `report.py` | Turns the evidence into the test plan document. |
 | `cleanup.py` | Removes everything a run created. |
 

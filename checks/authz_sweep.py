@@ -63,6 +63,25 @@ def check(name, ok, detail=""):
         print(f"          {detail[:200]}")
 
 
+def signed(client):
+    """
+    The headers that make a write look like it came from the real page.
+
+    The token has to go in a **header and a cookie**.  TestClient keeps the
+    cookie the page set in its own jar and does not put it back on the request,
+    so a write sent with the header alone is refused for having no cookie, and
+    a refusal is what most of this file is looking for.  Every check here was
+    therefore passing on the CSRF guard rather than on the role, which is the
+    failure mode this folder's README calls out at the top: a pass that touched
+    nothing.
+
+    The permission model turned out to be sound underneath it, so nothing here
+    changed its verdict.  It could just as easily have gone the other way.
+    """
+    token = client.cookies.get("nfm_csrf") or ""
+    return {"X-CSRF-Token": token, "Cookie": f"nfm_csrf={token}"}
+
+
 def client_as(role):
     """A signed in client for one role, with a user that never reaches the database."""
     from app.main import create_gui_app
@@ -86,25 +105,33 @@ def main():
     client, _ghost = client_as(UserRole.VIEWER)
     # Get a token the honest way, so a refusal is about the role and not the token.
     client.get("/")
-    token = client.cookies.get("nfm_csrf") or ""
+    head = signed(client)
 
     for method, path, body in WRITES:
-        response = client.request(method, path, json=body,
-                                  headers={"X-CSRF-Token": token})
+        response = client.request(method, path, json=body, headers=head)
         refused = response.status_code in (401, 403, 404)
         check(f"viewer {method} {path} -> {response.status_code}", refused,
               f"a viewer got through: {response.text[:160]}")
+        # And refused for the reason this file is about.  Without this the
+        # check passes on any refusal at all, including the one the missing
+        # cookie used to produce.
+        check(f"viewer {method} {path} was refused for the role, not the token",
+              "role" in response.text.lower(), response.text[:200])
 
     print()
     print("  an operator cannot do the admin only things")
     client, _ghost = client_as(UserRole.OPERATOR)
     client.get("/")
-    token = client.cookies.get("nfm_csrf") or ""
+    head = signed(client)
 
     for method, path, body in ADMIN_ONLY:
         # Form posts, because that is what these routes are.
-        response = client.request(method, path, data=body,
-                                  headers={"X-CSRF-Token": token})
+        response = client.request(method, path, data=body, headers=head)
+        if "csrf" in response.text.lower():
+            check(f"operator {method} {path} reached the permission check", False,
+                  "refused for the token rather than the role, so this proved "
+                  "nothing: " + response.text[:160])
+            continue
         if response.status_code == 404:
             check(f"operator {method} {path} -> 404", False,
                   "no such route, so this check proved nothing.  Fix the path.")

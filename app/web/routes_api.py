@@ -762,6 +762,26 @@ async def waf_session_start(host_id: int, request: Request,
     g.require("edit_sites")
     host = g.get(VirtualHost, host_id)
 
+    # There has to be an engine to learn from.
+    #
+    # This is the second door to the same setting and it was not locked.
+    # Setting waf_mode directly is refused on a fleet without the module, but
+    # starting a session writes waf_mode itself, further down, and went round
+    # the check.  It answered success, stored "watching" on a site that cannot
+    # watch anything, and the person running the round would exercise their
+    # whole application before finding out that nothing had been collected.
+    # The stored mode is the worse half: it sits there doing nothing until
+    # somebody builds the module, and then that site quietly starts watching.
+    feature = get_feature("waf_mode")
+    caps = fleet_capabilities()
+    if feature and not feature.is_available(caps.modules, caps.version_tuple):
+        raise HTTPException(
+            status_code=400,
+            detail="a learning session needs the modsecurity module, which is "
+                   "not compiled into every node's nginx.  Build it from the "
+                   "NGINX Build page first, or the session would collect "
+                   "nothing.")
+
     payload = await request.json() if await request.body() else {}
     networks, bad = parse_addresses(payload.get("addresses"))
     if bad:
