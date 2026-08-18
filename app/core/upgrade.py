@@ -293,6 +293,32 @@ class UpgradeRunner:
         else:
             return False, f"the build did not finish within {BUILD_TIMEOUT // 60} minutes"
 
+        # The module is built.  Now tell nginx it exists.
+        #
+        # Building it and loading it are two different things, and for a while
+        # only the first happened: the .so landed in the modules directory, the
+        # fleet recorded that it wanted the WAF, and nothing ever wrote the
+        # load_module line.  nginx therefore had no idea the directive existed.
+        #
+        # That is worse than a feature not working.  With the module in the
+        # build the GUI starts offering the WAF, somebody turns it on for one
+        # site, the renderer writes `modsecurity on;`, and nginx answers
+        # `unknown directive "modsecurity"`.  An apply is all or nothing, so
+        # that is the whole fleet unable to apply any config at all, from a
+        # tick box the product invited them to tick.
+        #
+        # The verb does the careful part: it refuses when the .so is missing,
+        # tests nginx afterwards, and puts the old state back if the test
+        # fails.  So a node that cannot load the module fails here rather than
+        # coming back looking healthy and breaking at the next apply.
+        wants = wants_waf_module()
+        try:
+            await self._call(name, "waf_module", {"enabled": wants})
+        except (AgentError, NodeUnreachable, ClusterError) as exc:
+            return False, (
+                f"the build finished but the WAF module could not be "
+                f"{'loaded' if wants else 'unloaded'}: {exc}")
+
         # It says it worked.  Check that for ourselves rather than believing it.
         return await self._verify(name, settings_before, last_log)
 

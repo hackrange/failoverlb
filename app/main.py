@@ -192,6 +192,38 @@ async def refresh_local_state():
     except AgentError:
         pass
 
+    # If this fleet asked for the WAF module, make sure nginx has been told it
+    # exists.
+    #
+    # Building the module and loading it are two different things, and only the
+    # first used to happen: the .so landed in the modules directory, the fleet
+    # recorded that it wanted the WAF, and nothing ever wrote the load_module
+    # line.  The upgrade walk now does it as part of the build, which is the
+    # right place.  This is the way back for a node that is already in that
+    # state, so recovering does not mean rebuilding nginx from source again.
+    #
+    # Only ever loads, never unloads.  Turning the module off is a rebuild
+    # decision and belongs with the rebuild; quietly unloading it here because
+    # a setting says false could take the module out from under a site that is
+    # using it, at the worst possible moment, which is a manager restart.
+    #
+    # The verb refuses when the .so is not there, tests nginx afterwards and
+    # puts the old state back if the test fails, so the worst case here is a
+    # line in the log.
+    try:
+        from app.core.settings_store import get as _setting
+
+        if _setting("waf_module"):
+            status = await agent.call("waf_module_status")
+            if not status.get("loaded") and status.get("built"):
+                log.warning("this fleet wants the WAF module and nginx has not "
+                            "been told about it, loading it now")
+                await agent.call("waf_module", enabled=True)
+    except AgentError as exc:
+        log.warning("could not check the WAF module: %s", exc)
+    except Exception:
+        log.exception("could not check the WAF module")
+
 
 async def refresh_public_ip():
     """
