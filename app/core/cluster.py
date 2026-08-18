@@ -93,6 +93,105 @@ def adopt_peer_role(session, peer, claimed, self_name: str):
     peer.role = claimed
 
 
+def choose_winner(healthy, all_nodes, wanted):
+    """
+    Which node should be active, given who is fit and what was asked for.
+
+    Pulled out of the election so it can be tested without a cluster.  No
+    database, no clock, no side effects: a list of the nodes that are fit, the
+    full roster, and the name somebody asked for.
+
+    Gives back the winner and a reason, where the reason is empty unless a
+    request had to be passed over.
+
+    The rule, in order:
+
+      Whoever was asked for, if they are fit to take it.
+      Otherwise the highest priority among the fit, ties broken on name so
+      every node works out the same answer without having to agree first.
+
+    A request that cannot be honoured is passed over rather than obeyed, which
+    is what keeps automatic failover working: the node somebody chose dying
+    must not stop the other one taking over.
+    """
+    if not healthy:
+        return None, ""
+
+    winner = sorted(healthy, key=lambda n: (-n.priority, n.name))[0]
+    if not wanted:
+        return winner, ""
+
+    choice = next((n for n in healthy if n.name == wanted), None)
+    if choice is not None:
+        return choice, ""
+
+    if any(n.name == wanted for n in all_nodes):
+        return winner, (f"{wanted} was asked to be the active node and is not "
+                        f"in a fit state, so {winner.name} takes it until that "
+                        f"changes")
+    return winner, (f"{wanted} was asked to be the active node and there is no "
+                    f"such node, so {winner.name} takes it")
+
+
+def preferred_active():
+    """
+    Which node somebody asked to be active, and when they asked.
+
+    Empty name means nobody asked, and the election falls back to priority the
+    way it always did.
+    """
+    from app.core import settings_store
+
+    name = (settings_store.get("preferred_active_node") or "").strip()
+    try:
+        at = float(settings_store.get("preferred_active_at") or 0)
+    except (TypeError, ValueError):
+        at = 0.0
+    return name, at
+
+
+def set_preferred_active(name, actor: str = "system") -> float:
+    """Record that somebody asked for a node, or cleared the request."""
+    from app.core import settings_store
+
+    at = time.time()
+    settings_store.set("preferred_active_node", (name or "").strip(), actor)
+    settings_store.set("preferred_active_at", repr(at), actor)
+    return at
+
+
+def adopt_preferred_active(name, at) -> bool:
+    """
+    Take a peer's copy of the request when theirs is the newer one.
+
+    Both nodes hold the same single value and the newest instruction wins.
+    That is enough here: it is one scalar set by a person pressing a button,
+    not something two nodes race to write, so last one in is the right answer
+    and there is nothing to agree about beyond which came last.
+
+    Strictly newer, so two nodes with the same timestamp do not swap it back
+    and forth forever.
+    """
+    from app.core import settings_store
+
+    try:
+        their_at = float(at or 0)
+    except (TypeError, ValueError):
+        return False
+
+    mine, my_at = preferred_active()
+    if their_at <= my_at:
+        return False
+
+    theirs = (name or "").strip()
+    settings_store.set("preferred_active_node", theirs, "peer")
+    settings_store.set("preferred_active_at", repr(their_at), "peer")
+    if theirs != mine:
+        log.warning("the other node says %s is the one to be active",
+                    theirs or "nobody in particular")
+    return theirs != mine
+
+
 def looks_like_a_wipe(previous: dict, incoming: dict) -> str:
     """
     Would applying this throw away most of what is already being served.
@@ -469,7 +568,27 @@ class ClusterManager:
             if not healthy:
                 return
 
-            winner = sorted(healthy, key=lambda n: (-n.priority, n.name))[0]
+            # Priority decides it, unless somebody has said which node they
+            # want and that node is in a fit state to take it.
+            #
+            # Without this the failover button could not work at all.  It wrote
+            # the roles down and answered success, and then this election ran a
+            # few seconds later, sorted on priority and broke the tie on name,
+            # and handed the role straight back.  On an ordinary pair with equal
+            # priorities the first name always won, so the role could never be
+            # moved by hand, and the button said it had worked.
+            #
+            # The important half is the fallback.  A request only counts while
+            # the node it names is healthy, so if that node dies the election
+            # picks the ordinary winner and the fleet fails over on its own,
+            # exactly as it did before.  A request is a preference, never a pin:
+            # pinning is what forced_standby is for, and it is checked above.
+            wanted, _asked_at = preferred_active()
+            winner, passed_over = choose_winner(healthy, nodes, wanted)
+            if winner is None:
+                return
+            if passed_over:
+                log.warning("%s", passed_over)
 
             promoted = False
             for node in nodes:
@@ -545,21 +664,54 @@ class ClusterManager:
             log.error("could not restore the config after being promoted: %s", exc)
 
     async def failover_to(self, target_name: str, actor: str = "system"):
-        """Hand active over to a specific node, by hand."""
-        with session_scope() as session:
-            target = session.query(Node).filter(Node.name == target_name).first()
-            if not target:
-                raise ClusterError(f"there is no node called {target_name}")
-            if target.forced_standby:
-                raise ClusterError(f"{target_name} is pinned to standby, unpin it first")
-            if not _recently_seen(target, self.settings.node_dead_after) and not target.is_self:
-                raise ClusterError(f"{target_name} is not answering, so it cannot take over")
+        """
+        Hand active over to a specific node, by hand.
 
-            for node in session.query(Node).all():
-                node.role = NodeRole.ACTIVE if node.name == target_name else NodeRole.STANDBY
+        An empty target means go back to letting the election decide.
 
-            session.commit()
-            log.warning("%s made %s the active node", actor, target_name)
+        This records what was asked for and then runs an election, rather than
+        writing the roles itself.  Writing them itself is what it used to do,
+        and the next election overwrote them a few seconds later, so the button
+        reported success and the role went straight back where it came from.
+        One place decides who is active, and this tells it what somebody wants.
+
+        The request outlives a reboot and outlives the node going away, and
+        that is deliberate: it is a statement about how the fleet should run,
+        not a nudge.  Failover away from the chosen node still happens on its
+        own when that node is not fit, because the election treats the request
+        as a preference and drops it the moment it cannot be honoured.  Coming
+        back is the other half of the same rule, so a node that was chosen and
+        then rebooted takes the role again when it returns.  Clear the request
+        to stop that.
+        """
+        wanted = (target_name or "").strip()
+
+        if wanted:
+            with session_scope() as session:
+                target = session.query(Node).filter(Node.name == wanted).first()
+                if not target:
+                    raise ClusterError(f"there is no node called {wanted}")
+                if target.forced_standby:
+                    raise ClusterError(
+                        f"{wanted} is pinned to standby, unpin it first")
+                if (not _recently_seen(target, self.settings.node_dead_after)
+                        and not target.is_self):
+                    raise ClusterError(
+                        f"{wanted} is not answering, so it cannot take over")
+
+        set_preferred_active(wanted, actor)
+        log.warning("%s asked for %s to be the active node", actor,
+                    wanted or "whichever the election picks")
+
+        # Settle it here rather than waiting up to a full election interval,
+        # and tell the other node at once rather than waiting for the next
+        # heartbeat.  Both are only about how quickly it happens; the loops
+        # would get there on their own.
+        await self.run_election()
+        try:
+            await self.send_heartbeats()
+        except Exception as exc:
+            log.warning("could not tell the other nodes straight away: %s", exc)
 
     # =========================================================================
     # Two phase apply
@@ -1183,6 +1335,7 @@ class ClusterManager:
         node's nginx state, its applied version and its public address, so the
         cluster page is never guessing.
         """
+        _wanted, _wanted_at = preferred_active()
         with session_scope() as session:
             me = self.self_node(session)
             payload = {
@@ -1191,6 +1344,13 @@ class ClusterManager:
                 "priority": self.settings.cluster_priority,
                 "applied_version": me.applied_version if me else 0,
                 "nginx_active": me.nginx_active if me else False,
+                # Who somebody asked to be active, and when.  This rides the
+                # heartbeat because it has to reach the other node in seconds:
+                # both nodes run their own election from their own database, so
+                # a request only one of them knows about is a request the other
+                # one keeps undoing.
+                "preferred_active": _wanted,
+                "preferred_active_at": _wanted_at,
                 "timestamp": time.time(),
             }
             peers = [
@@ -1235,6 +1395,10 @@ class ClusterManager:
                         except ValueError:
                             pass
                     session.commit()
+
+                if "preferred_active_at" in answer:
+                    adopt_preferred_active(answer.get("preferred_active"),
+                                           answer.get("preferred_active_at"))
 
             except NodeUnreachable as exc:
                 with session_scope() as session:

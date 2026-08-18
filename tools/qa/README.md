@@ -38,6 +38,22 @@ docker run --rm --network host -v "$PWD/tools/qa:/qa" \
 Run them in order.  `t15_failover.py` moves the active role and is deliberately
 last.
 
+Two things it needs that the others do not.  The account it signs in as has to
+exist on **every** node, because accounts replicate outward from whichever node
+is active, so a role change will otherwise remove an account that was only ever
+made on one of them and the suite loses its session half way through.  And the
+static tests in `t03` and `t04` need a directory of files on every node, which
+`QA_STATIC_DIR` points at:
+
+```bash
+mkdir -p /var/www/qa-static/sub
+echo '<h1>QA static site</h1>' > /var/www/qa-static/index.html
+echo 'body { color: #abcdef }' > /var/www/qa-static/style.css
+echo '<h1>a page in a subdirectory</h1>' > /var/www/qa-static/sub/page.html
+head -c 40000 /dev/urandom > /var/www/qa-static/blob.bin
+chmod -R a+rX /var/www/qa-static
+```
+
 ## What is here
 
 | File | What it covers |

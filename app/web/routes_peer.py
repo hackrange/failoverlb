@@ -21,7 +21,9 @@ from app.core.agent_client import AgentError, get_agent
 from app.core.cluster import (
     ClusterError,
     adopt_peer_role,
+    adopt_preferred_active,
     looks_like_a_wipe,
+    preferred_active,
     verify_peer_request,
 )
 from app.core import snapshot as snapshot_store
@@ -109,11 +111,25 @@ async def heartbeat(request: Request):
                 except ValueError:
                     pass
 
+    # Outside the session above.  Taking on the other node's copy of the
+    # request writes settings rows of its own, and nesting that inside the
+    # transaction holding the node rows is how two of these deadlock.
+    if "preferred_active_at" in payload:
+        adopt_preferred_active(payload.get("preferred_active"),
+                               payload.get("preferred_active_at"))
+
+    with session_scope() as session:
         me = session.query(Node).filter(Node.name == settings.node_name).first()
+        _wanted, _wanted_at = preferred_active()
         answer = {
             "node": settings.node_name,
             "role": me.role.value if me else "unknown",
             "priority": settings.cluster_priority,
+            # Which node somebody asked to be active.  Both nodes hold the same
+            # value and the newest instruction wins, so whichever of the two
+            # heard it first tells the other.
+            "preferred_active": _wanted,
+            "preferred_active_at": _wanted_at,
             "applied_version": me.applied_version if me else 0,
             "nginx_active": me.nginx_active if me else False,
             "nginx_config_ok": me.nginx_config_ok if me else False,

@@ -236,6 +236,19 @@ INTERNAL = {
     # something anybody should be typing.
     "waf_crs_last_install": {"type": "string", "env": None,
                              "label": "rule set last installed"},
+    # Which node somebody asked to be the active one.  Empty means nobody
+    # asked and the election decides on priority as it always did.
+    #
+    # Not on the settings page, because it is not a preference somebody types,
+    # it is the record of pressing the failover button.  It is deliberately not
+    # a fleet key either: fleet keys travel in the config snapshot, which only
+    # moves on an apply, and this has to reach the other node in seconds.  It
+    # rides the heartbeat instead, with the timestamp below deciding which of
+    # two instructions is the newer one.
+    "preferred_active_node": {"type": "string", "env": None,
+                              "label": "node asked to be active"},
+    "preferred_active_at": {"type": "string", "env": None,
+                            "label": "when that was asked for"},
 }
 
 

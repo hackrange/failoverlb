@@ -61,6 +61,7 @@ from app.models import (
     MemberState,
     Node,
     NodeRole,
+    NodeState,
     Pool,
     PoolMember,
     RateLimitZone,
@@ -3798,16 +3799,63 @@ async def make_join_token(request: Request, g: ObjectGuard = Depends(changing)):
 async def failover(request: Request, g: ObjectGuard = Depends(changing)):
     g.require("failover")
     payload = await request.json()
-    target = payload.get("node")
+    target = (payload.get("node") or "").strip()
 
     try:
         await get_cluster().failover_to(target, actor=g.user.username)
     except ClusterError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
+    # Say what is true now, and do not invent a reason for it.
+    #
+    # The first cut of this said the chosen node was "not in a fit state"
+    # whenever it was not yet active, which is wrong most of the time: moving
+    # the role takes a couple of seconds and there is a moment in the middle
+    # where neither node holds it.  Reporting that as a fault sends somebody
+    # looking for a problem that is about to fix itself.  So the only time a
+    # reason is given is when the roster actually says the node cannot take it.
+    from app.core.cluster import preferred_active
+    wanted, _asked_at = preferred_active()
+    with session_scope() as session:
+        active = session.query(Node).filter(Node.role == NodeRole.ACTIVE).first()
+        active_name = active.name if active else None
+        chosen = (session.query(Node).filter(Node.name == target).first()
+                  if target else None)
+        unfit = ""
+        if chosen is not None:
+            if chosen.forced_standby:
+                unfit = "it is pinned to standby"
+            elif chosen.state == NodeState.OFFLINE:
+                unfit = "it is not answering"
+
+    if not target:
+        message = (f"Back to the election deciding, and it has picked "
+                   f"{active_name}." if active_name else
+                   "Back to the election deciding.")
+    elif active_name == target:
+        message = f"{target} is the active node."
+    elif unfit:
+        message = (f"{target} is written down as the one to be active and "
+                   f"cannot take it yet, because {unfit}.  It will take over "
+                   f"when that changes, and until then "
+                   f"{active_name or 'the election'} holds it.")
+    else:
+        message = (f"{target} is written down as the one to be active.  Moving "
+                   f"the role takes a few seconds, so it may still be settling.")
+
     audit.record("cluster.failover", user=g.user, object_type="cluster",
-                 object_name=target, detail=f"made {target} active")
-    return {"ok": True, "active": target}
+                 object_name=target or "automatic",
+                 detail=(f"asked for {target}" if target
+                         else "went back to letting the election decide")
+                        + f", active is now {active_name}")
+    return {
+        "ok": True,
+        "requested": target or None,
+        "active": active_name,
+        "automatic": not wanted,
+        "settling": bool(target) and active_name != target and not unfit,
+        "message": message,
+    }
 
 
 @router.delete("/cluster/nodes/{node_name}")
