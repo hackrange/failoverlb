@@ -98,6 +98,24 @@ class ZoneData:
         return None
 
 
+# How long a serving loop waits for a packet before looking up to see whether
+# it has been asked to stop.
+#
+# The loops used to block forever waiting for a query.  Closing the socket from
+# another thread does not reliably wake a thread that is already inside
+# recvfrom or accept on Linux, so those threads stayed alive holding the port
+# open, and the next start could never bind: "Address already in use", with the
+# operating system's own socket list showing the port free, and no way back
+# except restarting the manager.  Waking twice a second costs nothing and means
+# the threads end when they are told to.
+POLL_SECONDS = 0.5
+
+# How long stop() waits for those threads before giving up on them.  Generous
+# next to the poll interval, because a thread that is mid answer should be
+# allowed to finish.
+STOP_TIMEOUT_SECONDS = 5.0
+
+
 class GslbServer:
     """
     Listens on UDP and TCP and answers out of the snapshot.
@@ -145,15 +163,27 @@ class GslbServer:
             return
         self._running = True
 
+        # Nothing should be left from a previous life, but say so rather than
+        # assume it: a thread still running here is the fault this timeout and
+        # the join in stop() exist to prevent, and it would otherwise show up
+        # as an unexplainable bind failure.
+        alive = [t for t in self._threads if t.is_alive()]
+        if alive:
+            log.error("%s serving thread(s) from the last run are still going, "
+                      "so this bind will probably fail", len(alive))
+        self._threads = []
+
         try:
             self._udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self._udp.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             self._udp.bind((self.address, self.port))
+            self._udp.settimeout(POLL_SECONDS)
 
             self._tcp = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self._tcp.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             self._tcp.bind((self.address, self.port))
             self._tcp.listen(64)
+            self._tcp.settimeout(POLL_SECONDS)
         except OSError as exc:
             self._running = False
             self.stats["last_error"] = str(exc)
@@ -168,8 +198,36 @@ class GslbServer:
         log.info("gslb listening on %s:%s udp and tcp", self.address, self.port)
 
     def stop(self):
+        """
+        Stop serving, and do not come back until the threads have really gone.
+
+        The order matters.  The flag goes down first, then we wait for the
+        loops to notice and end, and only then are the sockets closed.  Closing
+        them first is what the old version did, and it left threads blocked
+        inside a call on a socket that had been taken away, still holding the
+        port, so the next start could never bind and only a restart of the
+        manager cleared it.
+        """
         self._running = False
+
+        for thread in self._threads:
+            if thread is threading.current_thread():
+                continue
+            thread.join(timeout=STOP_TIMEOUT_SECONDS)
+
+        stuck = [t for t in self._threads
+                 if t.is_alive() and t is not threading.current_thread()]
+        if stuck:
+            # Worth shouting about.  Carrying on and closing underneath them is
+            # exactly the state that used to wedge the port, so if this ever
+            # appears it is the thing to look at.
+            log.error("%s serving thread(s) would not stop within %.0f seconds, "
+                      "so the port may not come free", len(stuck),
+                      STOP_TIMEOUT_SECONDS)
+
+        self._threads = []
         self._close()
+        self.stats["started_at"] = None
 
     def _close(self):
         for sock in (self._udp, self._tcp):
@@ -185,7 +243,18 @@ class GslbServer:
         while self._running:
             try:
                 raw, peer = self._udp.recvfrom(UDP_MAX_BYTES)
-            except OSError:
+            except socket.timeout:
+                # Nothing arrived in the poll interval.  Go round again and
+                # look at the flag, which is the whole point of the timeout.
+                #
+                # This has to be caught before OSError, because a timeout is a
+                # kind of OSError, and the branch below reads one as the socket
+                # having been closed and ends the thread.  Getting that order
+                # wrong stops the server answering anything at all.
+                continue
+            except (OSError, AttributeError):
+                # Closed under us, or gone entirely.  Either way there is
+                # nothing left to serve on.
                 if self._running:
                     log.debug("udp socket closed")
                 return
@@ -201,10 +270,19 @@ class GslbServer:
         while self._running:
             try:
                 conn, peer = self._tcp.accept()
-            except OSError:
+            except socket.timeout:
+                # Same as the udp side: a timeout is how this loop gets to look
+                # at the flag, and it must be caught before OSError.
+                continue
+            except (OSError, AttributeError):
                 if self._running:
                     log.debug("tcp socket closed")
                 return
+
+            # accept() on a socket with a timeout hands back a connection that
+            # has one too.  The handler sets its own, but say so here rather
+            # than leaving it to be inherited by accident.
+            conn.settimeout(None)
             threading.Thread(target=self._handle_tcp, args=(conn, peer),
                              daemon=True).start()
 

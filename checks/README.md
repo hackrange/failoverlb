@@ -62,6 +62,7 @@ docker exec -i nginx-fleet-manager python < checks/catalog_sweep.py
 | `login_watch.py` | Brute force and password spray detection: that a spray is called, that the three ordinary Monday shapes are not, and that the slow version has its own thresholds. |
 | `sbom.py` | The bill of materials still describes what this builds: regenerating matches what is committed, every version in the installer reached it, and all three layers are there. |
 | `accepted_risks.py` | The seven advisories we decided not to patch, and whether the grounds still hold: that nothing calls the vulnerable APIs, the internet facing app serves no files or forms, and the allow list is neither empty nor wide. |
+| `gslb_listener.py` | The DNS listener comes back after being stopped, rather than holding the port and never binding again. |
 | `comparison.py` | The feature comparison holds together and has not turned into a brochure: every row scores every product, the totals match the data, and we still lose the rows we lose. |
 
 ## A pass that touched nothing is not a pass
