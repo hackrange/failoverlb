@@ -77,6 +77,7 @@ catch it.
 | `accepted_risks.py` | The seven advisories we decided not to patch, and whether the grounds still hold: that nothing calls the vulnerable APIs, the internet facing app serves no files or forms, and the allow list is neither empty nor wide. |
 | `gslb_listener.py` | The DNS listener comes back after being stopped, rather than holding the port and never binding again. |
 | `rollback.py` | A rollback to an archive nginx will not load leaves the node exactly as it was, rather than parking a broken config that only shows up at the next restart.  Runs on the host, see below. |
+| `standby_message.py` | A refused apply says which of the three reasons it was, so nobody is sent to an active node that does not exist yet. |
 | `comparison.py` | The feature comparison holds together and has not turned into a brochure: every row scores every product, the totals match the data, and we still lose the rows we lose. |
 
 ## A pass that touched nothing is not a pass

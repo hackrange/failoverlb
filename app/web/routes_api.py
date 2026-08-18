@@ -37,7 +37,7 @@ from sqlalchemy.exc import OperationalError
 
 from app.core.agent_client import AgentError, get_agent
 from app.core.capabilities import fleet_capabilities, get_local_capabilities
-from app.core.cluster import ClusterError, PeerClient, get_cluster
+from app.core.cluster import ClusterError, PeerClient, RoleNotSettled, get_cluster
 from app.core.crypto import encrypt, new_token
 from app.core.nginx_parser import ParseError, extract_settings, parse, quick_check
 from app.core.render import Renderer, safe_name, safe_var
@@ -3441,9 +3441,17 @@ async def apply(request: Request, g: ObjectGuard = Depends(changing)):
     # started while something else is still committing gets refused by the
     # driver rather than by us.  That one is worth retrying, and saying so is
     # the whole difference between "try that again" and "the tool is broken".
+    #
+    # RoleNotSettled is the third, and it is a retry rather than a refusal: for
+    # a few seconds after a restart this node has stood itself down and no
+    # election has run yet.  A 409 there reads as "you are on the wrong box",
+    # which is what the old message said and it was not true.
     try:
         result = await apply_current_config(author=g.user.username, summary=summary,
                                             force=force)
+    except RoleNotSettled as exc:
+        log.info("apply refused, the fleet has not settled its roles yet: %s", exc)
+        raise HTTPException(status_code=503, detail=str(exc))
     except ClusterError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     except OperationalError as exc:

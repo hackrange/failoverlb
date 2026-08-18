@@ -654,6 +654,39 @@ async def lifespan(app: FastAPI):
 
     start_scheduler()
 
+    # Settle who is active now, rather than up to one election interval from
+    # now.
+    #
+    # register_self stands a returning node down to standby on purpose, and
+    # until an election has run this node refuses config changes.  The election
+    # job is on an interval and an interval job does not fire until one whole
+    # interval has passed, so that refusal lasts about twice the heartbeat
+    # every time the container restarts, which is every upgrade.  Somebody
+    # applying in that window used to be told to go and use the active node,
+    # and there was no active node to go to.
+    #
+    # A heartbeat first, then the election.  The other way round the election
+    # judges the peers on last_heartbeat values written before this node went
+    # down, so a node that has been away a while sees a peer that is alive and
+    # serving as dead and can take the role off it for a couple of seconds.
+    # Asking the peers first costs one round trip and means the first election
+    # runs on better information than the periodic ones do.
+    #
+    # In the background, because it talks to the network and a node with an
+    # unreachable peer must not sit in startup waiting for a timeout.
+    async def _settle_role():
+        cluster = get_cluster()
+        try:
+            await cluster.send_heartbeats()
+        except Exception as exc:
+            log.info("could not reach the peers before the first election: %s", exc)
+        try:
+            await cluster.run_election()
+        except Exception as exc:
+            log.warning("the first election did not run: %s", exc)
+
+    asyncio.create_task(_settle_role())
+
     if not settings.admin_networks:
         log.warning("")
         log.warning("NFM_ADMIN_ALLOWLIST is empty, so anybody who can reach port")

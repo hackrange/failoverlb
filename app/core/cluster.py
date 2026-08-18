@@ -244,6 +244,22 @@ class ClusterError(Exception):
     pass
 
 
+class RoleNotSettled(ClusterError):
+    """
+    Not the active node, and nobody else is either.
+
+    Its own type because the answer is "try again in a moment", not "go and do
+    it on the other box".  A node that has just restarted stands itself down on
+    purpose and waits to be elected, so for a few seconds after every upgrade
+    the honest answer to "why was that refused" is that the fleet has not
+    decided yet.  Telling somebody to make their change on the active node in
+    that window sends them to a node that is standing down for the same reason.
+
+    The caller turns this into a 503 with a retry in it, the same as a busy
+    database, rather than the 409 an ordinary refusal gets.
+    """
+
+
 class NodeUnreachable(ClusterError):
     """
     Could not talk to a node.
@@ -447,6 +463,68 @@ class ClusterManager:
     def is_active(self, session) -> bool:
         me = self.self_node(session)
         return bool(me and me.role == NodeRole.ACTIVE)
+
+    def not_active_error(self, session) -> ClusterError:
+        """
+        The right refusal for a node that is not active.
+
+        `is_active` gives back false for three different situations and they do
+        not deserve the same sentence:
+
+          another node holds the role, so go and do it there
+          nobody holds it yet, so wait a few seconds and do it here
+          this node has no row for itself yet, so it is not in a fleet at all
+
+        Only the first of those means "make your change on the active node",
+        and that was what every refusal used to say.  The other two are the
+        seconds after a restart, when `register_self` has deliberately stood
+        this node down to wait for an election, and following that advice sends
+        somebody to a node that is standing down as well.  Both of them are
+        worth retrying, so they come back as `RoleNotSettled`.
+
+        Where another node does hold the role, say which one and where it is.
+        "The active node" is not an instruction on a fleet where somebody has
+        to go and look up which node that is today.
+        """
+        me = self.self_node(session)
+        holder = (
+            session.query(Node)
+            .filter(Node.name != self.node_name, Node.role == NodeRole.ACTIVE)
+            .first()
+        )
+
+        if holder:
+            # Say what this node actually is.  A fresh row starts UNKNOWN and a
+            # node that has just stood down is not a standby by anybody's
+            # choosing, so "this node is a standby" is only true when the
+            # roster says so.
+            if me is not None and me.role == NodeRole.STANDBY:
+                opening = "this node is a standby, so it does not take config changes."
+            else:
+                opening = ("this node does not hold the active role, so it does "
+                           "not take config changes.")
+
+            where = ""
+            if holder.address:
+                where = f"  It is at https://{holder.address}:{holder.gui_port or 7443}"
+            return ClusterError(
+                f"{opening}  Make your change on {holder.name}, which is the "
+                f"active node.{where}"
+            )
+
+        if me is None:
+            return RoleNotSettled(
+                "this node is not in the roster yet, so it does not take config "
+                "changes.  That happens for a moment while a node starts up.  "
+                "Try again in a few seconds."
+            )
+
+        return RoleNotSettled(
+            "no node in this fleet holds the active role at the moment, so "
+            "there is nowhere to make this change yet.  That is normal for a "
+            "few seconds after a restart, while the nodes settle which of them "
+            "takes writes.  Try again in a few seconds."
+        )
 
     async def replicate_accounts(self) -> dict:
         """
@@ -749,10 +827,7 @@ class ClusterManager:
 
         with session_scope() as session:
             if not self.is_active(session):
-                raise ClusterError(
-                    "this node is a standby, so it does not take config changes.  "
-                    "Make your change on the active node."
-                )
+                raise self.not_active_error(session)
 
             latest = session.query(ConfigVersion).order_by(
                 ConfigVersion.version.desc()
