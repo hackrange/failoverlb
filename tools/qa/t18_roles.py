@@ -123,6 +123,17 @@ class AsUser:
     # reporting a defect that is the product working.
     LAST_STEP = {}
 
+    # What each account's password is right now.
+    #
+    # An account an admin creates is made with must_change_password set, so the
+    # first sign in walks through enrolment and then makes them pick a new one.
+    # That is the product being sensible, and it means the password this suite
+    # typed to create the account is not the password five seconds later.
+    # Signing the same account in again with the original is refused, and the
+    # refusal looks exactly like a defect in whatever was being tested at the
+    # time.  It cost a run.
+    PASSWORDS = {}
+
     def code(self):
         step = int(time.time()) // 30
         if self.LAST_STEP.get(self.username) == step:
@@ -139,15 +150,36 @@ class AsUser:
         self.page = self.ctx.new_page()
         self.failed = None
         self.secret = self.SECRETS.get(username)
-        self.sign_in(password)
+        self.sign_in(self.PASSWORDS.get(username, password))
 
-    def sign_in(self, password):
+    def sign_in(self, password, retry=True):
         p = self.page
         p.goto(qa.BASE + "/login", wait_until="networkidle")
         p.fill("input[name=username]", self.username)
         p.fill("input[name=password]", password)
         p.click("button[type=submit]")
         p.wait_for_load_state("networkidle")
+
+        # The product limits how many sign ins one address may try in a window,
+        # and this suite signs several accounts in one after another, so it can
+        # run into its own product doing exactly what it should.  qa.py already
+        # says this at the top: a suite that cannot start because the tool
+        # correctly refused it is a bad harness, not a finding.  Wait it out
+        # once rather than reporting a role defect that is really a limiter.
+        waited = 0
+        while "too many login attempts" in p.content() and retry:
+            if waited >= 330:
+                self.failed = "still rate limited after five minutes of waiting"
+                return
+            print(f"      .. the login rate limiter is holding us off, waited "
+                  f"{waited}s of up to 330", flush=True)
+            time.sleep(60)
+            waited += 60
+            p.goto(qa.BASE + "/login", wait_until="networkidle")
+            p.fill("input[name=username]", self.username)
+            p.fill("input[name=password]", password)
+            p.click("button[type=submit]")
+            p.wait_for_load_state("networkidle")
 
         # A brand new account has no second factor yet and is sent to set one
         # up before it is allowed anywhere.  The secret is on the page, which
@@ -177,6 +209,9 @@ class AsUser:
             p.fill("input[name=confirm_password]", NEW_PASSWORD)
             p.click("button[type=submit]")
             p.wait_for_load_state("networkidle")
+            self.PASSWORDS[self.username] = NEW_PASSWORD
+        else:
+            self.PASSWORDS.setdefault(self.username, password)
 
     @property
     def signed_in(self):

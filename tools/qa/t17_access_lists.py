@@ -70,6 +70,29 @@ def set_acl(**fields):
     return res
 
 
+def server_rules(cfg):
+    """
+    Only the access control lines that apply to the whole server.
+
+    Searching the whole file is how a check here passes for the wrong reason,
+    and it did twice.  Every site config already carries `deny all;` inside the
+    block that hides dotfiles, so "the site denies everything" was true of a
+    site that denied nobody.  The certificate challenge and the internal error
+    page both say `allow all;`, so "the site allows nothing" was false of a
+    site that allowed nothing.
+
+    Server level lines sit at exactly four spaces of indent and a location's at
+    eight, which is the only thing that tells them apart in a rendered file.
+    """
+    keep = ("allow ", "deny ", "auth_basic", "set_real_ip_from",
+            "real_ip_header", "real_ip_recursive")
+    return "\n".join(
+        line for line in cfg.splitlines()
+        if line.startswith("    ") and not line.startswith("     ")
+        and line.strip().startswith(keep)
+    )
+
+
 def get(ip, path="/", **kw):
     return qa.probe(HOST, path, ip=ip, scheme="http", **kw)
 
@@ -188,8 +211,10 @@ t.ok("the site accepted the access list", res["status"] == 200, res)
 back = r.api("GET", f"/hosts/{SID}")["body"]
 t.ok("and gives it back when asked", back.get("access_list_id") == ACL_ID, back.get("access_list_id"))
 cfg = t.site_config(SITE, "the site config with a deny all list on it")
-t.ok("the config denies everything", "deny all;" in cfg, cfg[-800:])
-t.ok("and allows nothing", "allow " not in cfg, cfg[-800:])
+rules = server_rules(cfg)
+t.proof("the rules that apply to the whole server", rules or "[none]")
+t.ok("the server denies everything", "deny all;" in rules, rules)
+t.ok("and allows nothing", "allow " not in rules, rules)
 res = r.apply("qa: default deny, nothing allowed")
 t.ok("apply succeeded", res["status"] == 200, res)
 both(t, "deny all", 403, 403)
@@ -209,15 +234,15 @@ t = r.test("ACL-04", "Access lists", "An allow list that tells two addresses apa
 t.step(f"allow {LOOPBACK} only")
 set_acl(allow=[f"{LOOPBACK}/32"])
 cfg = t.site_config(SITE, f"the config allowing {LOOPBACK} only")
-t.ok(f"the config names {LOOPBACK}", f"allow {LOOPBACK}/32;" in cfg, cfg[-800:])
+t.ok(f"the server allows {LOOPBACK}", f"allow {LOOPBACK}/32;" in server_rules(cfg), server_rules(cfg))
 r.apply("qa: allow loopback only")
 both(t, f"only {LOOPBACK} allowed", 200, 403)
 
 t.step(f"now swap it over and allow {LB01} only")
 set_acl(allow=[f"{LB01}/32"])
 cfg = t.site_config(SITE, f"the config allowing {LB01} only")
-t.ok(f"the config names {LB01}", f"allow {LB01}/32;" in cfg, cfg[-800:])
-t.ok(f"and no longer names {LOOPBACK}", f"allow {LOOPBACK}/32;" not in cfg, cfg[-800:])
+t.ok(f"the server allows {LB01}", f"allow {LB01}/32;" in server_rules(cfg), server_rules(cfg))
+t.ok(f"and no longer allows {LOOPBACK}", f"allow {LOOPBACK}/32;" not in server_rules(cfg), server_rules(cfg))
 r.apply("qa: allow the lan address only")
 both(t, f"only {LB01} allowed", 403, 200)
 t.shot("site-settings-with-the-access-list-attached")
@@ -239,19 +264,22 @@ set_acl(allow=[], include_management=True)
 cfg = t.site_config(SITE, "the config with the management tick box on")
 nodes = [n["address"] for n in (r.api("GET", "/cluster")["body"].get("nodes") or [])]
 t.proof("the node roster the config should have been built from", json.dumps(nodes, indent=2))
+rules = server_rules(cfg)
+t.proof("the rules that apply to the whole server", rules or "[none]")
 for address in nodes:
-    t.ok(f"the roster address {address} is in the config", f"allow {address};" in cfg,
-         cfg[-1500:])
-t.ok("and it still denies whatever is not matched", "deny all;" in cfg, cfg[-600:])
+    t.ok(f"the roster address {address} is allowed", f"allow {address};" in rules,
+         rules)
+t.ok("and it still denies whatever is not matched", "deny all;" in server_rules(cfg), server_rules(cfg))
 r.apply("qa: include management")
 both(t, "management networks allowed", 200, 200)
 
 t.step("turn it back off and prove the roster lines go away")
 set_acl(include_management=False)
 cfg = t.site_config(SITE, "the config with the management tick box off")
+rules = server_rules(cfg)
 for address in nodes:
-    t.ok(f"the roster address {address} is gone", f"allow {address};" not in cfg,
-         cfg[-1500:])
+    t.ok(f"the roster address {address} is gone", f"allow {address};" not in rules,
+         rules)
 r.apply("qa: management off again")
 both(t, "management networks not allowed", 403, 403)
 t.close()
@@ -269,8 +297,10 @@ t = r.test("ACL-06", "Access lists", "Default allow with a deny list",
 t.step(f"default allow, deny {LB01}")
 set_acl(default_action="allow", allow=[], deny=[f"{LB01}/32"])
 cfg = t.site_config(SITE, "the config for default allow with one deny")
-t.ok(f"the config denies {LB01}", f"deny {LB01}/32;" in cfg, cfg[-800:])
-t.ok("and does not deny everything", "deny all;" not in cfg, cfg[-800:])
+rules = server_rules(cfg)
+t.proof("the rules that apply to the whole server", rules or "[none]")
+t.ok(f"the server denies {LB01}", f"deny {LB01}/32;" in rules, rules)
+t.ok("and does not deny everything", "deny all;" not in rules, rules)
 r.apply("qa: default allow with one deny")
 both(t, "default allow, one address denied", 200, 403)
 
@@ -296,7 +326,7 @@ set_acl(default_action="deny", allow=[f"{LB01}/32"], deny=[f"{LB01}/32"])
 cfg = t.site_config(SITE, "the config with the same address in both lists")
 allow_at = cfg.find(f"allow {LB01}/32;")
 deny_at = cfg.find(f"deny {LB01}/32;")
-t.ok("both lines are in the config", allow_at >= 0 and deny_at >= 0, cfg[-900:])
+t.ok("both lines are in the config", allow_at >= 0 and deny_at >= 0, server_rules(cfg))
 t.ok("the allow is written first, which is what decides it", allow_at < deny_at,
      f"allow at {allow_at}, deny at {deny_at}")
 r.apply("qa: the same address in both lists")
@@ -324,8 +354,8 @@ t.proof("the access list with basic auth on", json.dumps(back, indent=2))
 t.ok("basic auth reads back as on", back.get("basic_auth_enabled") is True, back)
 t.ok("and the user is listed", "qa-visitor" in (back.get("basic_auth_users") or []), back)
 cfg = t.site_config(SITE, "the config with basic auth on")
-t.ok("the config asks for a password", "auth_basic " in cfg, cfg[-900:])
-t.ok("and points at a password file", "auth_basic_user_file" in cfg, cfg[-900:])
+t.ok("the server asks for a password", "auth_basic " in server_rules(cfg), server_rules(cfg))
+t.ok("and points at a password file", "auth_basic_user_file" in server_rules(cfg), server_rules(cfg))
 r.apply("qa: basic auth on")
 
 import base64 as _b64
@@ -396,9 +426,9 @@ set_acl(default_action="deny", allow=["203.0.113.7/32"], deny=[],
         use_real_ip=True, real_ip_header="X-Forwarded-For",
         real_ip_from=[f"{LB01}/32"])
 cfg = t.site_config(SITE, "the config that trusts a forwarded address")
-t.ok("the config names the trusted proxy", f"set_real_ip_from {LB01}/32;" in cfg, cfg[-900:])
-t.ok("and names the header it reads", "real_ip_header X-Forwarded-For;" in cfg, cfg[-900:])
-t.ok("and reads the chain from our end", "real_ip_recursive on;" in cfg, cfg[-900:])
+t.ok("the config names the trusted proxy", f"set_real_ip_from {LB01}/32;" in cfg, server_rules(cfg))
+t.ok("and names the header it reads", "real_ip_header X-Forwarded-For;" in cfg, server_rules(cfg))
+t.ok("and reads the chain from our end", "real_ip_recursive on;" in cfg, server_rules(cfg))
 r.apply("qa: trusted forwarded address")
 
 claimed = get(LB01, headers={"X-Forwarded-For": "203.0.113.7"})
@@ -435,7 +465,7 @@ set_acl(real_ip_from=[f"{LOOPBACK}/32"])
 cfg = t.site_config(SITE, "the config trusting only the loopback address")
 t.ok(f"the config trusts {LOOPBACK} and not {LB01}",
      f"set_real_ip_from {LOOPBACK}/32;" in cfg and f"set_real_ip_from {LB01}/32;" not in cfg,
-     cfg[-900:])
+     server_rules(cfg))
 r.apply("qa: forwarded address from an untrusted source")
 
 spoof = get(LB01, headers={"X-Forwarded-For": "203.0.113.7"})
@@ -464,7 +494,7 @@ t = r.test("ACL-12", "Access lists", "Trusting every address, and what it costs"
 t.step("set the trusted proxy list to 0.0.0.0/0")
 set_acl(real_ip_from=["0.0.0.0/0"])
 cfg = t.site_config(SITE, "the config trusting every address")
-t.ok("the config carries the wildcard", "set_real_ip_from 0.0.0.0/0;" in cfg, cfg[-900:])
+t.ok("the config carries the wildcard", "set_real_ip_from 0.0.0.0/0;" in cfg, server_rules(cfg))
 r.apply("qa: the wildcard trusted proxy")
 anyone = get(LB01, headers={"X-Forwarded-For": "203.0.113.7"})
 t.proof("a source that was not named, claiming an allowed address", qa.summarise(anyone))
@@ -561,9 +591,11 @@ t.step("switch the site to management access only")
 res = r.api("PUT", f"/hosts/{SID}", {"admin_only": True})
 t.ok("the site accepted it", res["status"] == 200, res)
 cfg = t.site_config(SITE, "the config for a management only site")
+rules = server_rules(cfg)
+t.proof("the rules that apply to the whole server", rules or "[none]")
 for address in nodes:
-    t.ok(f"the roster address {address} is allowed", f"allow {address};" in cfg, cfg[-1200:])
-t.ok("and everything else is denied", "deny all;" in cfg, cfg[-1200:])
+    t.ok(f"the roster address {address} is allowed", f"allow {address};" in rules, rules)
+t.ok("and everything else is denied", "deny all;" in rules, rules)
 r.apply("qa: management only site")
 both(t, "management only site, from inside the management networks", 200, 200)
 t.note("both of this harness's source addresses are inside this fleet's "
