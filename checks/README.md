@@ -39,6 +39,19 @@ database the manager uses:
 docker exec -i nginx-fleet-manager python < checks/catalog_sweep.py
 ```
 
+**One exception: `rollback.py` runs on the host**, not in the container.
+
+```bash
+python3 checks/rollback.py
+```
+
+It checks the host agent, which is the half of this system that lives outside
+docker, and it loads the deployed `/opt/nginx-fleet-manager/nginx-mgr-agent.py`
+by path rather than the copy in the checkout.  That is deliberate: a node whose
+git is current while its agent was never replaced is a real thing that has
+happened here, and reading the file the service actually runs is the only way to
+catch it.
+
 ## What is here
 
 | Check | What it proves |
@@ -63,6 +76,7 @@ docker exec -i nginx-fleet-manager python < checks/catalog_sweep.py
 | `sbom.py` | The bill of materials still describes what this builds: regenerating matches what is committed, every version in the installer reached it, and all three layers are there. |
 | `accepted_risks.py` | The seven advisories we decided not to patch, and whether the grounds still hold: that nothing calls the vulnerable APIs, the internet facing app serves no files or forms, and the allow list is neither empty nor wide. |
 | `gslb_listener.py` | The DNS listener comes back after being stopped, rather than holding the port and never binding again. |
+| `rollback.py` | A rollback to an archive nginx will not load leaves the node exactly as it was, rather than parking a broken config that only shows up at the next restart.  Runs on the host, see below. |
 | `comparison.py` | The feature comparison holds together and has not turned into a brochure: every row scores every product, the totals match the data, and we still lose the rows we lose. |
 
 ## A pass that touched nothing is not a pass
