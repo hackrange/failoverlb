@@ -1,5 +1,5 @@
 """
-Suite 17: roles.
+Suite 18: roles.
 
 Held out of the first pass with the access lists, and for the same reason: a
 permission that is not enforced looks exactly like one that is, right up until
@@ -30,7 +30,7 @@ import time
 sys.path.insert(0, "/qa")
 import qa
 
-r = qa.Runner("t17_roles").start()
+r = qa.Runner("t18_roles").start()
 
 PASSWORD = "qa-round-password-9137"
 NEW_PASSWORD = "qa-round-password-2288"

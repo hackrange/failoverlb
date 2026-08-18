@@ -36,7 +36,20 @@ docker run --rm --network host -v "$PWD/tools/qa:/qa" \
 ```
 
 Run them in order.  `t15_failover.py` moves the active role and is deliberately
-last.
+last of the original set; `t17` and `t18` were added by the access lists and
+roles round and are safe to run after it.
+
+`t17_access_lists.py` needs **two source addresses that reach the same nginx**,
+which is what lets it prove a rule tells one address from another rather than
+just rendering.  It uses `127.0.0.1` and whatever `QA_LB01` is set to, so it has
+to run on a node rather than from a laptop.
+
+`t18_roles.py` creates one account per role, signs in as each in its own
+browser, and removes them at the end.  It never touches the account the harness
+signs in as or the break glass admin.  One thing that will look like a defect
+and is not: the product refuses a second factor code that has already been
+used, so signing the same account in twice inside one thirty second window
+fails.  The suite waits for the next window rather than reporting it.
 
 Two things it needs that the others do not.  The account it signs in as has to
 exist on **every** node, because accounts replicate outward from whichever node
@@ -74,6 +87,8 @@ chmod -R a+rX /var/www/qa-static
 | `t13_maps_streams_cluster.py` | Maps, plain TCP proxying, and both nodes really holding the same config. |
 | `t14_gslb.py` | DNS zones, records, answers, and real UDP queries against the fleet's own server. |
 | `t15_failover.py` | Moving the active role by hand, watched second by second. |
+| `t17_access_lists.py` | Allow and deny lists, basic auth and the forwarded address settings, each judged by a real request from two different source addresses. |
+| `t18_roles.py` | Viewer, operator and admin, checked twice each: the control missing from the page, and the route behind it refusing. |
 | `report.py` | Turns the evidence into the test plan document. |
 | `cleanup.py` | Removes everything a run created. |
 
