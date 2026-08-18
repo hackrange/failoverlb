@@ -1577,13 +1577,43 @@ def v_rollback(req):
             raise AgentError("there are no backups to roll back to", "not_found")
         name = backups[-1].name
 
-    restore_backup(name)
-    test = v_config_test(req)
-    if not test["ok"]:
-        return {"ok": False, "output": test["output"], "note": "that backup does not pass a config test"}
+    # Set the current folder aside before unpacking anything over it.
+    #
+    # restore_backup deletes the managed folder and moves the unpacked one into
+    # its place, and the test happens afterwards.  So a rollback to a config
+    # nginx will not load used to leave the bad config sitting on disk while
+    # nginx carried on running the good one from memory.  Nothing looked wrong
+    # until the next restart, which could be a reboot weeks later, and then the
+    # node would not come back.  This is the oh-no button, so it is the last
+    # place that should be able to leave a node in a state it cannot start
+    # from.  The apply path has always kept a copy for exactly this reason;
+    # this one did not.
+    previous = None
+    if MANAGED_DIR.exists():
+        previous = MANAGED_DIR.parent / (MANAGED_DIR.name + ".before-rollback")
+        if previous.exists():
+            shutil.rmtree(previous)
+        shutil.copytree(MANAGED_DIR, previous, symlinks=True)
 
-    rel = v_reload({})
-    return {"ok": rel["ok"], "restored": name, "output": rel.get("output", "")}
+    try:
+        restore_backup(name)
+        test = v_config_test(req)
+        if not test["ok"]:
+            if previous is not None:
+                if MANAGED_DIR.exists():
+                    shutil.rmtree(MANAGED_DIR)
+                os.rename(previous, MANAGED_DIR)
+                previous = None
+            return {"ok": False, "output": test["output"],
+                    "restored": None,
+                    "note": "that backup does not pass a config test, so it was "
+                            "put back the way it was and nothing changed"}
+
+        rel = v_reload({})
+        return {"ok": rel["ok"], "restored": name, "output": rel.get("output", "")}
+    finally:
+        if previous is not None and previous.exists():
+            shutil.rmtree(previous, ignore_errors=True)
 
 
 def v_nginx_metrics(req):

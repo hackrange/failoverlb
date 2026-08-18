@@ -15,6 +15,7 @@ import asyncio
 import base64
 import difflib
 import ipaddress
+import re as _re
 import json
 import logging
 import time
@@ -32,6 +33,8 @@ from app.config import get_settings
 from app.core import audit, certs, error_pages, hostnames, settings_store
 from app.core import repair as config_repair
 from app.core.acme import AcmeError, get_cert_manager, pick_issuing_node, resolve_domain
+from sqlalchemy.exc import OperationalError
+
 from app.core.agent_client import AgentError, get_agent
 from app.core.capabilities import fleet_capabilities, get_local_capabilities
 from app.core.cluster import ClusterError, PeerClient, get_cluster
@@ -1889,6 +1892,41 @@ async def duplicate_host(host_id: str, request: Request,
     made_cert = None
     if payload.get("create_certificate"):
         source = original.cert
+
+        # A certificate for this hostname may already exist, and the name is
+        # unique.  Creating one regardless meant an unhandled database error
+        # and a bare 500 on the clone dialog, with nothing saying why.  It is
+        # easy to reach: clone a site, delete it, clone it again, and the
+        # certificate outlives the site that was deleted.
+        #
+        # Reuse it when it is a certificate for these names, since that is the
+        # thing the tick was asking for.  Refuse clearly when it is not, rather
+        # than attaching a certificate for somewhere else.
+        existing_cert = g.session.query(Certificate).filter(
+            Certificate.name == names[0]).first()
+        if existing_cert is not None:
+            covers = set(existing_cert.domain_list() or [])
+            if covers and set(names) <= covers:
+                copy.cert_id = existing_cert.id
+                g.session.commit()
+                made_cert = {"id": existing_cert.id, "name": existing_cert.name,
+                             "domains": sorted(covers), "issued": bool(existing_cert.not_after),
+                             "reused": True}
+                out = _host_detail(copy)
+                out["certificate_created"] = made_cert
+                audit.record("site.duplicate", user=g.user, object_type="site",
+                             object_name=name,
+                             detail=f"copied from {original.name}, attached the "
+                                    f"certificate that already existed for "
+                                    f"{names[0]}")
+                return out
+            raise HTTPException(
+                status_code=409,
+                detail=(f"there is already a certificate called {names[0]}, and it "
+                        f"is for {', '.join(sorted(covers)) or 'nothing this site answers to'}.  "
+                        f"Clone without a certificate and attach the right one, "
+                        f"or rename that certificate first."))
+
         cert = Certificate(
             name=names[0],
             domains=json.dumps(names),
@@ -2019,12 +2057,48 @@ def _apply_host_fields(g, host, payload):
         # is checked, but hand written config is a much bigger door.
         if payload["config_mode"] == "raw":
             g.require("raw_config")
+
+        # Going back to the form has to take the hand written file with it.
+        #
+        # `custom_config` means two different things depending on the mode.  In
+        # raw mode it is the whole file, `server { ... }` and all.  In form mode
+        # it is a snippet pasted **inside** the generated server block, which is
+        # where the importer puts directives it could not represent.  So
+        # switching back left a complete file being injected inside a server
+        # block, nginx said `"server" directive is not allowed here`, and
+        # because an apply is all or nothing, that one site stopped the whole
+        # fleet applying anything at all.  The error named a filename, not the
+        # switch that caused it.
+        #
+        # Only when it really is a whole file.  An importer snippet is a
+        # fragment and stays, because that one is doing its job.
+        if (payload["config_mode"] == "gui"
+                and host.config_mode == "raw"
+                and _is_whole_file(host.custom_config)):
+            host.custom_config = None
+            log.info("cleared the hand written config on %s, since the form is "
+                     "driving it again", host.name)
+
         host.config_mode = payload["config_mode"]
 
     if "settings" in payload:
         host.settings = json.dumps(_validate_settings(payload["settings"], "server"))
 
     host.updated_by = g.user.username
+
+
+def _is_whole_file(text) -> bool:
+    """
+    Is this a complete config file rather than a snippet?
+
+    A `server` block at the start of a line is the tell.  A snippet meant to go
+    inside a server block never has one, and a whole file always does.  Used
+    when a site leaves raw config mode, so the file it was being served from
+    does not get pasted inside the generated block afterwards.
+    """
+    if not text:
+        return False
+    return bool(_re.search(r"(?m)^\s*server\s*\{", str(text)))
 
 
 def _validate_settings(raw, context: str) -> dict:
@@ -2054,6 +2128,15 @@ def _validate_settings(raw, context: str) -> dict:
             problems.append(f"{feature.label} cannot go in a {context} block")
             continue
         if not feature.is_available(caps.modules, caps.version_tuple):
+            # Refusing to turn something off that cannot be on is nonsense, and
+            # it used to take the whole save with it.  The GUI sends the entire
+            # settings blob, a disabled checkbox still reads as false, so every
+            # save on a fleet missing any module was refused with a message
+            # naming a feature the person had not touched.  A value that asks
+            # for nothing is accepted and dropped; only actually asking for the
+            # feature is refused.
+            if not value or value == feature.default:
+                continue
             problems.append(f"{feature.label} {feature.unavailable_reason(caps.modules, caps.version_tuple)}")
             continue
 
@@ -2419,6 +2502,19 @@ async def create_pool(request: Request, g: ObjectGuard = Depends(changing)):
     # creating and renaming cannot drift apart the way they already did once.
     name = validate_name(payload.get("name"), "pool name")
     pool = Pool(name=name)
+
+    # The Settings page calls this "the default health check interval" and says
+    # it is "only the default for a new pool".  Nothing read it, so a new pool
+    # took the hardcoded ten seconds from the column and the setting was saved,
+    # redisplayed and completely inert.  Seed it here, before the payload is
+    # applied, so anything sent explicitly still wins.
+    default_interval = settings_store.get("health_check_interval")
+    if default_interval:
+        try:
+            pool.health_check_interval = int(default_interval)
+        except (TypeError, ValueError):
+            pass
+
     _apply_pool_fields(g.session, pool, payload)
     g.session.add(pool)
     g.session.commit()
@@ -3335,8 +3431,28 @@ async def apply(request: Request, g: ObjectGuard = Depends(changing)):
         log.warning("%s applied with force, so the wipe check was skipped",
                     g.user.username)
 
-    result = await apply_current_config(author=g.user.username, summary=summary,
-                                        force=force)
+    # Two things that can go wrong here and used to come back as a bare
+    # "Internal Server Error", which tells somebody nothing and hides an
+    # answer they could have acted on.
+    #
+    # A ClusterError is a refusal with a reason in it, so it goes back as one.
+    # A locked database is the other: SQLite allows one writer, and an apply
+    # started while something else is still committing gets refused by the
+    # driver rather than by us.  That one is worth retrying, and saying so is
+    # the whole difference between "try that again" and "the tool is broken".
+    try:
+        result = await apply_current_config(author=g.user.username, summary=summary,
+                                            force=force)
+    except ClusterError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except OperationalError as exc:
+        if "database is locked" in str(exc).lower():
+            log.warning("apply refused, the database was busy: %s", exc)
+            raise HTTPException(
+                status_code=503,
+                detail="the database was busy with another change, so nothing "
+                       "was applied.  Try again in a moment.")
+        raise
 
     audit.record(
         "config.apply",
@@ -6506,10 +6622,48 @@ async def rollback(request: Request, g: ObjectGuard = Depends(changing)):
     g.require("rollback")
     payload = await request.json() if await request.body() else {}
 
+    # Take a version number as well as an archive name.
+    #
+    # Everything else in this tool speaks in version numbers: the versions list,
+    # the diff, the audit trail.  So `version` is the obvious thing to send
+    # here, and it used to be ignored: the agent fell back to the newest
+    # archive, which is the config that is already live, and the answer came
+    # back `ok: true`.  Asking to go back to a known good version and being
+    # told it worked while nothing changed is the worst possible behaviour for
+    # the one button somebody presses when they are already in trouble.
+    name = payload.get("backup")
+    wanted = payload.get("version")
+    if name is None and wanted is not None:
+        try:
+            wanted = int(wanted)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400,
+                                detail="version has to be a number")
+        try:
+            listing = await get_agent().list_backups()
+        except AgentError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        archives = [b["name"] for b in (listing.get("backups") or [])]
+        match = [a for a in archives if a.endswith(f"-v{wanted}.tar.gz")]
+        if not match:
+            have = sorted(
+                int(a.rsplit("-v", 1)[1].split(".")[0])
+                for a in archives if "-v" in a and a.rsplit("-v", 1)[1][0].isdigit()
+            )
+            raise HTTPException(
+                status_code=404,
+                detail=(f"there is no saved config for version {wanted} on this "
+                        f"node.  " + (f"There is: {', '.join(str(v) for v in have[-10:])}"
+                                      if have else "There are none at all.")))
+        name = match[0]
+
     try:
-        result = await get_agent().rollback(name=payload.get("backup"))
+        result = await get_agent().rollback(name=name)
     except AgentError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+    if wanted is not None:
+        result["version"] = wanted
 
     audit.record("config.rollback", user=g.user, object_type="config",
                  result="success" if result.get("ok") else "failed",

@@ -1692,6 +1692,7 @@ register(
     Feature(
         key="content_security_policy",
         label="Content Security Policy",
+        header_value=True,
         category="security",
         directive="",
         contexts=("server", "location"),
@@ -1755,6 +1756,7 @@ register(
     Feature(
         key="permissions_policy",
         label="Permissions policy",
+        header_value=True,
         category="security",
         directive="",
         contexts=("server", "location"),
@@ -1880,6 +1882,7 @@ register(
     Feature(
         key="custom_response_headers",
         label="Custom response headers",
+        header_value=True,
         category="headers",
         directive="",
         contexts=("server", "location"),

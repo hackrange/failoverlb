@@ -594,11 +594,35 @@ def _read_server(block, pools_by_raw_name: dict, index: int) -> dict:
     became_a_path = set()
     if len(real_locations) > 1:
         specs = []
+        # nginx refuses to start on two locations with the same path, so a
+        # config that has one cannot be copied across faithfully: doing that
+        # produced `duplicate location "/monitoring"` and, because an apply is
+        # all or nothing, the whole fleet then could not apply anything.  A
+        # config that has drifted over years is exactly the config people
+        # import, and a path written twice is one of the commonest things in
+        # one.
+        #
+        # Only for the match types nginx treats as duplicates.  Two regular
+        # expression locations may repeat, and there the first one wins rather
+        # than the config being refused, so those are left alone.
+        deduped = ("prefix", "exact", "preferential")
+        seen_paths = {}
         for l in real_locations:
             spec = _read_location(l, pools_by_raw_name, site)
-            if spec:
-                specs.append(spec)
+            if not spec:
+                continue
+            key = (spec.get("match_type") or "prefix", spec.get("path"))
+            if key[0] in deduped and key in seen_paths:
+                site["skipped"].append(
+                    f"{spec.get('path')} appeared more than once, and nginx will "
+                    f"not load a config with the same path twice.  The first one "
+                    f"was kept and the rest were left out."
+                )
                 became_a_path.add(id(l))
+                continue
+            seen_paths[key] = spec
+            specs.append(spec)
+            became_a_path.add(id(l))
         site["locations"] = specs
         if site["locations"]:
             site["notes"].append(

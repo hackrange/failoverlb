@@ -82,16 +82,33 @@ REPAIRABLE = (
 # and would otherwise loop.
 MAX_PASSES = 25
 
+# `cannot load certificate "/path/to.pem": BIO_new_file() failed ...`, and the
+# same shape for a key.  The quoted path is the only thing in the message that
+# says where the trouble is.
+# The directives that name a certificate file.  Taking out only one of a pair
+# leaves nginx complaining about the other, so all of them go together, which
+# is what "remove it and the ssl related directives" means in practice.
+_CERT_DIRECTIVES = ("ssl_certificate", "ssl_certificate_key",
+                    "ssl_trusted_certificate", "ssl_client_certificate")
+
+_CERT_TROUBLE = re.compile(
+    r'cannot load certificate(?: key)?\s+"(?P<path>[^"]+)"')
+
 
 class Complaint:
     """One thing nginx refused, placed against the file it came from."""
 
-    def __init__(self, raw, directive, rel_path, line_no, reason):
+    def __init__(self, raw, directive, rel_path, line_no, reason,
+                 cert_path=None):
         self.raw = raw
         self.directive = directive
         self.rel_path = rel_path          # e.g. sites/example.com.conf
         self.line_no = line_no            # 1 based, into the rendered file
         self.reason = reason
+        # Set when nginx complained about a certificate file rather than about
+        # a line.  That complaint carries no file and no line number, so it is
+        # placed by looking for the path instead.
+        self.cert_path = cert_path
 
     def __repr__(self):
         return f"<Complaint {self.directive} {self.rel_path}:{self.line_no}>"
@@ -114,6 +131,24 @@ def read_complaint(output: str):
             break
     if not first:
         return None
+
+    # A certificate nginx cannot read.  This one is different in shape from
+    # every other complaint here: it names a file it tried to open, and it
+    # carries no config file and no line number at all, so the usual placement
+    # by file and line finds nothing and the whole thing was reported as
+    # unrepairable.  It is also one of the commonest ways a config stops
+    # loading, since a certificate can be deleted, renamed, or simply not
+    # issued yet.
+    cert = _CERT_TROUBLE.search(first)
+    if cert:
+        return Complaint(
+            raw=first,
+            directive="ssl_certificate",
+            rel_path=None,
+            line_no=None,
+            reason=first.split("[emerg]", 1)[1].strip(),
+            cert_path=cert.group("path"),
+        )
 
     if not any(kind in first for kind in REPAIRABLE):
         return None
@@ -295,6 +330,59 @@ async def plan_repair(session, render, test) -> dict:
             # as it stands rather than keep cutting.
             return {"ok": False, "fixed": False, "changes": changes,
                     "output": output, "unrepairable": output}
+
+        # A certificate nginx cannot read is placed by the path it names rather
+        # than by a line number, because the message carries neither a file nor
+        # a line.  Everything a person typed is searched for a directive naming
+        # that file, and those lines come out.  Generated certificate lines are
+        # left alone on purpose, the same rule the rest of this follows: those
+        # come from a certificate attached on the Basics tab, and the answer
+        # there is to issue it or detach it, not to have this quietly edit the
+        # config out from under somebody.
+        if complaint.cert_path:
+            hit_any = False
+            for site in session.query(VirtualHost).all():
+                holders = [("the site", site)] + [
+                    (f"the path {loc.path}", loc) for loc in site.locations]
+                for where, holder in holders:
+                    current = holder.custom_config or ""
+                    if complaint.cert_path not in current:
+                        continue
+                    kept = []
+                    for line in current.splitlines():
+                        bare = line.strip()
+                        if (complaint.cert_path in bare
+                                and bare.split(" ")[0] in _CERT_DIRECTIVES
+                                and not bare.startswith("#")):
+                            kept.append(f"# {line}    # taken out by the config "
+                                        f"repair: {complaint.reason}")
+                            changes.append({
+                                "site": site.name,
+                                "where": where,
+                                "directive": bare.split(" ")[0],
+                                "line": bare,
+                                "reason": complaint.reason,
+                            })
+                            hit_any = True
+                        else:
+                            kept.append(line)
+                    holder.custom_config = "\n".join(kept)
+            if not hit_any:
+                return {"ok": False, "fixed": False, "changes": changes,
+                        "output": output,
+                        "unrepairable": (
+                            f"{complaint.raw}\n\nThat certificate is not named "
+                            f"in anything anybody typed, so it comes from a "
+                            f"certificate attached to a site.  Issue it, or "
+                            f"detach it from the site, rather than editing the "
+                            f"config.")}
+            session.flush()
+            files = render()
+            ok, output = await test(files)
+            if ok:
+                return {"ok": False, "fixed": True, "changes": changes,
+                        "output": output, "unrepairable": None}
+            continue
 
         text = files.get(complaint.rel_path, "")
         offending = _line_at(text, complaint.line_no)

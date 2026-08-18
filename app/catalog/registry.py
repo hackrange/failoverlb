@@ -114,6 +114,18 @@ class Feature:
     # directive instead, the same list the renderer enforces.
     regex_values: bool = False
 
+    # The value ends up inside a quoted response header rather than as a bare
+    # directive argument.
+    #
+    # The renderer quotes these and escapes what needs escaping, so a semicolon
+    # in one cannot end the directive: esc_header_value exists for exactly that
+    # and its docstring says so.  The blanket rule below did not know, so a
+    # Content Security Policy could never be saved, because every CSP ever
+    # written is a list separated by semicolons and so is the placeholder in
+    # the field itself.  Only a newline is refused here, which is the one thing
+    # quoting does not survive.
+    header_value: bool = False
+
     # Which module has to be compiled in.  "core" means it is always there.
     module: str = "core"
 
@@ -341,8 +353,16 @@ def validate_value(feature: Feature, value) -> Optional[str]:
 
     # First and most important.  Nothing that could end the directive early and
     # start writing its own config ever gets through, whatever type it is.
-    if isinstance(value, str) and NO_BREAKOUT_RE.search(value):
-        return "cannot contain ; { } backslashes or line breaks"
+    #
+    # A header value is the exception, and it is quoted and escaped by the
+    # renderer rather than pasted in raw, so the only thing that still breaks
+    # out of it is a line break.
+    if isinstance(value, str):
+        if feature.header_value:
+            if re.search(r"[\n\r]", value):
+                return "cannot contain a line break"
+        elif NO_BREAKOUT_RE.search(value):
+            return "cannot contain ; { } backslashes or line breaks"
 
     t = feature.type
 
@@ -407,6 +427,12 @@ def validate_value(feature: Feature, value) -> Optional[str]:
                 problem = _rule_problem(v)
                 if problem:
                     return problem
+            elif feature.header_value:
+                # Quoted and escaped when it is written, so the only thing left
+                # that breaks out is a line break.  A Set-Cookie has semicolons
+                # in it by definition.
+                if re.search(r"[\n\r]", v):
+                    return "an entry cannot contain a line break"
             elif NO_BREAKOUT_RE.search(v):
                 return "entries cannot contain ; { } backslashes or line breaks"
         return None
@@ -414,6 +440,11 @@ def validate_value(feature: Feature, value) -> Optional[str]:
     if t in ("string", "text"):
         if feature.pattern and not re.match(feature.pattern, str(value)):
             return f"does not match the expected format: {feature.pattern}"
+        # A header value has already been checked for the one thing that breaks
+        # a quoted argument, and the safe character list has no semicolon in
+        # it, which is the character these settings are made of.
+        if feature.header_value:
+            return None
         if t == "string" and not SAFE_TEXT_RE.match(str(value)):
             return "has characters in it we will not put in a config file"
 

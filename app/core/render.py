@@ -1353,18 +1353,24 @@ map $cookie_{cookie} $sticky_set_{var} {{
         lines.append("}")
         return "\n".join(lines)
 
-    def _tls_default(self, cfg, key):
+    def _catalog_default(self, cfg, key):
         """
-        A cipher setting, falling back to what the catalog says the default is.
+        A setting, falling back to what the catalog says the default is.
 
-        Leaving these unset does not mean "no preference", it means nginx uses
-        its own built in list, which is older and looser than the one the help
-        text on the page calls the default.  So a site nobody touched ran
-        weaker ciphers than the GUI said it did, and the only way to get the
-        advertised list was to open the field and save it unchanged.
+        Leaving one of these unset does not mean "no preference", it means
+        nginx uses its own built in value, which is not the one the page calls
+        the default.  So a site nobody touched behaved differently from what
+        the GUI said, and the only way to get the advertised behaviour was to
+        open the field and save it unchanged.
 
         Writing the catalog default when nothing is set makes the page honest:
         what it shows is what the file gets.
+
+        It was written for the cipher lists, where the built in list is older
+        and looser than the advertised one.  gzip_types is the same trap and
+        cost more: nginx compresses only text/html on its own, so every site
+        that had never opened the field served its css, javascript, json and
+        svg uncompressed while the form listed all eleven types as the default.
         """
         value = cfg.get(key)
         if value:
@@ -1434,7 +1440,7 @@ map $cookie_{cookie} $sticky_set_{var} {{
         legacy = [p for p in proto if p in ("TLSv1", "TLSv1.1", "TLSv1.2")]
 
         if legacy:
-            ciphers = self._tls_default(cfg, "ssl_ciphers")
+            ciphers = self._catalog_default(cfg, "ssl_ciphers")
             if ciphers:
                 lines.append(f"    ssl_ciphers {ciphers};")
             lines.append("    ssl_prefer_server_ciphers off;")
@@ -1444,7 +1450,7 @@ map $cookie_{cookie} $sticky_set_{var} {{
             lines.append("    # look like it was doing something.")
 
         if "TLSv1.3" in proto:
-            suites = self._tls_default(cfg, "ssl_ciphersuites")
+            suites = self._catalog_default(cfg, "ssl_ciphersuites")
             if suites:
                 lines.append(f"    ssl_conf_command Ciphersuites {esc(suites)};")
 
@@ -1715,10 +1721,27 @@ map $cookie_{cookie} $sticky_set_{var} {{
             lines.extend(self._render_root_behavior(host, cfg))
 
         # ---- anything hand written ----
+        #
+        # This goes **inside** the server block, so it has to be a snippet.  A
+        # whole file gets refused rather than pasted, because a `server` block
+        # nested in a `server` block is config nginx will not load, and an
+        # apply is all or nothing: one site like this stops the entire fleet
+        # applying anything.  The API clears it when a site leaves raw mode,
+        # and this is the second line of defence, for a value that arrived some
+        # other way.
         if host.custom_config:
-            lines.append("    # Custom config from the manager")
-            for line in host.custom_config.splitlines():
-                lines.append(f"    {line}")
+            if re.search(r"(?m)^\s*server\s*\{", host.custom_config):
+                lines.append("    # Hand written config left out on purpose: it is a whole")
+                lines.append("    # file rather than a snippet, and a server block cannot")
+                lines.append("    # go inside a server block.  Switch the site to raw")
+                lines.append("    # config mode to use it, or trim it to the directives")
+                lines.append("    # that belong in here.")
+                log.warning("left out the hand written config on %s: it is a whole "
+                            "file rather than a snippet", host.name)
+            else:
+                lines.append("    # Custom config from the manager")
+                for line in host.custom_config.splitlines():
+                    lines.append(f"    {line}")
 
         return lines
 
@@ -2558,6 +2581,21 @@ map $cookie_{cookie} $sticky_set_{var} {{
                      for attr in self.MOUNT_ATTRIBUTES]
         out["sub_filter_rules"] = generated + [r for r in existing
                                                if r not in generated]
+
+        # The cookie half, which the links and the redirects do not cover.
+        #
+        # A backend at its own root sets `Path=/` or `Path=/app`, and a browser
+        # then sends that cookie only for that path on the hosting site.  The
+        # application is at /shop/app, so the cookie never comes back and the
+        # first thing that breaks is signing in: the login works, the next
+        # request arrives with no session, and it looks like the application is
+        # broken rather than the mount.
+        #
+        # Only when nobody has set one by hand.  A rule somebody wrote for this
+        # path is the more specific statement, the same rule the sub_filter and
+        # redirect halves already follow.
+        if not (out.get("proxy_cookie_path") or "").strip():
+            out["proxy_cookie_path"] = f"/ {mount_prefix}"
         return out
 
     def _mount_redirect_lines(self, mount_prefix, already_set=False,
@@ -2587,6 +2625,21 @@ map $cookie_{cookie} $sticky_set_{var} {{
         lines.append(f"{pad}# which carries no prefix.  Put it back on.")
         for scheme in ("http", "https"):
             lines.append(f"{pad}proxy_redirect {scheme}://$host/ {mount_prefix};")
+
+        # And the other shape, which is just as common and was missed.  Plenty
+        # of applications answer with `Location: /basket/` rather than a full
+        # URL, and RFC 7231 has allowed that since 2014.  That one does not
+        # start with a scheme, so neither rule above touches it, and the
+        # visitor is sent to /basket/ on the hosting site: straight out of the
+        # mount on the first redirect.
+        #
+        # A regular expression rather than `proxy_redirect / {mount_prefix}`,
+        # because a plain prefix would also catch a protocol relative
+        # `//other.example.net/x` and turn it into a path on this site.  The
+        # (?!/) refuses that one and leaves it alone.
+        lines.append(f"{pad}# Some backends answer with a path rather than a full")
+        lines.append(f"{pad}# URL.  Same problem, and it needs its own rule.")
+        lines.append(f"{pad}proxy_redirect ~^/(?!/)(.*)$ {mount_prefix}$1;")
         return lines
 
     def _limit_lines(self, cfg, indent=4) -> list:
@@ -2769,7 +2822,12 @@ map $cookie_{cookie} $sticky_set_{var} {{
         proxied = cfg.get("gzip_proxied", "any")
         lines.append(f"    gzip_proxied {proxied};")
 
-        types = cfg.get("gzip_types")
+        # Not cfg.get on its own.  nginx's own default is text/html and
+        # nothing else, so leaving this alone meant css, javascript, json and
+        # svg went out uncompressed on every site, while the form showed a list
+        # of eleven types and called it the default.  Every other directive in
+        # this block already falls back to the catalog; this one did not.
+        types = cfg.get("gzip_types") or self._catalog_default(cfg, "gzip_types")
         if types:
             lines.append(f"    gzip_types {' '.join(types)};")
 
@@ -2892,8 +2950,14 @@ map $cookie_{cookie} $sticky_set_{var} {{
         # and forgetting them is the failure that leaves the config valid and the
         # filter doing nothing.
         if mount:
-            loc_only = self._mount_settings(loc_only, path if path.endswith("/")
-                                            else path + "/")
+            mount_prefix = path if path.endswith("/") else path + "/"
+            loc_only = self._mount_settings(loc_only, mount_prefix)
+            # And into cfg, which is what the proxy half of the render reads.
+            # The cookie rule is written by _proxy_lines from cfg, so putting it
+            # only in loc_only left it out of the file entirely and the mount
+            # shipped without it.
+            cfg = {**cfg, **{k: v for k, v in loc_only.items()
+                             if k == "proxy_cookie_path"}}
 
         if error_choice:
             lines.extend(self._error_page_rules(

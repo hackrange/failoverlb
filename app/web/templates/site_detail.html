@@ -1323,11 +1323,26 @@ document.addEventListener("DOMContentLoaded", function () {
   // which was fine while the site tab was the only thing that had settings, and
   // is not once a path dialog is open with a set of its own: saving the site
   // would have swept the path's controls into the site's settings.
+  // A control this nginx build cannot run is drawn disabled, with the reason
+  // under it.  It is not something anybody can set, so it must not be collected
+  // and sent: a disabled checkbox still reports .checked, so http3_enabled went
+  // up as false on every save, and the server refused the whole blob because
+  // the module is missing.  The result was that on any fleet missing any
+  // module, no site setting could be saved at all, and the error named HTTP/3
+  // to somebody who was changing a timeout.
+  function controlDisabled(el) {
+    if (el.disabled) return true;
+    const kids = el.querySelectorAll("input, select, textarea");
+    return kids.length > 0 &&
+           Array.prototype.every.call(kids, function (k) { return k.disabled; });
+  }
+
   function collectSettings(root) {
     const out = {};
     (root || document).querySelectorAll("[data-setting]").forEach(function (el) {
       const key = el.getAttribute("data-setting");
       const type = el.getAttribute("data-type");
+      if (controlDisabled(el)) return;
 
       if (type === "bool") { out[key] = el.checked; return; }
       if (type === "multiselect") {
@@ -2066,6 +2081,11 @@ document.addEventListener("DOMContentLoaded", function () {
       const merged = Object.assign({}, fresh.settings || {});
       holder.querySelectorAll("[data-setting]").forEach(function (el) {
         const key = el.getAttribute("data-setting");
+        // A disabled control is not a control somebody cleared, so leave
+        // whatever is stored alone rather than deleting it.  A module that
+        // goes missing for one release should not quietly wipe the setting
+        // that used it.
+        if (controlDisabled(el)) return;
         if (Object.prototype.hasOwnProperty.call(shown, key)) merged[key] = shown[key];
         else delete merged[key];
       });
