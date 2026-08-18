@@ -58,6 +58,15 @@ for c in (r.api("GET", "/certs")["body"].get("certs") or []):
     if c["name"].startswith("qa-") or c["name"].startswith("qa_"):
         drop("certificate", f"/certs/{c['id']}", c["name"])
 
+# Access lists, which used to be left behind because nothing here knew about
+# them.  They come off /zones rather than an endpoint of their own: there is no
+# GET /access-lists, which is written down in the project notes as something
+# nothing needed until now.  They go last because a list still attached to a
+# site or a path is refused, correctly, and the sites above are gone by here.
+for a in (r.api("GET", "/zones")["body"].get("access_lists") or []):
+    if a["name"].startswith("qa_") or a["name"].startswith("qa-"):
+        drop("access list", f"/access-lists/{a['id']}", a["name"])
+
 print("REMOVED:")
 for line in removed:
     print("  ", line)
