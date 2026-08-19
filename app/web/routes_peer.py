@@ -608,6 +608,47 @@ async def peer_agent(request: Request):
         raise HTTPException(status_code=502, detail=str(exc))
 
 
+@router.post("/peer/gslb")
+async def peer_gslb(request: Request):
+    """
+    Take on the fleet's DNS zones from the active node.
+
+    Separate from the config apply for the same reason accounts are, and the
+    consequence of not having it is worse.  A full snapshot only travels when
+    the rendered nginx config changes, and a DNS zone changes no nginx config
+    at all: it is answered by this manager's own listener, not by nginx.  So a
+    zone created on the active node reached the standby only if somebody
+    happened to edit a site afterwards, and usually never.
+
+    A standby with no zones runs no listener and answers nothing, so the fleet
+    looks like it has two nameservers and has one.  That is the whole promise
+    of the feature, and it was failing in the one situation it exists for.
+    """
+    node, payload = await authenticate(request)
+
+    tables = payload.get("tables")
+    if tables is None or not isinstance(tables, dict):
+        raise HTTPException(status_code=400, detail="that had no zone data on it")
+
+    with session_scope() as session:
+        result = snapshot_store.restore_gslb(
+            session, tables,
+            sender_has_config=bool(payload.get("sender_has_config", True)))
+        if result.get("refused"):
+            session.rollback()
+        else:
+            session.commit()
+
+    if result.get("refused"):
+        log.error("refused the dns zones %s sent: %s", node.name, result["refused"])
+        raise HTTPException(status_code=409, detail=result["refused"])
+
+    # The listener follows the zones on its own timer, so nothing is started or
+    # stopped here.  Doing it inline would mean a peer request holding a socket
+    # bind, and reconcile already knows how to do it safely.
+    return {"ok": True, **result}
+
+
 @router.post("/peer/accounts")
 async def peer_accounts(request: Request):
     """

@@ -472,6 +472,89 @@ def restore_users(session, rows) -> dict:
     return _restore_users(session, rows)
 
 
+GSLB_TABLES = ("gslb_zones", "gslb_records", "gslb_answers")
+
+
+def capture_gslb(session) -> dict:
+    """
+    Just the DNS zones, for the sync that does not wait on a config change.
+
+    Same reasoning as the accounts above, and the consequence is worse.  Zones
+    ride along in the full snapshot, and a full snapshot only travels when the
+    **rendered nginx config** changes.  A zone renders no nginx config at all:
+    it is answered by the manager's own listener, not by nginx.  So a zone
+    could be created, edited or deleted and never reach the other node, and the
+    fleet would look like it had two nameservers while it had one.
+
+    That is the whole point of global load balancing, so it has to converge on
+    its own timer rather than on somebody happening to edit a site.
+    """
+    out = {}
+    for key, model in TABLES:
+        if key not in GSLB_TABLES:
+            continue
+        rows = []
+        for obj in session.query(model).all():
+            row = {}
+            for name in _columns(model):
+                value = getattr(obj, name, None)
+                if hasattr(value, "value"):
+                    value = value.value
+                elif hasattr(value, "isoformat"):
+                    value = value.isoformat()
+                row[name] = value
+            rows.append(row)
+        out[key] = rows
+    return out
+
+
+def restore_gslb(session, tables: dict, sender_has_config: bool = True) -> dict:
+    """
+    Take on the fleet's DNS zones.
+
+    Replaces rather than merges, and the order matters both ways: children go
+    before parents on the way out, parents before children on the way in, or a
+    record is left pointing at a zone that is not there yet.
+
+    Deleting the last zone has to work, so an empty set is normally applied.
+    The one case it is refused is the promoted standby with nothing in it: a
+    node that came up empty, won an election and pushed its emptiness would
+    take the fleet's DNS away, which is the same accident the mass deletion
+    guard exists for on the sites side.
+
+    Those two are told apart by `sender_has_config`, which the sender fills in
+    from whether it has any config objects at all.  A node deleting its last
+    zone still has sites and pools; a node that came up with nothing has none
+    of it.
+    """
+    incoming = {k: (tables.get(k) or []) for k in GSLB_TABLES}
+    models = dict(TABLES)
+
+    have = session.query(models["gslb_zones"]).count()
+    if have and not incoming["gslb_zones"] and not sender_has_config:
+        return {"refused": (
+            f"this node has {have} dns zone(s) and the set that arrived is "
+            f"empty, from a node that has no config objects at all, which is "
+            f"what a standby that came up blank looks like rather than "
+            f"somebody deleting a zone.  Nothing was changed."
+        )}
+
+    written = {}
+    for key in reversed(GSLB_TABLES):          # answers, records, zones
+        session.query(models[key]).delete()
+    session.flush()
+
+    for key in GSLB_TABLES:                    # zones, records, answers
+        model = models[key]
+        allowed = set(_columns(model))
+        for row in incoming[key]:
+            session.add(model(**{k: _coerce(model, k, v)
+                                 for k, v in row.items() if k in allowed}))
+        session.flush()
+        written[key] = len(incoming[key])
+    return {"written": written}
+
+
 def is_empty(session) -> bool:
     """
     Has this node got no config of its own.

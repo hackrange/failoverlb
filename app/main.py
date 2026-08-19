@@ -285,15 +285,30 @@ def ensure_pki():
     with session_scope() as session:
         peer_count = session.query(Node).filter(Node.name != settings.node_name).count()
 
-    if not ca.exists():
+    # Three states, and only one of them is a problem.
+    #
+    # This used to ask ca.exists(), which is "can this node sign for the
+    # cluster", and report a false answer as "this node is not in the cluster".
+    # Only the founding node holds the CA key; every node that joined is given
+    # the CA certificate and never the key, on purpose.  So every joined node
+    # in every fleet printed "This node needs to rejoin the cluster" at every
+    # startup while it was working perfectly, and rejoining on that advice is
+    # disruptive for no reason.
+    if not ca.has_identity():
         if peer_count > 0:
             log.warning(
-                "there are peers on the roster but no cluster CA here.  "
-                "This node needs to rejoin the cluster."
+                "there are peers on the roster but this node has no cluster "
+                "identity: no CA certificate, or no certificate and key of its "
+                "own.  It cannot prove who it is to the others.  This node "
+                "needs to rejoin the cluster."
             )
             return
         log.info("no cluster CA yet, making one.  This node starts the cluster.")
         ca.create(cluster_name=settings.node_name)
+    elif not ca.exists():
+        # A member that cannot sign, which is what joining is meant to produce.
+        log.info("this node joined the cluster rather than starting it, so it "
+                 "holds the CA certificate and not the CA key")
 
     # A CA whose certificate and key do not match cannot sign anything the rest
     # of the fleet will accept.  Say so here, plainly, rather than letting it
@@ -302,6 +317,9 @@ def ensure_pki():
     # Not repaired automatically on purpose.  Every node certificate out there
     # was signed by this CA, so replacing it would quietly invalidate all of
     # them and every node would have to rejoin.  That is a decision for a person.
+    # Only meaningful where there is a key to match against the certificate,
+    # which is the founding node.  Asking it anywhere else compares a
+    # certificate with a key that is not supposed to be there.
     if ca.exists() and not ca.ca_pair_ok():
         log.error("=" * 70)
         log.error("The cluster CA certificate and its key do not match.")
@@ -469,6 +487,20 @@ def start_scheduler():
     # case that matters: an account taken away while the other box was down must
     # not come back when it returns.  Does nothing on a standby, and nothing on
     # the active node when the accounts already match.
+    # DNS zones, converging the same way and for a sharper reason.  A zone
+    # renders no nginx config at all, so it never travelled with a config
+    # apply, and a standby with no zones runs no listener.  Losing the active
+    # node then took the whole fleet's DNS with it, which is the one thing this
+    # feature exists to survive.  Does nothing on a standby.
+    scheduler.add_job(
+        cluster.replicate_gslb,
+        "interval",
+        seconds=60,
+        id="gslb-zones",
+        max_instances=1,
+        coalesce=True,
+    )
+
     scheduler.add_job(
         cluster.replicate_accounts,
         "interval",

@@ -191,7 +191,34 @@ class ClusterCA:
     # ---- the CA itself ------------------------------------------------------
 
     def exists(self) -> bool:
+        """
+        Can this node sign for the cluster: it holds the CA key as well as the
+        certificate.
+
+        True only on the node that founded the cluster.  A node that joined is
+        given the CA **certificate**, so it can verify its peers, and never the
+        CA key, because only one machine should be able to mint new members.
+
+        That is why this is not the question "is this node part of a cluster".
+        Asking this one and reporting the answer as cluster membership told
+        every joined node in every fleet that it needed to rejoin, at every
+        startup, while it was working perfectly.  Use has_identity for
+        membership.
+        """
         return self.ca_cert_path.is_file() and self.ca_key_path.is_file()
+
+    def has_identity(self) -> bool:
+        """
+        Is this node a member of a cluster: it can prove who it is and check
+        who its peers are.
+
+        The CA certificate to verify peers, and its own certificate and key to
+        answer them with.  A joined node has exactly these three and no CA key,
+        which is the normal and correct state for every node but one.
+        """
+        return (self.ca_cert_path.is_file()
+                and self.node_cert_path.is_file()
+                and self.node_key_path.is_file())
 
     def ca_pair_ok(self) -> bool:
         """

@@ -526,6 +526,57 @@ class ClusterManager:
             "takes writes.  Try again in a few seconds."
         )
 
+    async def replicate_gslb(self) -> dict:
+        """
+        Send this node's DNS zones to every peer.
+
+        Same shape as replicate_accounts below, and for a sharper reason.  A
+        zone renders no nginx config, so it never rode the config snapshot,
+        which only moves when the rendered config changes.  A zone therefore
+        lived on whichever node it was created on and nowhere else.
+
+        The standby starts its listener from the zones in its own database, so
+        with none it started nothing and answered nothing.  Losing the active
+        node took the fleet's DNS with it, which is precisely the failure the
+        feature exists to survive.
+
+        Only the active node sends, for the same reason it is the only one that
+        sends accounts: two nodes pushing different ideas of the zone list at
+        each other is a flap, and the active node is the one that owns config.
+        """
+        from app.core import snapshot as snapshot_store
+
+        with session_scope() as session:
+            if not self.is_active(session):
+                return {"skipped": "not the active node"}
+
+            tables = snapshot_store.capture_gslb(session)
+            # So the far end can tell "the last zone was deleted" from "a
+            # blank node is pushing its emptiness at me".
+            has_config = not snapshot_store.is_empty(session)
+            targets = [
+                (p.name, PeerClient(p, self.ca))
+                for p in self.peers(session)
+                if p.state == NodeState.ONLINE
+            ]
+
+        if not targets:
+            return {"sent_to": [], "failed": {}}
+
+        sent, failed = [], {}
+        for name, client in targets:
+            try:
+                await client.call("/peer/gslb", {"tables": tables,
+                                                "sender_has_config": has_config})
+                sent.append(name)
+            except (NodeUnreachable, ClusterError) as exc:
+                # Not worth raising over, same as accounts: the timer tries
+                # again, and a node that was unreachable catches up when it
+                # comes back without anybody doing anything.
+                failed[name] = str(exc)
+                log.warning("could not send the dns zones to %s: %s", name, exc)
+        return {"sent_to": sent, "failed": failed}
+
     async def replicate_accounts(self) -> dict:
         """
         Send this node's accounts to every peer.
