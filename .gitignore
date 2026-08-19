@@ -117,14 +117,13 @@ test/.secrets
 # so it was taken out of the history as well, not just the current tree.  This
 # line keeps a scratch test/ folder from getting committed by accident.
 #
-# Checks you want to keep go in checks/, which is committed.  The two names are
-# one letter apart and that has already caught somebody out: a suite written
-# into test/ is silently left out of every commit, and nothing tells you,
-# because being ignored is exactly what this line asks for.
+# Neither test/ nor checks/ is committed.  Both are internal testing rather
+# than part of the product, and they stay on the machines that run them.
 test/
+checks/
 
 # Everything under tools/ stays on disk and out of git, at the owner's
-# direction.  It is scaffolding rather than part of the product: the machinery
+# direction, and so does checks/ above for the same reason.  It is scaffolding rather than part of the product: the machinery
 # that builds the user guide, the applying test pass, the mutation harness and
 # the bill of materials generator.  What they produce is what ships, and that
 # is committed: the guide in docs/, the bill of materials in sbom/, and the
