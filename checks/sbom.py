@@ -75,13 +75,25 @@ check("both formats describe the same number of components",
 print()
 print("  it matches what the build actually uses")
 
-run = subprocess.run([sys.executable, str(ROOT / "tools" / "sbom.py"), "--check"],
-                     capture_output=True, text=True, cwd=str(ROOT))
-check("regenerating produces exactly what is committed",
-      run.returncode == 0,
-      "somebody changed a version and did not regenerate, so the committed "
-      "documents describe a build that is no longer the one shipped.  "
-      "Run: python3 tools/sbom.py\n" + (run.stdout or "").strip())
+# The generator lives under tools/, which is deliberately not in the
+# repository, so a clone has the committed documents and not the thing that
+# makes them.  That is a check that cannot run rather than a check that
+# failed, and the two must not look alike: reporting a missing file as a
+# problem here would have somebody hunting a stale bill of materials that is
+# perfectly current.
+generator = ROOT / "tools" / "sbom.py"
+if not generator.is_file():
+    print("    skip  regenerating produces exactly what is committed")
+    print(f"          {generator} is not here.  tools/ is kept out of the")
+    print("          repository, so this half only runs where it is on disk.")
+else:
+    run = subprocess.run([sys.executable, str(generator), "--check"],
+                         capture_output=True, text=True, cwd=str(ROOT))
+    check("regenerating produces exactly what is committed",
+          run.returncode == 0,
+          "somebody changed a version and did not regenerate, so the committed "
+          "documents describe a build that is no longer the one shipped.  "
+          "Run: python3 tools/sbom.py\n" + (run.stdout or "").strip())
 
 
 print()
