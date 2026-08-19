@@ -35,6 +35,7 @@ ORDER = ["t01_settings", "t02_pools", "t03_sites", "t04_paths", "t05_catalog",
          "t13_maps_streams_cluster", "t14_gslb", "t15_failover",
          "t16_safety", "t17_access_lists", "t18_roles",
          "t19_outside_address", "t20_waf_surface", "t21_waf"]
+# checks/default_site.py covers the default site; it needs no evidence file.
 
 INK = RGBColor(0x1a, 0x1a, 0x1a)
 GREY = RGBColor(0x60, 0x60, 0x60)
