@@ -2,8 +2,8 @@
   "spdxVersion": "SPDX-2.3",
   "dataLicense": "CC0-1.0",
   "SPDXID": "SPDXRef-DOCUMENT",
-  "name": "failover-lb-3be25e6-dirty",
-  "documentNamespace": "https://failoverlb.net/sbom/spdx/3be25e6142a47bd6324a79b37caaf1766abe62d6",
+  "name": "failover-lb-2b0ba15-dirty",
+  "documentNamespace": "https://failoverlb.net/sbom/spdx/2b0ba15f68961037e4cddf92c92a80dd6cf09aee",
   "creationInfo": {
     "creators": [
       "Tool: tools/sbom.py",

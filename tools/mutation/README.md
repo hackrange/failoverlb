@@ -46,6 +46,19 @@ leave litter of its own.  The copy is made with sqlite's backup API rather
 than a file copy, because recent writes sit in the write ahead log and a copy
 of the `.db` alone is the database as of some earlier moment.
 
+## Coverage
+
+Every check in `checks/` has at least one mutation.  That is the bar: a check
+with none has never been asked the question, and "all green" from a set that
+does not include it means nothing about it.
+
+Two checks do not run in the container and are special cased:
+
+- `rollback` reads the deployed agent by path, so the mutation points it at
+  the mutated copy
+- `sbom` regenerates from files in the tree, so it runs with the mutated tree
+  as its working directory
+
 ## Adding one
 
 A tuple of `(name, check, file, find, replace)`.  Aim at what the check
@@ -56,3 +69,8 @@ never claimed to cover it.  The right answer there was a new check.
 A mutation that is caught proves the check works.  A mutation that is not
 caught is either a blind check or a missing one, and it is worth working out
 which before writing anything.
+
+Do not reuse the loop variable `name` inside the loop body.  A copy step added
+later did exactly that, and the harness reported a real result under the wrong
+heading, which is the precise failure it exists to find.  It was caught by
+reading the output and not believing it.

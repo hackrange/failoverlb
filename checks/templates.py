@@ -28,7 +28,30 @@ files = sorted(TEMPLATES.glob("*.html"))
 print(f"  {len(files)} templates")
 print()
 
-# 1. Every block closes.
+# 1. Every template is syntactically valid, asked of Jinja rather than of a
+#    regular expression.
+#
+#    The first version of this counted `{% block %}` against `{% endblock %}`,
+#    which is one construct out of eight.  An unclosed `{% if %}` balanced
+#    perfectly and sailed through, and it breaks a page just as thoroughly:
+#    Jinja raises at render time and the page 500s.  The mutation harness
+#    walked straight past this check with exactly that.
+#
+#    Jinja's own parser answers the whole question, including the ones nobody
+#    thought to count, and it does it the way the product will at render time.
+from jinja2 import Environment, TemplateSyntaxError
+
+_env = Environment()
+broken = []
+for p in files:
+    try:
+        _env.parse(p.read_text(), filename=p.name)
+    except TemplateSyntaxError as exc:
+        broken.append(f"{p.name}:{exc.lineno} {exc.message}")
+check("every template parses", not broken, "; ".join(broken))
+
+# And the named blocks specifically, because a template that parses can still
+# have picked up an extra block or lost one in a merge.
 unbalanced = []
 for p in files:
     t = p.read_text()

@@ -126,14 +126,117 @@ MUTATIONS = [
      '    admin_allowlist: str = Field(default="")',
      '    admin_allowlist: str = Field(default="0.0.0.0/0")'),
 
+    # ---- the third batch, the checks with no mutation yet -----------------
+
+    ("local passwords can really be turned off", "auth_modes",
+     "app/core/settings_store.py",
+     '    return auth_mode() != "oidc"',
+     "    return True  # mutation: a password always gets you in"),
+
+    ("the provider is only offered when the mode allows", "auth_modes",
+     "app/core/settings_store.py",
+     '    return auth_mode() in ("both", "oidc")',
+     "    return True  # mutation: always offer it"),
+
+    ("a backend path keeps its trailing slash", "backend_path",
+     "app/core/render.py",
+     '        if not value.endswith("/"):',
+     "        if False:  # mutation: no trailing slash, so paths glue together"),
+
+    ("a catalog default is written rather than left to nginx", "catalog_sweep",
+     "app/core/render.py",
+     "        feature = get_feature(key)\n        if not feature or not self.supports(key):\n            return None\n        return feature.default",
+     "        return None  # mutation: never fall back to the catalog"),
+
+    ("the comparison totals add up", "comparison", "app/catalog/comparison.py",
+     "def product_totals():",
+     "def product_totals():\n    return []  # mutation: no totals at all"),
+
+    ("stopping the dns listener waits for its threads", "gslb_listener",
+     "app/core/gslb.py",
+     "        for thread in self._threads:\n            if thread is threading.current_thread():\n                continue\n            thread.join(timeout=STOP_TIMEOUT_SECONDS)",
+     "        pass  # mutation: close underneath the threads, as it used to"),
+
+    ("a quoted string is one token", "parser", "app/core/nginx_parser.py",
+     '        if ch in "\\"\'":',
+     "        if False:  # mutation: quotes are not special"),
+
+    ("a rewrite steps around the certificate challenge", "rewrite_guards",
+     "app/core/render.py",
+     '            lines.append(f"{pad}if ($request_uri ~ ^/\\\\.well-known/acme-challenge/) {{")',
+     '            lines.append(f"{pad}if ($request_uri ~ ^/__never_matches__) {{")'),
+
+    ("the settings put replaces rather than merges", "settings_merge",
+     "app/web/routes_api.py",
+     '        host.settings = json.dumps(_validate_settings(payload["settings"], "server"))',
+     '        _merged = dict(host.setting_map()); _merged.update(payload["settings"])\n'
+     '        host.settings = json.dumps(_validate_settings(_merged, "server"))'),
+
+    ("an unknown setting is dropped rather than stored", "settings_merge",
+     "app/web/routes_api.py",
+     "        feature = get_feature(key)\n        if not feature:\n            problems.append(f\"there is no setting called {key}\")\n            continue",
+     "        feature = get_feature(key)\n        if not feature:\n            cleaned[key] = value  # mutation: keep unknown keys\n            continue"),
+
+    ("a page that raises is noticed", "page_sweep", "app/web/routes_pages.py",
+     "async def waf_profiles_page(request: Request, db: DBSession = Depends(get_db)):",
+     "async def waf_profiles_page(request: Request, db: DBSession = Depends(get_db)):\n    raise RuntimeError('mutation: this page is broken')"),
+
+    ("a template with an unclosed block is noticed", "templates",
+     "app/web/templates/waf_profiles.html",
+     "{% if not profiles %}",
+     "{% if not profiles %}{% if True %}"),
+
+    ("a template with an unclosed named block is noticed", "templates",
+     "app/web/templates/waf_profiles.html",
+     "{% block content %}",
+     "{% block content %}{% block stray %}"),
+
+    ("a page that never reaches the layout is noticed", "templates",
+     "app/web/templates/waf_profiles.html",
+     "{% block content %}",
+     "{% block not_a_real_block %}"),
+
+    ("an address is not handed out twice", "tunnel_addresses",
+     "app/core/tunnel.py",
+     "    taken |= addresses_pools_point_at(session, network)",
+     "    pass  # mutation: forget what pools still point at"),
+
+    ("a missing column is added on upgrade", "upgrade_migration", "app/db.py",
+     "                parts = [f'ALTER TABLE {table.name} ADD COLUMN \"{column.name}\" {ddl_type}']",
+     "                continue  # mutation: never add the column"),
+
+    ("an empty pool costs one site, not the fleet", "regressions",
+     "app/core/render.py",
+     "            if not self._pool_has_servers(pool):",
+     "            if False:  # mutation: write an empty upstream block, which nginx refuses"),
+
+    ("the bill of materials matches the build", "sbom",
+     "sbom/sbom.spdx.json",
+     '"name": "failover-lb',
+     '"name": "not-the-same-build-at-all'),
+
     ("a rollback that fails puts it back", "rollback", "host-agent/nginx-mgr-agent.py",
      "        previous = MANAGED_DIR.parent / (MANAGED_DIR.name + \".before-rollback\")",
      "        previous = None if True else MANAGED_DIR.parent / 'x'"),
 ]
 
 
+# Checks that run against the repository or the host rather than in the
+# container.  `rollback` reads the deployed agent by path; `sbom` regenerates
+# the bill of materials from files in the tree and compares.
+HOST_CHECKS = {"rollback", "sbom"}
+
+
 def run(check_name, tree):
     """Run one check with app/ and host-agent/ taken from a mutated tree."""
+    if check_name == "sbom":
+        # From inside the mutated tree, so it reads that tree's sbom/ and
+        # installer rather than the real ones.
+        proc = subprocess.run([sys.executable, str(tree / "checks" / "sbom.py")],
+                              cwd=str(tree), capture_output=True, text=True,
+                              timeout=600)
+        return proc.returncode, proc.stdout + proc.stderr
+
     if check_name == "rollback":
         # A host check, not a container one.  It reads the deployed agent by
         # path, so point it at the mutated copy instead.
@@ -194,7 +297,18 @@ def main():
             continue
         tree = Path(tempfile.mkdtemp(prefix="mutation-"))
         try:
-            for folder in ("app", "checks", "host-agent"):
+            # `extra` and not `name`: the loop variable of the mutation
+            # itself is called name, and reusing it here renamed the mutation
+            # in the report to whichever file was copied last.  The harness
+            # reported a real result under the wrong heading, which is the
+            # exact failure it exists to find.
+            for extra in ("nginx-installer.sh", "requirements.txt",
+                          "docker-compose.yml", "Dockerfile"):
+                if (REPO / extra).is_file():
+                    shutil.copy(REPO / extra, tree / extra)
+            for folder in ("app", "checks", "host-agent", "sbom", "tools"):
+                if not (REPO / folder).is_dir():
+                    continue
                 shutil.copytree(REPO / folder, tree / folder,
                                 ignore=shutil.ignore_patterns("__pycache__"))
             target = tree / rel
