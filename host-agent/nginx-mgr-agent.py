@@ -1886,7 +1886,37 @@ def v_dns_redirect(req):
     # Built fresh every time rather than added to.  Appending would stack a new
     # rule on every restart, and the last one written is not necessarily the one
     # that matches.
-    daddr = f"ip daddr {address} " if address else ""
+    # Every address this box owns, not just the one it calls itself.
+    #
+    # This used to be `ip daddr <node address>`, which matches only packets
+    # sent to the one address in NODE_ADDRESS.  A node reached on any other
+    # address it owns, which is every node behind NAT, every node with a
+    # separate public and internal address, and every node with more than one
+    # interface, got no redirect at all: the listener answered perfectly on its
+    # own port and port 53 refused the connection.
+    #
+    # The shape of the failure is what makes it worth this comment.  The node
+    # looks healthy, the zone is right, the listener is up, and the box answers
+    # when you test it from itself using the address it calls itself by.  It
+    # only fails for the outside world, and on a two node fleet it only fails
+    # visibly when the other node is gone, because until then the other node
+    # answers everything.
+    #
+    # `fib daddr type local` matches a packet addressed to any address this
+    # machine holds, and nothing else.  Forwarded traffic passing through on
+    # its way somewhere else is still left alone, which a bare port match would
+    # not do: a load balancer that routes for other people must not quietly
+    # answer their DNS.
+    #
+    # Loopback is cut out of it, and that exclusion is not optional.  Ubuntu
+    # and most others run a stub resolver on 127.0.0.53 and point
+    # /etc/resolv.conf at it, so "every local address" includes the box's own
+    # resolver.  Without the exclusion this table takes every name lookup the
+    # machine makes and hands it to an authoritative server that knows two
+    # zones, and the box loses DNS entirely: no apt, no certificate renewal,
+    # no reaching a backend by name.  Found by breaking exactly that, on the
+    # first version of this fix, one command after writing it.
+    daddr = "fib daddr type local ip daddr != 127.0.0.0/8 "
 
     # dnat rather than redirect, and the difference only shows on this box.
     #
@@ -1916,11 +1946,30 @@ def v_dns_redirect(req):
 
     run(["nft", "delete", "table", "ip", NFT_TABLE])      # fine if it is absent
     result = run(["nft", "-f", "-"], input_text=ruleset)
+
+    # `fib daddr type local` wants a reasonably recent nftables.  On an older
+    # one the whole ruleset is rejected, and a rejected ruleset means no
+    # redirect at all, which is worse than the narrow rule it replaced.  So
+    # fall back to naming the address, say so plainly, and carry on.
+    if result["rc"] != 0 and "fib" in ruleset and address:
+        narrow = ruleset.replace("fib daddr type local ip daddr != 127.0.0.0/8 ",
+                                 f"ip daddr {address} ")
+        second = run(["nft", "-f", "-"], input_text=narrow)
+        if second["rc"] == 0:
+            log.warning(
+                "this nftables would not take a match on every local address, "
+                "so port 53 is redirected only for %s.  A query sent to any "
+                "other address this node holds will not be answered.", address)
+            return {"installed": True, "address": address, "port": port,
+                    "note": "narrow rule, this nftables is too old for "
+                            "fib daddr type local"}
+
     if result["rc"] != 0:
         raise AgentError(f"could not install the dns redirect: {result['stderr'].strip()}",
                          "io_error")
 
-    return {"installed": True, "address": address or "any", "port": port}
+    return {"installed": True, "address": address or "any", "port": port,
+            "matches": "every local address"}
 
 
 def v_dns_redirect_clear(req):
