@@ -2026,9 +2026,76 @@ map $cookie_{cookie} $sticky_set_{var} {{
             "",
             f"Include {CRS_ROOT}/rules/*.conf",
             "",
-        ] + self._waf_recorder_lines(name)
+        ] + self._block_known_lines(mode)
+          + self._waf_recorder_lines(name)
           + self._waf_exclusion_lines(cfg)
           + self._waf_surface_lines(cfg))
+
+    # Rules that block known malicious deliberately does not enforce.
+    #
+    # Every one of these is CRITICAL in the rule set, which scores 5, which is
+    # the whole threshold.  So one of them refuses a request on its own.  That
+    # is right for a rule that catches an exploit, and wrong for these, because
+    # these do not catch exploitation.  They catch a *shape*: a path that looks
+    # like a system file, a file extension somebody decided is nobody's
+    # business, a dotfile.  Plenty of honest applications are made of exactly
+    # those shapes.
+    #
+    # Measured on real traffic before this list existed, not guessed:
+    #
+    #   A git hosting site: 282 requests reached the firewall and **282 were
+    #   refused**.  278 of them, 98%, tripped nothing but these rules.  It
+    #   serves repositories, so it serves .gitignore and files whose extension
+    #   is on a restricted list, and the firewall called every one an attack.
+    #
+    #   A documentation site about nginx: searching its own help for
+    #   "/etc/nginx/nginx.conf" was refused, and so was "/var/log/nginx/
+    #   error.log".  930120 fired alone and reached the threshold on its own.
+    #   A site whose subject is system administration cannot let people ask
+    #   about system paths.
+    #
+    # None of that is the rule set misbehaving.  It is what these rules are
+    # for, at a threshold where one of them is enough.  The mistake was ours:
+    # this mode is offered as safe to turn on without tuning, and with these
+    # in it that claim is false for any site that serves files or talks about
+    # servers.
+    #
+    # So block known malicious now means what its name says.  Injection, cross
+    # site scripting, remote code execution, path traversal and file inclusion
+    # are all still enforced, which is checked by test rather than asserted
+    # here.  These four are left out of this mode only.
+    POLICY_RULES = (
+        ("920440", "URL file extension is restricted by policy"),
+        ("920500", "Attempt to access a backup or working file"),
+        ("930120", "OS File Access Attempt"),
+        ("930130", "Restricted File Access Attempt"),
+    )
+
+    def _block_known_lines(self, mode: str) -> list:
+        """The policy rules, turned down to logging, for one mode only."""
+        if mode != "block_known":
+            return []
+
+        lines = [
+            "",
+            "# Block known malicious: the rules it deliberately does not run.",
+            "#",
+            "# Watching still runs the whole set, so a learning round sees",
+            "# these firing and anybody who wants them enforced has 'block",
+            "# what the rules say' one setting along.  They are only left out",
+            "# of the mode that promises to be safe without tuning.",
+            "#",
+            "# SecRuleRemoveById, after the include, is the same directive the",
+            "# tuned exclusions use for a whole site.  Before the include it",
+            "# would name rules that do not exist yet, which is not an error",
+            "# and does nothing at all.",
+        ]
+        for rule_id, why in self.POLICY_RULES:
+            lines.append(f"# {rule_id}  {why}")
+        for rule_id, _why in self.POLICY_RULES:
+            lines.append(f"SecRuleRemoveById {rule_id}")
+        lines.append("")
+        return lines
 
     def _waf_recorder_lines(self, name: str) -> list:
         """

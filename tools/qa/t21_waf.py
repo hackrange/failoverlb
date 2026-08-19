@@ -409,6 +409,57 @@ t.note("one rule named, one rule excused, three still catching.  That is what "
 t.close()
 
 
+# ---------------------------------------------------------------- WAF-18
+
+t = r.test("WAF-18", "WAF", "Block known malicious leaves an honest site alone",
+           "Send the traffic a real site really gets, not four tidy GETs, and "
+           "prove the setting that claims to be safe without tuning is.",
+           "This is the test that was missing, and its absence let a claim "
+           "through that production disproved the same week.  The suite's idea "
+           "of ordinary traffic was a front page, a stylesheet and a search for "
+           "blue widgets.  Two real sites behind this product tell a different "
+           "story: a git host where 282 requests reached the firewall and 282 "
+           "were refused, 98% of them tripping nothing but policy rules, and a "
+           "documentation site about nginx whose own help search was refused "
+           "for the words /etc/nginx/nginx.conf.",
+           "Every one of these is served, and the attacks are still refused in "
+           "the same breath.")
+set_mode("block_known", waf_paranoia="1")
+res = r.apply("qa: block known malicious, against honest traffic")
+t.ok("apply succeeded", res["status"] == 200, res)
+
+# What somebody actually types into the help search of a site about servers.
+HONEST = {
+    "a search for a config file": "/?q=/etc/nginx/nginx.conf",
+    "a search for a log file": "/?q=/var/log/nginx/error.log",
+    "a search naming a unix path": "/?q=where%20is%20/etc/hosts",
+    "a search for a dotfile": "/?q=.gitignore%20syntax",
+    "a page that mentions a backup file": "/?q=why%20is%20my%20config.bak%20ignored",
+    "a file whose extension somebody restricted": "/notes.bak",
+    "a dotfile as a query, the way a git host links one": "/?path=.gitignore",
+}
+rows, bad = [], []
+for name, path in HONEST.items():
+    got = get(path)["status"]
+    rows.append(f"  {name:44} {path[:44]:46} -> {got}")
+    # 404 is fine for the file that is not there: the point is that it was not
+    # refused by the firewall before nginx got the chance to look for it.
+    if got not in (200, 404):
+        bad.append((name, path, got))
+t.proof("traffic an honest site really gets", "\n".join(rows))
+t.ok("none of it is refused by the firewall", not bad, bad)
+
+still = {}
+for name, path in ATTACKS.items():
+    still[name] = get(path)["status"]
+t.proof("and the four attacks, in the same breath",
+        "\n".join(f"  {n:32} -> {s}" for n, s in still.items()))
+t.ok("every attack is still refused", all(s == 403 for s in still.values()), still)
+t.note("that is the whole point of the mode being called block known "
+       "malicious rather than block whatever the rule set finds interesting.")
+t.close()
+
+
 # ---------------------------------------------------------------- WAF-17
 
 t = r.test("WAF-17", "WAF", "Both nodes carry the same firewall",
