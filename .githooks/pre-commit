@@ -20,7 +20,7 @@ staged="$(git diff --cached --name-only --diff-filter=ACMR)"
 [[ -z "$staged" ]] && exit 0
 
 # ---------------------------------------------------------------- paths
-FORBIDDEN_PATHS='^(\.githooks/forbidden\.txt$|tools/manual/|\.env$|.*/\.env$)'
+FORBIDDEN_PATHS='^(\.githooks/forbidden\.txt$|tools/|\.env$|.*/\.env$)'
 # Working notes for any assistant that helps here.
 FORBIDDEN_PATHS+='|^\.[a-z]+/(PLAN|PROJECT|settings\.local)\.'
 
