@@ -133,6 +133,7 @@ async def heartbeat(request: Request):
             "applied_version": me.applied_version if me else 0,
             "nginx_active": me.nginx_active if me else False,
             "nginx_config_ok": me.nginx_config_ok if me else False,
+            "waf_module_loaded": me.waf_module_loaded if me else None,
             "nginx_version": me.nginx_version if me else None,
             # The whole configure line, so the other nodes can work out which
             # modules this box was actually built with.  Without it a node that

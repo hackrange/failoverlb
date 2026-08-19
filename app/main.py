@@ -213,12 +213,25 @@ async def refresh_local_state():
     try:
         from app.core.settings_store import get as _setting
 
-        if _setting("waf_module"):
+        status = await agent.call("waf_module_status")
+
+        if _setting("waf_module") and status.get("built") and not status.get("loaded"):
+            log.warning("this fleet wants the WAF module and nginx has not "
+                        "been told about it, loading it now")
+            await agent.call("waf_module", enabled=True)
             status = await agent.call("waf_module_status")
-            if not status.get("loaded") and status.get("built"):
-                log.warning("this fleet wants the WAF module and nginx has not "
-                            "been told about it, loading it now")
-                await agent.call("waf_module", enabled=True)
+
+        # Write down whether nginx here has actually been told about the
+        # module, because `nginx -V` cannot say.  It reports what was compiled
+        # in, and built is not loaded: the gate that decides whether the GUI
+        # offers the WAF used to be satisfied by the build alone, so a node
+        # that was built and not loaded passed it, the setting was offered, and
+        # the apply failed fleet wide with a raw emerg.
+        with session_scope() as session:
+            node = session.query(Node).filter(Node.name == settings.node_name).first()
+            if node:
+                node.waf_module_loaded = bool(status.get("loaded"))
+                session.commit()
     except AgentError as exc:
         log.warning("could not check the WAF module: %s", exc)
     except Exception:

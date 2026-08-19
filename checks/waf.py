@@ -20,6 +20,8 @@ Nothing is applied.  Scratch objects live in a transaction that is rolled back.
     docker exec -i nginx-fleet-manager python < checks/waf.py
 """
 import json
+import pathlib
+import shutil
 import socket
 import sys
 
@@ -629,6 +631,82 @@ check("what a snapshot may carry is the same list at both ends",
       set(INTERNAL_FLEET_KEYS) <= set(SNAPSHOT_KEYS)
       and "SNAPSHOT_KEYS" in _restore_src,
       "capture and restore are not reading the same list")
+
+# =============================================================================
+print()
+print("  built is not loaded, and the gate has to ask for loaded")
+
+# `nginx -V` reports what was compiled in.  It cannot say whether a
+# load_module line was ever written, and a module nginx has not been told
+# about fails the config test the first time anything uses it.  An apply is
+# all or nothing, so that is not one broken site, it is a fleet that cannot
+# apply anything.
+#
+# Run against a real copy of this node's database rather than the live one, so
+# the answers can be set and read back without writing a thing.  A plain file
+# copy is not enough: sqlite keeps recent writes in the write ahead log, so a
+# copy of the .db alone is the database as of some earlier moment.  The
+# backup API takes the lot.
+import sqlite3
+import tempfile
+
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+from app import db as _dbmod
+from app.core.capabilities import fleet_capabilities
+from app.models import Node as _Node
+
+_live = _dbmod.get_engine().url.database
+if not _live or not pathlib.Path(_live).is_file():
+    skip("the gate asks whether the module is loaded",
+         "cannot find this node's database file to copy")
+else:
+    _copy = pathlib.Path(tempfile.mkdtemp(prefix="waf-gate-")) / "copy.db"
+    _src = sqlite3.connect(_live)
+    _dst = sqlite3.connect(str(_copy))
+    _src.backup(_dst)
+    _src.close(); _dst.close()
+
+    _real_engine, _real_factory = _dbmod._engine, _dbmod._SessionFactory
+    _dbmod._engine = create_engine(f"sqlite:///{_copy}")
+    _dbmod._SessionFactory = sessionmaker(bind=_dbmod._engine)
+    try:
+        def _say(**loaded):
+            with session_scope() as s:
+                rows = s.query(_Node).all()
+                for n in rows:
+                    n.waf_module_loaded = loaded.get(n.name)
+                s.commit()
+            return fleet_capabilities().has("modsecurity")
+
+        _names = []
+        with session_scope() as s:
+            _names = [n.name for n in s.query(_Node).all() if n.nginx_build_info]
+
+        if not _names:
+            skip("the gate asks whether the module is loaded",
+                 "no node here has reported a build, so there is nothing to gate")
+        else:
+            check("a node that has not answered yet is not counted against it",
+                  _say() is True,
+                  "silence was treated as a no, which empties the set the "
+                  "moment a box goes quiet")
+            check("with every node saying loaded, the WAF is offered",
+                  _say(**{n: True for n in _names}) is True, _names)
+            if len(_names) > 1:
+                _one = {n: True for n in _names}
+                _one[_names[0]] = False
+                check("one node built but not loaded takes it off the whole fleet",
+                      _say(**_one) is False,
+                      f"{_names[0]} said it was not loaded and the WAF was "
+                      f"still offered, which is the fleet wide apply failure "
+                      f"this exists to stop")
+            check("with no node loaded, it is not offered",
+                  _say(**{n: False for n in _names}) is False, _names)
+    finally:
+        _dbmod._engine, _dbmod._SessionFactory = _real_engine, _real_factory
+        shutil.rmtree(_copy.parent, ignore_errors=True)
 
 print()
 failed = [r for r in results if not r[1]]

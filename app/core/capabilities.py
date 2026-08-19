@@ -258,6 +258,24 @@ def fleet_capabilities() -> Capabilities:
 
     common = common_capabilities(infos)
 
+    # Built is not loaded, and the gate has to ask for loaded.
+    #
+    # Everything above comes out of `nginx -V`, which reports what was compiled
+    # in.  It cannot say whether a `load_module` line was ever written, and a
+    # module nginx has not been told about is one that fails the config test
+    # the first time anything uses it.  Since an apply is all or nothing, that
+    # is not one broken site, it is a fleet that cannot apply anything.
+    #
+    # So modsecurity is dropped from what the fleet is offered unless every
+    # node says it is loaded.  A node that has not said yet is not counted
+    # against it, the same as everywhere else here: silence is not a no.
+    if "modsecurity" in common:
+        with session_scope() as session:
+            answered = [n.waf_module_loaded for n in session.query(Node).all()
+                        if n.nginx_build_info and n.waf_module_loaded is not None]
+        if answered and not all(answered):
+            common = {m for m in common if m not in ("modsecurity", "modsecurity-nginx")}
+
     # Version and OpenSSL come from this node, since they are only used for
     # display and for the post quantum check, which is per build anyway.
     merged = Capabilities()

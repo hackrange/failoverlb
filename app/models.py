@@ -167,6 +167,18 @@ class Node(Base):
     # Health of the nginx service on that box
     nginx_active = Column(Boolean, default=False)
     nginx_config_ok = Column(Boolean, default=False)
+
+    # Whether nginx on that node has actually been told the WAF module exists.
+    #
+    # Separate from the module list, and it has to be.  The module list is read
+    # out of `nginx -V`, which says what was **compiled in**.  It says nothing
+    # about whether a load_module line was ever written, and a module that is
+    # built but not loaded is not a module nginx knows about: the first thing
+    # that uses it fails the config test with `unknown directive`, and an apply
+    # is all or nothing, so that is the whole fleet.
+    #
+    # None means the node has not said yet, which is not the same as no.
+    waf_module_loaded = Column(Boolean, default=None)
     load_average = Column(Float)
     disk_free_bytes = Column(Integer)
 

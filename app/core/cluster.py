@@ -1122,6 +1122,32 @@ class ClusterManager:
                         "message": f"nginx is not running on {node.name}",
                     })
 
+            # A site running the WAF, on a fleet where some node has the
+            # module built but never loaded.
+            #
+            # Said here, before the apply, because the alternative is what
+            # happened in the field: the first anybody heard was `unknown
+            # directive "modsecurity"` out of a config test, which reads like a
+            # config error and is not one.  Nothing here is wrong with the
+            # config; one box was never told the module exists.
+            wafers = [h.name for h in session.query(VirtualHost).all()
+                      if h.enabled
+                      and (h.setting_map().get("waf_mode") or "off") != "off"]
+            if wafers:
+                unloaded = [n.name for n in nodes if n.waf_module_loaded is False]
+                if unloaded:
+                    warnings.append({
+                        "level": "critical",
+                        "message": (
+                            f"{', '.join(wafers)} run the WAF, and nginx on "
+                            f"{', '.join(unloaded)} has not been told the "
+                            f"module exists.  The apply will be refused on "
+                            f"that node with an unknown directive.  Rebuild it "
+                            f"from the NGINX Build page, or restart its "
+                            f"manager, which loads the module if it is there."
+                        ),
+                    })
+
             for pool in session.query(Pool).all():
                 if pool.members and pool.healthy_count == 0:
                     warnings.append({
@@ -1453,6 +1479,8 @@ class ClusterManager:
                     node.applied_version = answer.get("applied_version", node.applied_version)
                     node.nginx_active = answer.get("nginx_active", False)
                     node.nginx_config_ok = answer.get("nginx_config_ok", False)
+                    if "waf_module_loaded" in answer:
+                        node.waf_module_loaded = answer["waf_module_loaded"]
                     node.nginx_version = answer.get("nginx_version") or node.nginx_version
                     if answer.get("nginx_build_info"):
                         node.nginx_build_info = answer["nginx_build_info"][:65536]
