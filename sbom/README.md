@@ -61,3 +61,34 @@ than glossed over.
 
 **These do not look for known vulnerabilities.**  Feed them to a scanner for
 that; the point of this file is to make that possible.
+
+## Licences
+
+Every component carries one, in both formats, and none of it is from memory.
+Each entry was read off the thing itself: a Python package's own installed
+metadata and the licence file it ships, the `LICENSE` or `COPYING` file in each
+nginx module's source tree, and the rule set's own licence file.
+
+Run `python3 tools/sbom.py --licence-evidence` on a node that has built nginx
+to re-derive the table from those same sources and report anything that no
+longer agrees.  It is written down, and anything written down goes stale.
+
+Two entries are deliberately not an identifier, and they are the two worth
+looking at:
+
+- **`upstream-fair` ships no licence at all.**  Not an unrecognised one, none:
+  a copyright line, a note that it is based on nginx source, and nothing
+  granting anybody the right to use it.  It is compiled into the nginx binary
+  this product installs.  That is a real question for whoever is signing off
+  the estate, and it is recorded as NOASSERTION rather than smoothed over.
+- **`geolite2-country` is MaxMind's own end user agreement**, not an open
+  source licence.  This product does not redistribute it; it is fetched at run
+  time by whoever runs the fleet, who accepts those terms.
+
+The base image is a Debian based image holding hundreds of packages under their
+own terms.  One identifier would be a lie, so it says NOASSERTION and points at
+the image.
+
+Two components could not be concluded from metadata alone and were read from
+their licence files instead: `cryptography`, which is dual licensed, and
+`pycryptodomex`, which is partly public domain and partly BSD.
