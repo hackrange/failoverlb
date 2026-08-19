@@ -2,8 +2,8 @@
   "spdxVersion": "SPDX-2.3",
   "dataLicense": "CC0-1.0",
   "SPDXID": "SPDXRef-DOCUMENT",
-  "name": "failover-lb-a60fbf3-dirty",
-  "documentNamespace": "https://failoverlb.net/sbom/spdx/a60fbf398bd61dcdba058ff10bae0575d125a7ff",
+  "name": "failover-lb-1.0.0",
+  "documentNamespace": "https://failoverlb.net/sbom/spdx/aeca285c65d549be7880034101d6a2d90bb1c82c",
   "creationInfo": {
     "creators": [
       "Tool: tools/sbom.py",
@@ -16,13 +16,13 @@
     {
       "SPDXID": "SPDXRef-failover-lb",
       "name": "failover-lb",
-      "versionInfo": "a60fbf3-dirty",
+      "versionInfo": "1.0.0",
       "downloadLocation": "NOASSERTION",
       "filesAnalyzed": false,
       "supplier": "Organization: Failover LB",
       "licenseDeclared": "MIT",
       "licenseConcluded": "MIT",
-      "comment": "[product] the manager itself, from the LICENSE file in its own repository"
+      "comment": "[product] the manager itself, from the LICENSE file in its own repository.  Version from app/__init__.py, which is what the software calls itself when it starts.  Built from aeca285."
     },
     {
       "SPDXID": "SPDXRef-python-0",

@@ -1,7 +1,7 @@
 {
   "bomFormat": "CycloneDX",
   "specVersion": "1.5",
-  "serialNumber": "urn:uuid:ee0193b0-5519-ed34-54fc-7b5bd2d0b6ba",
+  "serialNumber": "urn:uuid:099ec155-7a52-50f0-58b7-978cefbd4a94",
   "version": 1,
   "metadata": {
     "timestamp": "1970-01-01T00:00:00Z",
@@ -14,7 +14,7 @@
     "component": {
       "type": "application",
       "name": "failover-lb",
-      "version": "a60fbf3-dirty",
+      "version": "1.0.0",
       "description": "nginx fleet manager: two phase config apply, certificates, firewall, tunnel",
       "licenses": [
         {
@@ -27,7 +27,11 @@
     "properties": [
       {
         "name": "failoverlb:commit",
-        "value": "a60fbf398bd61dcdba058ff10bae0575d125a7ff"
+        "value": "aeca285c65d549be7880034101d6a2d90bb1c82c"
+      },
+      {
+        "name": "failoverlb:build",
+        "value": "aeca285"
       }
     ]
   },
