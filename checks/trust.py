@@ -104,6 +104,58 @@ check("a token does not compare equal to another", not constant_time_equals(toke
 check("a token does not compare equal to a prefix of itself",
       not constant_time_equals(token, token[:-1]),
       "a shorter string matched, so a comparison is stopping early")
+# Right answers are not the property.
+#
+# Everything above is equally true of a plain `==`, which is exactly what this
+# function exists not to be: `==` stops at the first byte that differs, so how
+# long it takes says how much of a guess was right, and an attacker who can
+# time it walks a token out one character at a time.  The mutation harness
+# found this: replacing the body with `a == b` changed nothing here.
+#
+# So the property is asserted where it lives, in the source, the same way this
+# project already asserts that no route fetches a row by id outside the guard.
+# There is no timing measurement, because a timing test on a shared box is a
+# coin toss and a flaky security check is one people learn to ignore.
+import inspect as _inspect
+
+from app.core import crypto as _crypto
+
+_ct = _inspect.getsource(_crypto.constant_time_equals)
+check("secrets are compared with a constant time function",
+      "compare_digest" in _ct,
+      "constant_time_equals does not use hmac.compare_digest, so it leaks "
+      "through timing however right its answers look")
+
+_vp = _inspect.getsource(_crypto.verify_payload)
+check("and a peer signature is checked the same way",
+      "compare_digest" in _vp,
+      "verify_payload is not using a constant time comparison")
+
+# And nothing quietly compares a secret the ordinary way somewhere else.
+#
+# A model column compared to something is a SQL WHERE clause, not a comparison
+# happening in this process: `Session.token_hash == hash_token(token)` is the
+# database matching a stored hash against a fresh one, which is both the right
+# design and nowhere near this process's timing.  The first version of this
+# flagged all five of those and would have taught whoever ran it to ignore the
+# check, which is worse than not having it.
+import re as _re
+
+_secretish = ("signature", "hmac", "token_hash", "expected_mac", "psk")
+_sqlalchemy = _re.compile(r"\b[A-Z][A-Za-z0-9_]*\.[a-z_]+\s*==")
+_offenders = []
+for _path in sorted(pathlib.Path("app").rglob("*.py")):
+    for _n, _line in enumerate(_path.read_text().splitlines(), 1):
+        _bare = _line.strip()
+        if _bare.startswith("#") or "compare_digest" in _bare:
+            continue
+        if _sqlalchemy.search(_bare):
+            continue
+        if any(f"{w} ==" in _bare or f"== {w}" in _bare for w in _secretish):
+            _offenders.append(f"{_path}:{_n} {_bare[:70]}")
+check("and no secret is compared with a plain equals in this process",
+      not _offenders, _offenders[:5])
+
 check("hashing a token twice gives the same hash", hash_token(token) == hash_token(token))
 check("the hash is not the token", hash_token(token) != token,
       "the token is being stored as itself")

@@ -634,6 +634,62 @@ check("what a snapshot may carry is the same list at both ends",
 
 # =============================================================================
 print()
+print("  block known malicious refuses attacks, not somebody's gitignore")
+
+# The rules that are about a *shape* rather than about exploitation.  Each is
+# CRITICAL, which scores 5, which is the whole threshold, so one of them
+# refuses a request on its own.  Measured on real traffic: on a git hosting
+# site 282 requests reached the firewall and 282 were refused, 278 of them
+# tripping nothing but these; and a documentation site about nginx refused its
+# own help search for "/etc/nginx/nginx.conf".
+#
+# This check exists because the mutation harness found `checks/waf.py` did not
+# notice when that exclusion was taken out again.  It tested everything around
+# the fix and nothing about the fix.
+POLICY_IDS = ("920440", "920500", "930120", "930130")
+
+
+def _waf_file(mode, extra=None):
+    def mutate(session):
+        host = session.get(VirtualHost, TARGET_ID)
+        cfg = host.setting_map()
+        cfg["waf_mode"] = mode
+        cfg.update(extra or {})
+        host.settings = json_set(cfg)
+    files = rendered_with(mutate)
+    with session_scope() as s:
+        name = _safe_name(s.get(VirtualHost, TARGET_ID).name)
+    return files.get(f"waf/{name}.conf", "")
+
+
+if TARGET_ID is None:
+    skip("block known malicious leaves the policy rules out",
+         "no site on this box to render")
+else:
+    _known = _waf_file("block_known")
+    _removed = [rid for rid in POLICY_IDS
+                if f"SecRuleRemoveById {rid}" in _known]
+    check("block known malicious leaves every policy rule out",
+          len(_removed) == len(POLICY_IDS),
+          f"only {_removed} were left out of {list(POLICY_IDS)}")
+    check("and says in the file which ones and why",
+          "block known malicious" in _known.lower()
+          and "Restricted File Access" in _known,
+          _known[-400:])
+
+    _full = _waf_file("block")
+    check("block what the rules say still enforces them",
+          not any(f"SecRuleRemoveById {rid}" in _full for rid in POLICY_IDS),
+          "the full mode is dropping rules it should be enforcing")
+
+    _watch = _waf_file("watching")
+    check("and watching still runs the whole set, so a round sees them",
+          not any(f"SecRuleRemoveById {rid}" in _watch for rid in POLICY_IDS),
+          "watching is dropping rules, so a learning round cannot see them")
+
+
+# =============================================================================
+print()
 print("  built is not loaded, and the gate has to ask for loaded")
 
 # `nginx -V` reports what was compiled in.  It cannot say whether a

@@ -78,7 +78,36 @@ catch it.
 | `gslb_listener.py` | The DNS listener comes back after being stopped, rather than holding the port and never binding again. |
 | `rollback.py` | A rollback to an archive nginx will not load leaves the node exactly as it was, rather than parking a broken config that only shows up at the next restart.  Runs on the host, see below. |
 | `standby_message.py` | A refused apply says which of the three reasons it was, so nobody is sent to an active node that does not exist yet. |
+| `adaptive_weights.py` | Weights move a little at a time or not at all: off unless asked for, left alone when everything is slow or the spread is noise, and never past the floor or the ceiling. |
+| `default_site.py` | A second default site is refused rather than stopping every apply on the fleet. |
 | `comparison.py` | The feature comparison holds together and has not turned into a brochure: every row scores every product, the totals match the data, and we still lose the rows we lose. |
+
+## Proving a check would fail
+
+Reading a check tells you what it claims.  Running it tells you it passes.
+Neither tells you it would fail if the product were broken, and that is the
+only question worth asking of a test.
+
+`tools/mutation/` breaks one thing on purpose and runs one check against it.  A
+check that still passes is the finding.  Three checks in here were passing for
+the wrong reason before anybody went looking, and none of them was found by
+reading:
+
+- every role check in `authz_sweep.py` was proving the CSRF guard rather than
+  the permission model, because TestClient never sent the cookie back
+- `waf.py` and `default_site.py` each tested everything around a fix and
+  nothing about the fix, so removing it changed no answer
+- `trust.py` checked that the constant time comparison gave the right answers,
+  which a plain `==` also does
+
+It also found a feature with no check at all: adaptive weights, which moves
+traffic between backends and had nothing watching it.
+
+Run it before believing a check you have just written:
+
+```bash
+python3 tools/mutation/mutate.py
+```
 
 ## A pass that touched nothing is not a pass
 

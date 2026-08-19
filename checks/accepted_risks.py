@@ -138,12 +138,55 @@ check("the allow list is not empty",
 if entries:
     print(f"      {len(entries)} entr{'y' if len(entries) == 1 else 'ies'}: "
           f"{', '.join(entries[:6])}")
-    wide = [e for e in entries if e.endswith(("/0", "/1", "/2", "/3", "/4",
-                                              "/5", "/6", "/7", "/8"))]
-    check("no entry is so wide it is not really a restriction",
-          not wide,
-          f"these cover a large part of the internet, which is the same as no "
-          f"allow list for the purpose of these two advisories: {wide}")
+    # Judged on what an entry actually admits, not on how short its prefix is.
+    #
+    # The first version of this failed anything /8 or shorter and said the
+    # entries "cover a large part of the internet".  Of 10.0.0.0/8 that is
+    # simply untrue: it is RFC 1918 space and unroutable from the internet, so
+    # it admits the office and nobody else.  Both advisories were accepted
+    # because the GUI is not reachable by just anybody, and a private range
+    # does not undo that.
+    #
+    # This matters more than the wording.  A security check that reports a
+    # thing wrongly is one people learn to click past, and then it is not
+    # protecting anything at the moment it finally has something to say.
+    #
+    # What does undo the acceptance is public address space at scale, so that
+    # is what fails.  A broad private range is reported as worth knowing and
+    # does not fail, because "anybody already inside your network" is a
+    # different decision from "anybody at all" and is the owner's to make.
+    import ipaddress
+
+    public_wide, private_wide, unreadable = [], [], []
+    for entry in entries:
+        try:
+            net = ipaddress.ip_network(entry, strict=False)
+        except ValueError:
+            unreadable.append(entry)
+            continue
+        if net.prefixlen == 0:
+            public_wide.append(entry)
+        elif net.is_private or net.is_loopback or net.is_link_local:
+            if net.num_addresses > 65536:
+                private_wide.append(entry)
+        elif net.prefixlen <= 16:
+            public_wide.append(entry)
+
+    check("no entry opens the GUI to the public internet at scale",
+          not public_wide,
+          f"these admit routable internet space, which for these two "
+          f"advisories is the same as having no allow list: {public_wide}")
+
+    check("every entry is an address range this can read",
+          not unreadable,
+          f"an entry that does not parse is not protecting anything and is "
+          f"not obviously broken on the page either: {unreadable}")
+
+    if private_wide:
+        print(f"      worth knowing: {', '.join(private_wide)} covers a broad "
+              f"private range, so anybody already on that network reaches the "
+              f"login page.  Not counted against the acceptances, which were "
+              f"about reachability from the internet.")
 
 # The allow list runs before anything else, which is the other half of the
 # argument: a refused request never reaches the parser.

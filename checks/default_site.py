@@ -23,6 +23,7 @@ site is changed: every request here is one that should be turned down.
 
     docker exec -i nginx-fleet-manager python < checks/default_site.py
 """
+import pathlib
 import sys
 
 from fastapi.testclient import TestClient
@@ -158,6 +159,79 @@ else:
               bool(again.default_server) == WAS_DEFAULT,
               f"default_server is now {again.default_server}")
 
+# =============================================================================
+print()
+print("  and the refusal itself, which needs another site to already have it")
+
+# The branch above only fires on a fleet where something the manager must not
+# touch claims the default.  On a fleet where the only thing in the way is the
+# installer's symlink, which the manager takes over, the refusal is never
+# reached and this file was passing without testing the thing it is named
+# after.  The mutation harness found that: taking the refusal out entirely
+# changed nothing here.
+#
+# So the other refusal is exercised, the one that does not depend on what is
+# on disk: another managed site already being the default.  Done against a
+# real copy of this node's database, so a site can be marked and the API asked
+# about it without writing anything live.  The backup API rather than a file
+# copy, or the copy is the database as of some earlier moment.
+import shutil as _shutil
+import sqlite3
+import tempfile
+
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+from app import db as _dbmod
+
+_live = _dbmod.get_engine().url.database
+if not _live or not pathlib.Path(_live).is_file():
+    skip("a site is refused when another site already has it",
+         "cannot find this node's database file to copy")
+else:
+    _dir = pathlib.Path(tempfile.mkdtemp(prefix="default-site-"))
+    _copy = _dir / "copy.db"
+    _src = sqlite3.connect(_live); _dst = sqlite3.connect(str(_copy))
+    _src.backup(_dst); _src.close(); _dst.close()
+
+    _real_engine, _real_factory = _dbmod._engine, _dbmod._SessionFactory
+    _dbmod._engine = create_engine(f"sqlite:///{_copy}")
+    _dbmod._SessionFactory = sessionmaker(bind=_dbmod._engine)
+    try:
+        with session_scope() as s:
+            rows = s.query(VirtualHost).order_by(VirtualHost.id).all()
+            if len(rows) < 2:
+                OTHER = MINE = None
+            else:
+                OTHER, MINE = rows[0], rows[1]
+                OTHER.default_server = True
+                MINE.default_server = False
+                OTHER_NAME2, MINE_ID = OTHER.name, MINE.id
+                s.commit()
+
+        if OTHER is None:
+            skip("a site is refused when another site already has it",
+                 "this box has fewer than two sites")
+        else:
+            client2, head2 = client()
+            res = client2.request("PUT", f"/api/hosts/{MINE_ID}",
+                                  json={"default_server": True}, headers=head2)
+            check("a second site asking for the default is refused",
+                  res.status_code == 409,
+                  f"{res.status_code} {res.text[:200]}")
+            check("and the refusal names the site that already has it",
+                  OTHER_NAME2 in res.text, res.text[:250])
+            check("and it is not a token error dressed up as a refusal",
+                  "csrf" not in res.text.lower(), res.text[:200])
+            with session_scope() as s:
+                check("nothing was stored by the attempt",
+                      s.get(VirtualHost, MINE_ID).default_server is not True,
+                      "the second site was marked default anyway")
+    finally:
+        _dbmod._engine, _dbmod._SessionFactory = _real_engine, _real_factory
+        _shutil.rmtree(_dir, ignore_errors=True)
+
+print()
 failed = [name for name, ok, _ in results if not ok]
 print()
 if failed:
