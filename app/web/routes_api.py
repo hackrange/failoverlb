@@ -2031,14 +2031,20 @@ async def _refuse_second_default_server(session, host, payload):
         log.warning("could not ask this node about the default site")
         return
 
-    files = answer.get("files") or []
-    if files:
+    # Only the ones the manager cannot take over.  A symlink in sites-enabled
+    # is stood down at apply time and put back when no managed site wants the
+    # role, so it is not a reason to refuse the setting.  Anything else is
+    # somebody's own file and an apply does not get to move it quietly.
+    blocked = answer.get("blocked")
+    if blocked is None:                     # an agent from before this existed
+        blocked = answer.get("files") or []
+    if blocked:
         raise HTTPException(
             status_code=409,
             detail=f"this node already has a default site in "
-                   f"{', '.join(files)}, which nginx will not allow twice.  "
-                   f"That file is not managed here: it comes from the nginx "
-                   f"install.  Remove the default_server flag from it, or "
+                   f"{', '.join(blocked)}, which nginx will not allow twice.  "
+                   f"That file is not managed here and is not something this "
+                   f"tool will move for you.  Take default_server off it, or "
                    f"remove the file, and then set this.")
 
 

@@ -688,9 +688,112 @@ def _default_server_files() -> list:
     return found
 
 
+# Where we remember a catch all we stood down, so it can be put back.
+DEFAULT_SITE_STATE = Path("/var/lib/nginx-fleet-manager/default-site.json")
+
+
+def _takeable(path: Path) -> bool:
+    """
+    Can the manager stand this one down and put it back exactly as it was.
+
+    Only a symlink in sites-enabled.  That is how the installer enables its
+    catch all, and a symlink can be removed and recreated with nothing lost,
+    because the real file stays in sites-available where somebody put it.
+
+    A regular file is not touched.  It might be somebody's own config with
+    their own content in it, and moving that out of the way is not a decision
+    an apply gets to make quietly.  nginx globs `sites-enabled/*`, so renaming
+    in place does not hide anything either: the new name matches the glob just
+    as well as the old one.
+    """
+    return path.is_symlink() and path.parent == (NGINX_PREFIX / "sites-enabled")
+
+
 def v_default_server_conflict(req):
-    """Who else already claims to be the default site on this box."""
-    return {"files": _default_server_files()}
+    """
+    Who else already claims to be the default site on this box.
+
+    Split by whether the manager could take it over, because the two need
+    different answers.  A symlink we can stand down is not a reason to refuse
+    somebody's setting; a file we must not touch is.
+    """
+    files = _default_server_files()
+    takeable = [f for f in files if _takeable(Path(f))]
+    return {
+        "files": files,
+        "takeable": takeable,
+        "blocked": [f for f in files if f not in takeable],
+        "stood_down": _stood_down(),
+    }
+
+
+def _stood_down() -> list:
+    try:
+        return json.loads(DEFAULT_SITE_STATE.read_text()).get("links", [])
+    except Exception:
+        return []
+
+
+def _remember_stood_down(links):
+    DEFAULT_SITE_STATE.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write(DEFAULT_SITE_STATE, json.dumps({"links": links}, indent=1),
+                 mode=0o640)
+
+
+def reconcile_default_site(managed_wants_it: bool) -> dict:
+    """
+    Make room for a managed default site, or give the room back.
+
+    nginx allows one default server per address and port.  When a managed site
+    claims the role, the catch all the installer enabled has to stand down or
+    nothing on the fleet can be applied at all.  When no managed site claims
+    it, the catch all goes back, so unmatched traffic lands where it always did
+    rather than on whichever server block happens to be first.
+
+    Only symlinks in sites-enabled are touched, and what was removed is written
+    down so putting it back is exact rather than a guess.  The caller tests
+    nginx afterwards; this does not, because it runs inside a staging test that
+    is about to do exactly that.
+    """
+    changed = {"removed": [], "restored": []}
+
+    if managed_wants_it:
+        links = _stood_down()
+        for path_str in _default_server_files():
+            path = Path(path_str)
+            if not _takeable(path):
+                continue
+            target = os.readlink(path)
+            entry = {"link": str(path), "target": target}
+            if entry not in links:
+                links.append(entry)
+            path.unlink()
+            changed["removed"].append(str(path))
+            log.warning("stood down %s so a managed site can be the default",
+                        path)
+        if changed["removed"]:
+            _remember_stood_down(links)
+        return changed
+
+    for entry in _stood_down():
+        link = Path(entry["link"])
+        if link.exists() or link.is_symlink():
+            continue
+        link.parent.mkdir(parents=True, exist_ok=True)
+        os.symlink(entry["target"], link)
+        changed["restored"].append(str(link))
+        log.warning("put %s back, no managed site is the default now", link)
+    if changed["restored"]:
+        _remember_stood_down([])
+    return changed
+
+
+def v_default_site(req):
+    """Stand the unmanaged catch all down, or put it back, and say what moved."""
+    wants = req.get("managed_default")
+    if not isinstance(wants, bool):
+        raise AgentError("managed_default has to be true or false", "bad_request")
+    return reconcile_default_site(wants)
 
 
 def v_waf_module_status(req):
@@ -849,6 +952,20 @@ def _staging_for_test() -> str:
     return str(TEST_DIR)
 
 
+def _staging_declares_default() -> bool:
+    """Does the config we are about to test claim to be the default site."""
+    staging = Path(_staging_for_test())
+    if not staging.is_dir():
+        return False
+    for path in staging.rglob("*.conf"):
+        try:
+            if _DEFAULT_SERVER_RE.search(path.read_text(errors="replace")):
+                return True
+        except OSError:
+            continue
+    return False
+
+
 def v_test_staging(req):
     """
     Test the staged config without letting it near the running server.
@@ -861,6 +978,17 @@ def v_test_staging(req):
     main_conf = NGINX_PREFIX / "nginx.conf"
     if not main_conf.is_file():
         raise AgentError(f"cannot find {main_conf}", "not_found")
+
+    # Make room for a managed default site before testing, or give the room
+    # back if the staged config no longer has one.
+    #
+    # This has to happen before the test rather than after it, because the
+    # candidate config includes sites-enabled the same way the live one does.
+    # Two default servers is the one clash nginx refuses outright, so leaving
+    # it until the commit would mean the test passes and the apply falls over
+    # on the node that already said yes.
+    staged_default = _staging_declares_default()
+    moved = reconcile_default_site(staged_default)
 
     original = main_conf.read_text()
 
@@ -888,7 +1016,14 @@ def v_test_staging(req):
         output = output.replace(str(CANDIDATE_CONF), "the candidate config")
         output = output.replace(staged_include + "/", live_include + "/")
 
-        return {"ok": result["rc"] == 0, "output": output}
+        ok = result["rc"] == 0
+        if not ok and moved.get("removed"):
+            # The config we made room for is not going to be applied, so give
+            # the room back rather than leaving the box with its catch all
+            # gone and nothing having replaced it.
+            reconcile_default_site(False)
+
+        return {"ok": ok, "output": output, "default_site": moved}
     finally:
         # Always clean up, even if nginx blew up.  Leaving this behind would
         # mean the next test reads a stale candidate.
@@ -3864,6 +3999,7 @@ VERBS = {
     "geoip_status": v_geoip_status,
     "waf_module": v_waf_module,
     "default_server_conflict": v_default_server_conflict,
+    "default_site": v_default_site,
     "waf_module_status": v_waf_module_status,
     "crs_install": v_crs_install,
     "crs_status": v_crs_status,

@@ -108,9 +108,31 @@ else:
 
 print()
 
+BLOCKED = (answer.get("blocked") if isinstance(UNMANAGED, list) else None) or []
+TAKEABLE = (answer.get("takeable") if isinstance(UNMANAGED, list) else None) or []
+if TAKEABLE:
+    print(f"          the manager can stand these down: {TAKEABLE}")
+
 if WAS_DEFAULT:
     skip("setting the default site is refused while something else has it",
          f"{SITE_NAME} is already the default, so there is nothing to refuse")
+elif UNMANAGED and not BLOCKED and not OTHER_NAME:
+    # Everything in the way is a symlink the manager takes over at apply time,
+    # so the setting is allowed and the catch all stands down instead.  The
+    # refusal is for the files it must not touch.
+    response = client_.request("PUT", f"/api/hosts/{SITE_ID}",
+                               json={"default_server": True}, headers=head)
+    check("a catch all the manager can take over does not block the setting",
+          response.status_code == 200,
+          f"{response.status_code} {response.text[:200]}")
+    # Put it straight back, because this check does not change anything.
+    client_.request("PUT", f"/api/hosts/{SITE_ID}",
+                    json={"default_server": False}, headers=head)
+    with session_scope() as session:
+        again = session.get(VirtualHost, SITE_ID)
+        check("and the site is left exactly as it was",
+              bool(again.default_server) == WAS_DEFAULT,
+              f"default_server is now {again.default_server}")
 elif not UNMANAGED and not OTHER_NAME:
     skip("setting the default site is refused while something else has it",
          "nothing else claims the default on this box, so the refusal has "
