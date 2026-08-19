@@ -19,7 +19,12 @@ LB01 = qa.LB01
 
 BROKEN = """
 # An ordinary looking config that nginx will not load.
-upstream app_servers {
+#
+# The upstream carries the qa prefix for one reason: importing it makes a real
+# pool on the fleet, and cleanup.py finds this pass's objects by that prefix.
+# Called app_servers, which is what it was, the pool it created was recognised
+# by nothing and was still on the fleet after the run.
+upstream qa_app_servers {
     server %(backend)s:9101;
     server %(backend)s:9102;
     keepalive 32;
@@ -35,19 +40,19 @@ server {
     proxy_buffering off;
 
     location /monitoring {
-        proxy_pass http://app_servers;
+        proxy_pass http://qa_app_servers;
         proxy_buffering off;
         proxy_buffering off;
     }
 
     location /monitoring {
-        proxy_pass http://app_servers;
+        proxy_pass http://qa_app_servers;
     }
 
     location /api {
         limit_req zone=one burst=20 nodelay;
         limit_conn perip 5;
-        proxy_pass http://app_servers;
+        proxy_pass http://qa_app_servers;
         proxy_buffering off;
     }
 
@@ -58,7 +63,7 @@ server {
     }
 
     location / {
-        proxy_pass http://app_servers;
+        proxy_pass http://qa_app_servers;
     }
 }
 """ % {"backend": qa.BACKEND_HOST, "domain": qa.DOMAIN,
