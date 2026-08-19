@@ -689,7 +689,14 @@ def _default_server_files() -> list:
 
 
 # Where we remember a catch all we stood down, so it can be put back.
-DEFAULT_SITE_STATE = Path("/var/lib/nginx-fleet-manager/default-site.json")
+#
+# Under /usr/local/lib and not /var/lib, because the unit runs with
+# ProtectSystem=strict and only the paths it names are writable.  /var/lib is
+# not one of them, so a state file there cannot be written at all: the first
+# version of this put it there, the write failed with a read only filesystem,
+# and by then the symlink had already been removed.  The node was left with no
+# catch all and nothing recording that it ever had one.
+DEFAULT_SITE_STATE = Path("/usr/local/lib/nginx-fleet-manager/default-site.json")
 
 
 def _takeable(path: Path) -> bool:
@@ -759,20 +766,31 @@ def reconcile_default_site(managed_wants_it: bool) -> dict:
 
     if managed_wants_it:
         links = _stood_down()
+        going = []
         for path_str in _default_server_files():
             path = Path(path_str)
             if not _takeable(path):
                 continue
-            target = os.readlink(path)
-            entry = {"link": str(path), "target": target}
+            entry = {"link": str(path), "target": os.readlink(path)}
+            going.append((path, entry))
             if entry not in links:
                 links.append(entry)
+
+        if not going:
+            return changed
+
+        # Write down what is about to move **before** moving it.  The other
+        # order loses the box's catch all the moment anything goes wrong
+        # between the two steps, and there is then nothing on disk saying what
+        # used to be there.  That is not a hypothetical: it is what the first
+        # version of this did.
+        _remember_stood_down(links)
+
+        for path, _entry in going:
             path.unlink()
             changed["removed"].append(str(path))
             log.warning("stood down %s so a managed site can be the default",
                         path)
-        if changed["removed"]:
-            _remember_stood_down(links)
         return changed
 
     for entry in _stood_down():
