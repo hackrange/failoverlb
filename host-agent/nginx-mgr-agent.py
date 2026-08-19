@@ -650,6 +650,49 @@ def v_waf_module(req):
     return {"enabled": enabled, "path": str(MODSEC_LOAD_CONF)}
 
 
+# Where nginx keeps config that is not ours.  Anything the manager renders
+# lives under MANAGED_DIR; these are the two places a distribution or an
+# installer drops server blocks of its own.
+UNMANAGED_CONFIG_DIRS = (
+    NGINX_PREFIX / "sites-enabled",
+    NGINX_PREFIX / "conf.d",
+)
+
+# `listen 80 default_server;` and friends, in a file we did not write.
+_DEFAULT_SERVER_RE = re.compile(r"^\s*listen\s+[^;#]*\bdefault_server\b", re.M)
+
+
+def _default_server_files() -> list:
+    """
+    Config outside the managed tree that already claims default_server.
+
+    nginx allows exactly one default server per address and port, and refuses
+    to start with two.  The manager can render a perfectly good site marked as
+    the default and still have every apply on the fleet refused, because the
+    installer's own catch all got there first and nothing in the manager knew
+    that file existed.
+    """
+    found = []
+    for folder in UNMANAGED_CONFIG_DIRS:
+        if not folder.is_dir():
+            continue
+        for path in sorted(folder.iterdir()):
+            if path.is_dir():
+                continue
+            try:
+                text = path.read_text(errors="replace")
+            except OSError:
+                continue
+            if _DEFAULT_SERVER_RE.search(text):
+                found.append(str(path))
+    return found
+
+
+def v_default_server_conflict(req):
+    """Who else already claims to be the default site on this box."""
+    return {"files": _default_server_files()}
+
+
 def v_waf_module_status(req):
     """What this node has, so the page can say rather than guess."""
     return {
@@ -3820,6 +3863,7 @@ VERBS = {
     "geoip_install": v_geoip_install,
     "geoip_status": v_geoip_status,
     "waf_module": v_waf_module,
+    "default_server_conflict": v_default_server_conflict,
     "waf_module_status": v_waf_module_status,
     "crs_install": v_crs_install,
     "crs_status": v_crs_status,

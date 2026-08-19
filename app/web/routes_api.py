@@ -1984,10 +1984,70 @@ async def duplicate_host(host_id: str, request: Request,
     return out
 
 
+async def _refuse_second_default_server(session, host, payload):
+    """
+    Somebody is making this site the default one.  Is that going to work?
+
+    nginx allows one default server per address and port and refuses to start
+    with two, and an apply is all or nothing, so a second one does not break
+    the site that asked for it, it stops **the whole fleet applying anything**.
+
+    Two ways that happens.  Another managed site already has it, which we can
+    see in our own database.  Or something outside the managed tree has it,
+    which we cannot: `nginx-installer.sh` writes a catch all at
+    sites-enabled/default.conf with `listen 80 default_server`, and nothing in
+    the manager knew that file was there.  So the tick box saved, redisplayed,
+    rendered correctly, and then every apply was refused with "a duplicate
+    default server for 0.0.0.0:80" naming a file the person never wrote.
+
+    Asked of the node rather than assumed, because the answer is about what is
+    on disk today, and refused here rather than at apply time so it costs one
+    save instead of everybody's next change.
+    """
+    if not payload.get("default_server"):
+        return
+    if host is not None and host.default_server:
+        return                       # already the default, nothing changing
+
+    other = (session.query(VirtualHost)
+             .filter(VirtualHost.default_server.is_(True),
+                     VirtualHost.enabled.is_(True))
+             .filter(VirtualHost.id != (host.id if host is not None else -1))
+             .first())
+    if other:
+        raise HTTPException(
+            status_code=409,
+            detail=f"{other.name} is already the default site, and nginx allows "
+                   f"only one.  Take it off {other.name} first.")
+
+    from app.core.agent_client import get_agent
+
+    try:
+        answer = await get_agent().call("default_server_conflict")
+    except Exception:
+        # If the node cannot be asked, do not invent an answer.  The apply
+        # still checks the config on every node before anything goes live, so
+        # the worst case is the old behaviour rather than a wrong refusal.
+        log.warning("could not ask this node about the default site")
+        return
+
+    files = answer.get("files") or []
+    if files:
+        raise HTTPException(
+            status_code=409,
+            detail=f"this node already has a default site in "
+                   f"{', '.join(files)}, which nginx will not allow twice.  "
+                   f"That file is not managed here: it comes from the nginx "
+                   f"install.  Remove the default_server flag from it, or "
+                   f"remove the file, and then set this.")
+
+
 @router.put("/hosts/{host_id}")
 async def update_host(host_id: str, request: Request, g: ObjectGuard = Depends(changing)):
     host = g.get(VirtualHost, host_id, "edit_sites")
     payload = pick_fields(await request.json(), HOST_FIELDS)
+
+    await _refuse_second_default_server(g.session, host, payload)
 
     before = _host_detail(host)
     _apply_host_fields(g, host, payload)
