@@ -43,6 +43,7 @@ parent, and doing it badly is worse than not doing it: a broken signature makes
 a name fail to resolve everywhere, which is a harder outage than the one this
 feature exists to prevent.
 """
+import json
 import logging
 import socket
 import struct
@@ -625,6 +626,126 @@ def _own_address() -> str:
     except Exception:
         pass
     return "0.0.0.0"
+
+
+def node_addresses(session) -> dict:
+    """
+    Every address each node is known by, keyed by node name.
+
+    Three places hold one: the address the cluster talks to it on, the public
+    address it discovered by asking the internet what it goes out as, and the
+    list of addresses its own interfaces hold.  A node behind NAT has a
+    different answer in the first two, which is exactly why all three count.
+    """
+    from app.models import Node
+
+    out = {}
+    for node in session.query(Node).all():
+        known = set()
+        for value in (node.address, node.public_ip):
+            if value and str(value).strip():
+                known.add(str(value).strip())
+        # local_addresses is a list of objects, one per interface, not a list
+        # of strings.  Storing str(entry) put a whole json object into the set
+        # and into the message a person reads.  Older rows may still be plain
+        # strings, so both shapes are handled.
+        try:
+            for entry in json.loads(node.local_addresses or "[]"):
+                value = entry.get("address") if isinstance(entry, dict) else entry
+                if value and str(value).strip():
+                    known.add(str(value).strip())
+        except Exception:                       # noqa: BLE001
+            pass
+        out[node.name] = known
+    return out
+
+
+def _worth_naming(addresses) -> list:
+    """
+    The addresses worth showing somebody, in a sentence.
+
+    Every address counts when deciding whether an answer matches, including
+    loopback and link local: an answer pointing at one of those is held by the
+    node and is still almost certainly a mistake, and that is a different
+    conversation.  Printing them all makes the message unreadable, so the list
+    a person sees leaves out the ones nobody would ever mean to publish.
+    """
+    out = []
+    for value in sorted(addresses):
+        low = value.lower()
+        if low.startswith(("127.", "fe80:", "::1")) or low == "0.0.0.0":
+            continue
+        out.append(value)
+    return out
+
+
+def answer_address_warnings(session) -> list:
+    """
+    Answers that hand out an address their own node does not hold.
+
+    Reported from the field, and it cost a real outage to find.  An answer was
+    tied to the second node and pointed at an address one digit away from that
+    node's real one.  Everything looked right: both nodes answered, the record
+    resolved, the page showed two healthy answers.
+
+    It only showed when the other node was taken away, because until then the
+    other node's answer was the one being used.  Then the name resolved solely
+    to an address that belonged to nobody, and it read as DNS having failed.
+
+    A warning and never a refusal.  Pointing an answer at something other than
+    the node itself is a real thing people do: a floating address that moves
+    between machines, or a service in front of the node.  The product cannot
+    tell that apart from a typo, but it can say "this does not look like that
+    node" and let somebody who knows decide.
+
+    Answers not tied to a node are left alone entirely.  There is nothing to
+    compare them against, which is the whole meaning of not tying them.
+    """
+    from app.models import GslbAnswer, GslbRecord, GslbZone
+
+    known = node_addresses(session)
+    out = []
+    for zone in session.query(GslbZone).all():
+        for record in zone.records:
+            for answer in record.answers:
+                name = _answer_node(answer)
+                if not name:
+                    continue
+                if name not in known:
+                    out.append({
+                        "zone": zone.name,
+                        "record": record.fqdn(zone.name),
+                        "answer_id": answer.id,
+                        "value": answer.value,
+                        "node": name,
+                        "problem": "no node of that name",
+                        "detail": (
+                            f"this answer is tied to a node called {name}, and "
+                            f"there is no node of that name in the fleet.  It "
+                            f"will never be handed out while that stays true."
+                        ),
+                    })
+                    continue
+                value = (answer.value or "").strip()
+                if value and value not in known[name]:
+                    out.append({
+                        "zone": zone.name,
+                        "record": record.fqdn(zone.name),
+                        "answer_id": answer.id,
+                        "value": value,
+                        "node": name,
+                        "problem": "address is not one that node holds",
+                        "detail": (
+                            f"{name} is reachable on "
+                            f"{', '.join(_worth_naming(known[name])) or 'no address this fleet knows'}, "
+                            f"and this answer hands out {value}.  If that is "
+                            f"deliberate, a floating address for instance, "
+                            f"nothing is wrong.  If it is a typo, nobody finds "
+                            f"out until the other node is gone and this is the "
+                            f"only answer left."
+                        ),
+                    })
+    return out
 
 
 def healthy_node_names(session) -> set:

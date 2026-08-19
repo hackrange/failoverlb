@@ -4661,10 +4661,27 @@ def _gslb_record_json(r):
              # machine, so resolving it here would report the wrong node.
              "node_name": (a.node_name
                            or (a.node.name if a.node else None)),
-             "priority": a.priority, "enabled": a.enabled}
+             "priority": a.priority, "enabled": a.enabled,
+             # Next to the answer rather than in a list somewhere else, so it
+             # is in front of the person editing the thing it is about.
+             "address_warning": _answer_warnings().get(a.id)}
             for a in r.answers
         ],
     }
+
+
+def _answer_warnings():
+    """
+    Answers whose address does not belong to the node they are tied to.
+
+    Worked out once per request and cached on the session, because a zone with
+    many records would otherwise walk the node table for every answer.
+    """
+    from app.core import gslb
+    from app.db import session_scope
+
+    with session_scope() as session:
+        return {w["answer_id"]: w for w in gslb.answer_address_warnings(session)}
 
 
 @router.get("/gslb/zones")
@@ -4959,6 +4976,9 @@ async def create_gslb_answer(record_id: str, request: Request,
     audit.record("gslb.answer.add", user=g.user, object_type="gslb_record",
                  object_name=record.fqdn(), changes=payload)
     _gslb_reload()
+    # Saved either way.  A warning here is advice, not a refusal: pointing an
+    # answer at a floating address, or at something in front of the node, is a
+    # real thing people do and the product cannot tell it from a typo.
     return _gslb_record_json(record)
 
 

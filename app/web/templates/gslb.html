@@ -162,11 +162,26 @@ document.addEventListener("DOMContentLoaded", function () {
                : "node is down, held back";
     }
     if (!a.enabled) { state = "unknown"; why = "turned off here"; }
+
+    // An address that does not belong to the node it is tied to.  Said here,
+    // beside the answer, because that is where somebody can act on it.  It is
+    // a warning and never a refusal: a floating address that moves between
+    // machines looks exactly the same from here and is perfectly valid.
+    //
+    // It matters because it is invisible in normal running.  The other node's
+    // answer covers for it, and the day that node goes away the name resolves
+    // only to an address belonging to nobody.
+    let warn = "";
+    if (a.address_warning) {
+      warn = '<div class="faint small" style="margin-left:1.2rem;color:#b45309">' +
+        "&#9888; " + esc(a.address_warning.detail) + "</div>";
+    }
+
     return '<div class="answer-line"><span class="dot ' + state +
       '" title="' + esc(why) + '"></span><span class="mono small">' +
       esc(a.value) + "</span>" +
       (a.node_name ? ' <span class="faint small">' + esc(a.node_name) + "</span>" : "") +
-      ' <span class="faint small">&middot; ' + esc(why) + "</span></div>";
+      ' <span class="faint small">&middot; ' + esc(why) + "</span></div>" + warn;
   }
 
   function recordRows(zone) {
