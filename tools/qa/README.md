@@ -122,6 +122,7 @@ chmod -R a+rX /var/www/qa-static
 | `t19_outside_address.py` | The one thing the others cannot be: a stranger.  Runs on a bridge network and proves a management only site turns it away while the open site beside it serves it. |
 | `t20_waf_surface.py` | What the product says about a WAF its nginx cannot run: the tab hidden, both doors to the setting refusing, and every other setting still saving. |
 | `t21_waf.py` | The firewall with a real engine under it: four ordinary attacks refused, four ordinary requests served, the threshold measured, a learning round attributed, an exclusion proved. |
+| `t22_default_site.py` | Choosing which site answers a name the fleet does not know, that it answers with its own error page, and that the installer's catch all comes back afterwards. |
 | `report.py` | Turns the evidence into the test plan document. |
 | `cleanup.py` | Removes everything a run created. |
 
