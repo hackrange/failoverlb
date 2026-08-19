@@ -790,6 +790,33 @@ async def lifespan(app: FastAPI):
     if scheduler.running:
         scheduler.shutdown(wait=False)
 
+    # Give port 53 back before going away.
+    #
+    # The redirect lives on the host, in nftables, and outlives this container
+    # completely.  Stopping the manager left the rule behind pointing at a port
+    # with nothing listening on it, so the box went on accepting DNS on 53 and
+    # answering none of it.
+    #
+    # That is worse than the box being down, and clear_redirect's own docstring
+    # says why: a resolver that gets silence sits there until it times out,
+    # while a resolver that cannot reach the address at all moves on to the
+    # other nameserver immediately.  On a two node fleet it looks like DNS has
+    # failed everywhere when one node's container was stopped.
+    #
+    # Best effort and time limited.  A node that cannot reach its agent on the
+    # way out must not hang the shutdown; the agent clears a stale rule on its
+    # own as well.
+    try:
+        from app.core import gslb
+
+        server = gslb.get_server()
+        if server._running:
+            await asyncio.wait_for(gslb.clear_redirect(server), timeout=10)
+            server.stop()
+            log.info("gave port 53 back and stopped the dns listener")
+    except Exception as exc:                      # noqa: BLE001
+        log.warning("could not give port 53 back on the way out: %s", exc)
+
 
 def create_gui_app() -> FastAPI:
     from app.web.routes_account import router as account_router

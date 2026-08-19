@@ -1981,11 +1981,39 @@ def v_dns_redirect_clear(req):
 
 
 def v_dns_redirect_status(req):
-    """What rule is actually in place, as opposed to what we think we wrote."""
+    """
+    What rule is actually in place, as opposed to what we think we wrote.
+
+    `installed` and `present` say the same thing.  Both are here because the
+    manager asked for `installed` while this only ever returned `present`, so
+    the answer was always missing and always read as false.  The manager
+    therefore deleted the whole table and wrote it again every ten seconds,
+    for the life of every node.
+
+    Rebuilding means `nft delete table` and then `nft -f`, so there is a gap
+    with no rule at all on every one of those cycles, on the one thing that is
+    supposed to keep answering.  The manager's own comment says it asks first
+    "rather than just rewritten, because writing it means dropping the table
+    and rebuilding it, and doing that every few seconds would put a small hole
+    in the one thing this is here to keep up".  It was doing exactly that.
+
+    `target` and `matches_all_local` let the manager notice a rule that exists
+    but is the wrong shape, which is what an agent upgrade leaves behind.
+    """
     if not shutil.which("nft"):
-        return {"present": False, "note": "nftables is not installed"}
+        return {"installed": False, "present": False,
+                "note": "nftables is not installed"}
     result = run(["nft", "list", "table", "ip", NFT_TABLE])
-    return {"present": result["rc"] == 0, "ruleset": result["stdout"].strip()}
+    there = result["rc"] == 0
+    ruleset = result["stdout"].strip()
+    found = re.search(r"dnat to ([0-9.]+):(\d+)", ruleset) if there else None
+    return {
+        "installed": there,
+        "present": there,
+        "target": f"{found.group(1)}:{found.group(2)}" if found else None,
+        "matches_all_local": "fib daddr type local" in ruleset,
+        "ruleset": ruleset,
+    }
 
 
 def v_public_ip(req):
@@ -4240,6 +4268,97 @@ def setup_logging():
             pass
 
 
+def _dns_redirect_target():
+    """Where the installed redirect points, as (address, port), or None."""
+    listed = run(["nft", "list", "table", "ip", NFT_TABLE])
+    if listed["rc"] != 0:
+        return None
+    found = re.search(r"dnat to ([0-9.]+):(\d+)", listed["stdout"])
+    if found:
+        return found.group(1), int(found.group(2))
+    found = re.search(r"redirect to :(\d+)", listed["stdout"])
+    if found:
+        return "127.0.0.1", int(found.group(1))
+    return None
+
+
+def _dns_answers(address, port, timeout=2.0):
+    """
+    Is a DNS server answering here.
+
+    Asked by sending a real query rather than by reading /proc.  The first
+    version of this parsed /proc/net/udp for the port, which is exactly the
+    kind of indirect evidence this project keeps getting caught by: the unit
+    runs with ProtectProc=invisible, the parse came back empty on a box where
+    the listener was plainly up, and the watchdog tore down a working rule
+    every thirty seconds while the manager put it back.
+
+    Asking the question directly has no such failure mode.  Any well formed
+    reply counts, including a refusal: the point is whether something is there,
+    not whether it likes the question.
+    """
+    query = (b"\x5a\x5a" + b"\x00\x00" + b"\x00\x01" + b"\x00\x00" * 3
+             + b"\x00" + b"\x00\x02" + b"\x00\x01")      # root NS query
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(timeout)
+    try:
+        sock.sendto(query, (address, port))
+        data, _ = sock.recvfrom(512)
+        return len(data) >= 4 and data[:2] == b"\x5a\x5a"
+    except Exception:
+        return False
+    finally:
+        sock.close()
+
+
+def _dns_redirect_watchdog(interval=15, strikes=4):
+    """
+    Take the redirect away when there is nothing behind it any more.
+
+    The manager clears this on its way out, and that covers a normal stop.  It
+    does not cover the container being killed, the machine losing power to it,
+    or the manager crashing, and those leave the rule in place pointing at a
+    port with no listener.
+
+    The box then accepts DNS on port 53 and answers none of it, which is worse
+    than the box being unreachable: a resolver that gets silence waits for its
+    timeout, while a resolver that cannot reach the address at all moves
+    straight on to the other nameserver.  On a two node fleet that reads as DNS
+    having failed everywhere when one node's container went away.
+
+    Two strikes before acting, because the manager restarts in the ordinary
+    course of an upgrade and a single miss during those few seconds is not
+    worth tearing the rule down for.  The manager puts it back within ten
+    seconds of coming up.
+    """
+    missed = 0
+    while True:
+        time.sleep(interval)
+        try:
+            target = _dns_redirect_target()
+            if target is None:
+                missed = 0
+                continue
+            address, port = target
+            if _dns_answers(address, port):
+                missed = 0
+                continue
+            missed += 1
+            if missed < strikes:
+                continue
+            log.warning(
+                "the dns redirect points at %s:%s and nothing there answers a "
+                "dns query, so this box was taking port 53 and answering "
+                "nothing.  Removing it so resolvers move on to another "
+                "nameserver.  It goes back when the manager returns.",
+                address, port)
+            run(["nft", "delete", "table", "ip", NFT_TABLE])
+            missed = 0
+        except Exception as exc:                       # noqa: BLE001
+            log.warning("the dns redirect watchdog had a problem: %s", exc)
+            missed = 0
+
+
 def main():
     setup_logging()
 
@@ -4308,6 +4427,11 @@ def main():
 
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
+
+    # Runs for the life of the agent.  It only ever removes a rule that has
+    # nothing behind it, so the worst it can do on a healthy box is nothing.
+    threading.Thread(target=_dns_redirect_watchdog, daemon=True,
+                     name="dns-redirect-watchdog").start()
 
     log.info("failover lb agent %s (%s) is up",
              AGENT_VERSION, AGENT_FINGERPRINT)

@@ -740,8 +740,29 @@ async def reconcile(server=None):
         from app.core.agent_client import get_agent
         try:
             status = await get_agent().call("dns_redirect_status", timeout=15)
+            # Ask about the rule, and about whether it is the rule we want.
+            #
+            # This read `installed`, which the agent never sent: it answered
+            # `present`.  So the check was false every time and this rebuilt
+            # the nftables table every ten seconds for the life of the node,
+            # each rebuild being a delete followed by a write with a gap in
+            # between.  The comment above says why that is the one thing not
+            # to do here, and it was being done on a timer.
+            want = f"{server.address}:{server.port}"
+            wrong_target = status.get("target") not in (None, want)
             if not status.get("installed"):
                 log.info("the dns redirect had gone, putting it back")
+                await ensure_redirect(server)
+            elif wrong_target:
+                log.info("the dns redirect points at %s rather than %s, "
+                         "rewriting it", status.get("target"), want)
+                await ensure_redirect(server)
+            elif not status.get("matches_all_local", True):
+                # An older agent's rule, left behind by an upgrade.  It matches
+                # one address, so every other address this node answers on has
+                # no redirect at all.
+                log.info("the dns redirect only matches one address, rewriting "
+                         "it to cover every address this node holds")
                 await ensure_redirect(server)
         except Exception as exc:
             log.debug("could not check the dns redirect: %s", exc)
