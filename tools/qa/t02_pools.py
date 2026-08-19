@@ -180,6 +180,35 @@ t.shot("site-config-tab", full=True)
 t.config("before")
 t.proof("the site's config file as rendered", r.file_named(f"sites/{SITE_HOST}.conf"))
 
+# Wait for the health checker to have seen the backends before applying.
+#
+# A pool whose members have not been checked yet is a pool with no healthy
+# members, and the renderer leaves an empty upstream out on purpose, which
+# takes the site with it.  So an apply run seconds after the pool was made
+# renders a site that is not there, every request gets the default server's
+# 404, and the suite reports a routing defect that is really its own hurry.
+# That happened on 19 August: the pool was up thirty seconds later with
+# everything passing.
+t.step("wait for the health checker to have seen the backends")
+_healthy_after = None
+for _ in range(60):
+    # The pool listing reports counts, not members: healthy, total and a
+    # status.  Reading a members list off it gives an empty list every time,
+    # so the wait never finished and reported the backends as never coming up
+    # while they were sitting there healthy.
+    _pool = find("pools", POOL) or {}
+    if int(_pool.get("healthy") or 0) >= 2:
+        _healthy_after = _
+        break
+    time.sleep(1)
+t.proof("how long the pool took to report healthy",
+        f"{_healthy_after} seconds" if _healthy_after is not None
+        else "it never reported two healthy backends within 60 seconds")
+t.ok("the pool has healthy backends before anything is applied",
+     _healthy_after is not None,
+     "the backends never came up, so what follows would be measuring an "
+     "empty upstream rather than load balancing")
+
 t.step("press Apply config, which stages and tests on every node before any applies")
 res = r.apply("qa: pool and site")
 t.proof("POST /api/apply", json.dumps(res["body"], indent=1)[:1200])

@@ -291,5 +291,34 @@ p = qa.probe(f"qa-import.{qa.DOMAIN}", "/echo", ip=LB01, scheme="http")
 t.ok("the site is serving again", p["status"] == 200, p["status"])
 t.close()
 
+# Leave nothing behind that stops the fleet applying.
+#
+# This suite deliberately creates a site whose config nginx will not load, and
+# then repairs it.  When the repair does not complete, and on 19 August it did
+# not because the agent took longer than sixty seconds to answer test_staging,
+# the site is left **enabled** carrying a certificate path that does not
+# exist.  Every apply after that is refused at prepare, correctly, and every
+# suite that runs afterwards fails on something that has nothing to do with
+# it: that day it took t12, t13 and t17 with it, 32 failures that were all one
+# leftover.
+#
+# So the site is switched off whatever happened.  Off rather than deleted,
+# because if the repair did fail the config is the evidence and somebody will
+# want to look at it.
+print("\n  making sure nothing is left that would stop the fleet applying")
+_left = find("hosts", "qa-import") or find("hosts", f"qa-import.{qa.DOMAIN}")
+if _left:
+    _cfg = r.api("GET", f"/hosts/{_left['id']}")["body"]
+    _still_broken = "does-not-exist" in json.dumps(_cfg)
+    if _still_broken:
+        print("   the repair did not finish, so the site is being switched off "
+              "rather than left to refuse every apply on the fleet")
+        res = r.api("PUT", f"/hosts/{_left['id']}", {"enabled": False})
+        print("   disabled ->", res["status"])
+        res = r.apply("qa: after switching the unrepaired site off")
+        print("   apply ->", res["status"])
+    else:
+        print("   the repair finished, nothing to switch off")
+
 r.stop()
 print("\nT11 DONE")

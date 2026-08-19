@@ -251,6 +251,16 @@ AREA_NOTES = {
     "Cluster": "The two nodes holding the same config.",
     "GSLB": "Answering DNS so a name points at whichever site is up.",
     "Failover": "The standby taking over.",
+    "Access lists": "Who may reach a site, a path or a service, by address and "
+                    "by password, and whether a forwarded address is believed.",
+    "Roles": "Accounts, what each role may do, and what happens to a session "
+             "when that changes.",
+    "WAF": "The web application firewall: what it refuses, what it leaves "
+           "alone, and what it does on a fleet that cannot run it.",
+    "Sites": "The default site, which answers every request that arrives "
+             "without a name the fleet serves.",
+    "Harness": "Proving the test rig itself can sign in and read the fleet "
+               "before anything is claimed on its word.",
 }
 
 
@@ -291,7 +301,7 @@ def build():
          space_after=40)
     table(doc, [
         ["Document", "Feature Test Plan and Results"],
-        ["Version", "1.0"],
+        ["Version", "1.1"],
         ["Date", env["when"]],
         ["Prepared by", "Quality engineering"],
         ["System under test", "Failover LB, two node fleet"],
@@ -305,8 +315,11 @@ def build():
     doc.add_heading("Document control", level=1)
     table(doc, [
         ["Version", "Date", "Author", "Change"],
-        ["1.0", env["when"], "Quality engineering",
+        ["1.0", "18 August 2026", "Quality engineering",
          "First issue.  Full feature pass over site creation."],
+        ["1.1", env["when"], "Quality engineering",
+         "Access lists, user accounts and roles, the web application firewall "
+         "and the default site.  Every suite re-run end to end."],
     ], widths=[0.8, 1.6, 1.8, 2.4])
 
     doc.add_heading("Approval", level=2)
@@ -326,8 +339,9 @@ def build():
          "operating a website: backend pools, sites, paths, the settings "
          "catalog, certificates, zones, error pages, geo blocking, login "
          "watching, importing an existing config, repairing a broken one, "
-         "config versions and rollback, backups, maps, stream proxying and the "
-         "cluster itself.")
+         "config versions and rollback, backups, maps, stream proxying, access "
+         "lists, user accounts and roles, the web application firewall, the "
+         "default site and the cluster itself.")
     para(doc,
          "It was commissioned after a session in which stored configuration was "
          "found to be overwritten in normal use.  The existing automated suites "
@@ -349,18 +363,14 @@ def build():
         doc.add_paragraph(clean(line), style="List Bullet")
 
     doc.add_heading("1.2  Out of scope", level=2)
-    para(doc, "Excluded at the owner's direction, to be covered by a separate "
-              "pass:")
-    for line in [
-        "Access lists, and who may reach a site or a path.",
-        "User accounts, roles and permissions.",
-    ]:
-        doc.add_paragraph(clean(line), style="List Bullet")
+    para(doc, "Access lists, and user accounts and roles, were held back from "
+              "the first pass at the owner's direction and have since been run "
+              "as their own rounds.  Both are in this document.  So is the web "
+              "application firewall, which was out of reach until the "
+              "ModSecurity module was built on both nodes during this work.")
     para(doc, "Excluded because the environment cannot support them, recorded "
               "in section 7 rather than left unsaid:")
     for line in [
-        "The web application firewall, which needs a ModSecurity build.  This "
-        "fleet's nginx does not have one.",
         "HTTP/3, which needs a QUIC build.  This fleet's nginx does not have one.",
         "Certificate issue from a public authority, which needs the fleet to be "
         "reachable from the internet on port 80 under the name being issued.",
@@ -633,11 +643,18 @@ def main():
                 and "NOT YET DEPLOYED" not in d["retest"])
     staged = sum(1 for d in DEFECTS if "NOT YET DEPLOYED" in d["retest"])
     open_ = sum(1 for d in DEFECTS if d["fix"].startswith("NOT FIXED"))
-    para(doc, f"{len(DEFECTS)} defects were found.  {fixed + staged} are fixed, "
-              f"retested and running on both nodes.  {open_} are reported and "
-              f"deliberately not fixed, because the correction is a design "
-              f"decision or the cause is not established, and guessing at "
-              f"either would be worse than the fault.", bold=True)
+    if open_:
+        para(doc, f"{len(DEFECTS)} defects were found.  {fixed + staged} are "
+                  f"fixed, retested and running on both nodes.  {open_} are "
+                  f"reported and deliberately not fixed, because the "
+                  f"correction is a design decision or the cause is not "
+                  f"established, and guessing at either would be worse than "
+                  f"the fault.", bold=True)
+    else:
+        para(doc, f"{len(DEFECTS)} defects were found.  All {len(DEFECTS)} are "
+                  f"fixed, retested and running on both nodes.  Each one below "
+                  f"says what was wrong, why it mattered, what was changed and "
+                  f"how the fix was proved.", bold=True)
     rows = [["ID", "Severity", "Defect", "Found by", "State"]]
     for d in DEFECTS:
         rows.append([d["id"], d["severity"], d["title"], d["found"],
@@ -677,23 +694,34 @@ def main():
          f"{total} checks were made across {len(tests)} test cases, of which "
          f"{passed} passed.", bold=True)
     para(doc,
-         f"{len(DEFECTS)} defects were found.  Three of them, taken together, are the "
-         "answer to the question that prompted this pass: two stopped the "
+         f"{len(DEFECTS)} defects were found, and every one of them is fixed, "
+         "retested and running on both nodes.  Three of them, taken together, "
+         "are the answer to the question that prompted this pass: two stopped the "
          "entire fleet applying any configuration at all, and one stopped any "
          "site setting being saved on a fleet missing any nginx module.  None "
          "of the three could have been caught by the existing automated suites, "
          "because none of those suites applies configuration.")
     para(doc,
-         "Two more are worth naming separately because they sit under the "
-         "product's two headline promises.  A requested failover reports "
-         "success and hands the role straight back, so the standby cannot be "
-         "made active by hand at all.  And the DNS service can reach a state "
-         "where it will never bind its port again, so global load balancing "
-         "serves nothing until the manager is restarted.  Neither has been "
-         "changed here: one needs a design decision about how the two nodes "
-         "choose a leader, and the other needs its cause established rather "
-         "than guessed at.  Both are reproducible on demand and both are "
-         "recorded in section 7 with the measurements.")
+         "Two more sat under the product's two headline promises, and both are "
+         "now fixed and running.  A requested failover reported success and "
+         "handed the role straight back, so the standby could not be made "
+         "active by hand at all; the request now rides the heartbeat and the "
+         "election reads it, so one place decides who is active.  And the DNS "
+         "service could reach a state where it would never bind its port "
+         "again, so global load balancing served nothing until the manager was "
+         "restarted; the serving threads now wake up regularly and are stopped "
+         "before their sockets are closed.  Both were retested against the "
+         "build that had the fault, to prove the checks written for them are "
+         "not passing vacuously.")
+    para(doc,
+         "The later rounds found a pattern of their own.  An access list did "
+         "nothing at all on plain HTTP, a firewall setting refused the honest "
+         "traffic of the site it was protecting, and a site could not be made "
+         "the default one without stopping the whole fleet applying.  All "
+         "three rendered correct looking configuration and passed nginx's own "
+         "test.  Two were reported from the field before any test caught "
+         "them, which is why the suites that cover them now send what a real "
+         "site gets rather than what a test author thought of.")
     para(doc,
          "The pattern worth carrying forward is that most of these defects were "
          "invisible in the configuration file and only appeared at the wire.  "
@@ -711,9 +739,9 @@ def main():
     for line in [
         "Every site, pool, path, zone, map, stream, certificate and error page "
         "template created by this pass has been removed.",
-        "The test administrator account has been removed from both nodes, and "
-        "the standby's copy went with it, which was checked rather than "
-        "assumed.",
+        "The test administrator account, and every account created by the roles "
+        "round, have been removed from both nodes, and the standby's copies "
+        "went with them, which was checked rather than assumed.",
         "The purpose built origin servers have been stopped and removed.",
         "The country database installed during the geo blocking test has been "
         "left in place deliberately: it is required for that feature and its "

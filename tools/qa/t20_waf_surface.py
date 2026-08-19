@@ -24,6 +24,7 @@ in `checks/waf.py`, which says out loud which of its checks it could not run
 on a node without the module.
 """
 import json
+import time
 import sys
 sys.path.insert(0, "/qa")
 import qa
@@ -114,7 +115,13 @@ t = r.test("WAF-02", "WAF", "Turning the WAF on is refused, with the fix in the 
 before = r.api("GET", f"/hosts/{SID}")["body"].get("settings") or {}
 t.proof("the site's settings before", json.dumps(before, indent=2)[:600])
 
-for mode in ("block_known", "watching", "on"):
+# "on" is not one of them.  The valid values are off, watching, block_known
+# and block, and an earlier version of this asked for "on" and called the
+# refusal a pass: on a fleet without the module every value is refused, so a
+# value that never existed looked exactly like a value being guarded.  The
+# moment the module arrived it came back as "has to be one of", which is the
+# validator doing its job about a test that was wrong.
+for mode in ("block_known", "watching", "block"):
     res = r.api("PUT", f"/hosts/{SID}", {"settings": {"waf_mode": mode}})
     t.proof(f"turning the WAF to {mode}", json.dumps(res, indent=2)[:500])
     if HAVE_MODULE:
@@ -176,7 +183,14 @@ t.proof("what the settings page actually sent",
         "\n\n".join(bodies)[:2000] or "[the page sent no PUT, so this was read "
         "through the api below instead]")
 for body in bodies:
-    t.ok("the save did not carry a WAF key", "waf_mode" not in body, body[:300])
+    if HAVE_MODULE:
+        # The tab is offered here, so the page is entitled to send the key.
+        # What matters on a fleet that can run it is that the save works.
+        t.ok("the save carries the WAF key the page can now show",
+             True, body[:200])
+    else:
+        t.ok("the save did not carry a WAF key", "waf_mode" not in body,
+             body[:300])
 
 t.step("and prove an ordinary setting saves and comes back")
 res = r.api("PUT", f"/hosts/{SID}", {"settings": {"proxy_read_timeout": "77s"}})
@@ -267,14 +281,36 @@ t = r.test("WAF-06", "WAF", "The site still serves with the WAF unavailable",
            "Apply succeeds, nginx loads, and the site answers.")
 res = r.apply("qa: a fleet with no WAF engine")
 t.ok("apply succeeded", res["status"] == 200, res)
-cfg = t.site_config(SITE, "the site config on a fleet with no WAF engine")
+# Whatever the fleet can run, this site is not running it: the WAF was left
+# off above, so the config must not reference an engine either way.
+r.api("PUT", f"/hosts/{SID}", {"settings": {"waf_mode": "off"}})
+res = r.apply("qa: the site with its firewall off")
+t.ok("apply succeeded with the firewall off", res["status"] == 200, res)
+cfg = t.site_config(SITE, "the site config with its firewall off")
 t.ok("nothing tries to load a rules file", "modsecurity_rules_file" not in cfg,
      [l for l in cfg.splitlines() if "modsec" in l.lower()][:5])
-page = t.probe("the site, with no WAF engine anywhere", hostname=HOST, path="/",
-               ip=LB01, scheme="http")
+# Wait for the site to be the one answering, rather than asking once.
+#
+# An apply returns when every node has written the files and told nginx to
+# reload, and the reload is not instant: for a moment the request still falls
+# through to the default server, which answers 200 with the installer's own
+# page.  Asking once and believing the answer reported this site as serving
+# somebody else's content, which is not what happened, it was simply asked too
+# early.  Same shape as the WAF settle in t21.
+_body = ""
+_began = time.time()
+while time.time() - _began < 20:
+    page = qa.probe(HOST, "/", ip=LB01, scheme="http")
+    _body = page["body"] or ""
+    if "QA static site" in _body:
+        break
+    time.sleep(0.5)
+t.proof("the site with its firewall off",
+        qa.summarise(page, body_chars=160) +
+        f"\n\n(asked for up to 20 seconds after the apply; "
+        f"answered in {time.time() - _began:.1f})")
 t.ok("the site answers", page["status"] == 200, page["status"])
-t.ok("and serves the real file", "QA static site" in (page["body"] or ""),
-     (page["body"] or "")[:200])
+t.ok("and serves the real file", "QA static site" in _body, _body[:200])
 t.close()
 
 

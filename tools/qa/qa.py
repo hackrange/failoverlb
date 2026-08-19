@@ -577,8 +577,39 @@ class Runner:
         had just configured reported a fault that was really a race in the test.
         """
         r = self.api("POST", "/apply", {"summary": summary})
-        if r["status"] == 200:
-            time.sleep(2.0)
+        if r["status"] != 200:
+            return r
+
+        # Wait for the nodes to have taken it, rather than sleeping and hoping.
+        #
+        # Two seconds was usually enough and sometimes was not, and when it was
+        # not the suite measured the config that was live a moment ago.  That
+        # is not a small error: the request falls through to the default
+        # server, so a new site answers 200 from the wrong place with a 404 for
+        # every file under it, and the suite reports a routing defect.  It
+        # cost three separate false findings in one run on 19 August, one of
+        # them the WAF appearing not to enforce, which took a while to pin down
+        # precisely because it was intermittent.
+        #
+        # Every node reports the version it has applied, so that is what is
+        # waited on.  The short grace afterwards is for the reload itself:
+        # applied means the files are written and nginx has been told, and the
+        # old workers finish what they are holding.
+        version = (r.get("body") or {}).get("version")
+        if version:
+            began = time.time()
+            while time.time() - began < 30:
+                nodes = (self.api("GET", "/cluster")["body"] or {}).get("nodes") or []
+                behind = [n["name"] for n in nodes
+                          if n.get("applied_version", 0) < version
+                          and (n.get("state") == "online" or n.get("is_self"))]
+                if not behind:
+                    break
+                time.sleep(0.5)
+            else:
+                print(f"      !! {behind} never reported version {version}",
+                      flush=True)
+        time.sleep(1.5)
         return r
 
     def test(self, tid, area, feature, purpose, use_case, expected):

@@ -75,8 +75,22 @@ if kept:
     for line in kept:
         print("  ", line)
 
+# Force, because removing the test objects **is** a mass deletion.
+#
+# The wipe guard refuses an apply that would take away most of the site files
+# at once, which is exactly right: that is what a promoted standby with no
+# objects looks like.  It is also exactly what this script does on purpose.
+# Without force the apply is refused, the objects are gone from the database
+# while their files stay on the nodes, and **every apply after this one is
+# refused for the same reason** until somebody works out why.  That happened
+# on 19 August and took a whole suite re-run with it.
 print("\napplying, so the nodes lose the config too")
 res = r.apply("qa: removing the test objects")
+if res["status"] != 200:
+    print("  the apply was refused, which is the wipe guard doing its job on a "
+          "deliberate mass removal.  Asking again with force.")
+    res = r.api("POST", "/apply", {"summary": "qa: removing the test objects",
+                                   "force": True})
 print("  apply ->", res["status"], json.dumps(res["body"])[:200])
 
 left = [h["name"] for h in r.api("GET", "/hosts")["body"]["hosts"]]
