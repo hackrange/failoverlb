@@ -175,6 +175,30 @@ class Settings(BaseSettings):
     frontend_watchdog_cooldown: int = Field(default=600, ge=30, le=86400)
     frontend_watchdog_max_per_day: int = Field(default=4, ge=1, le=50)
 
+    # ---- how hard a flapping backend may work nginx ------------------------
+    # A pool member changing state rewrites the config and reloads nginx, on
+    # every node.  That is the right thing to do once.  Doing it over and over
+    # because one backend cannot make its mind up is how a health check becomes
+    # the outage: on 24 August 2026 four reloads landed in 102 seconds and the
+    # fourth one killed every worker.
+    #
+    # Collect changes for this long before rewriting anything, so a switch
+    # coming back and bringing six backends with it is one reload.
+    health_reload_debounce: int = Field(default=5, ge=1, le=120)
+
+    # And never reload faster than this whatever happens.  A minute is far
+    # slower than it used to be, and it costs very little: the upstreams carry
+    # max_fails and fail_timeout, so nginx stops sending traffic to a dead
+    # backend on its own within seconds.  Rewriting the config is what makes
+    # that state visible and durable, not what makes failover work.
+    health_reload_min_interval: int = Field(default=60, ge=5, le=3600)
+
+    # A ceiling over a rolling hour.  Past this, changes are held rather than
+    # dropped: they still get written, just later, and the log says plainly
+    # that something is flapping and needs a person.  Same bargain as the
+    # frontend watchdog's daily cap.
+    health_reload_max_per_hour: int = Field(default=12, ge=1, le=600)
+
     # ---- day to day ---------------------------------------------------------
     log_level: str = Field(default="info")
 

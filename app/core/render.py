@@ -938,7 +938,15 @@ map $cookie_{cookie} $sticky_set_{var} {{
         if state == MemberState.MAINTENANCE:
             line += "   # taken out by an admin"
         elif state == MemberState.DOWN:
-            line += f"   # failing health checks: {(member.last_error or 'no reason recorded')[:60]}"
+            # down_reason and not last_error, deliberately.  last_error is
+            # rewritten by every failing check, so the wording could change
+            # while the member's state did not, and this comment would change
+            # the rendered file with it.  That makes the checksum an apply
+            # compares against unstable, and the next unrelated apply reloads
+            # nginx for a difference nobody made.  down_reason is captured once
+            # when the member goes down and left alone until it comes back.
+            reason = member.down_reason or member.last_error or "no reason recorded"
+            line += f"   # failing health checks: {reason[:60]}"
         elif state == MemberState.DRAINING:
             line += "   # draining, will go down once connections finish"
 

@@ -827,6 +827,18 @@ class PoolMember(Base):
     last_check_at = Column(DateTime)
     last_state_change = Column(DateTime)
     last_error = Column(Text)
+
+    # Why this member was marked down, captured at the moment it went down and
+    # then left alone until it comes back up.
+    #
+    # Separate from last_error, which is rewritten by every failing check.  The
+    # rendered upstream carries this reason as a comment, so using last_error
+    # there meant the config changed whenever the wording of the error changed,
+    # even though nothing about the member had.  That defeats the "nothing
+    # actually changed" test an apply does before reloading nginx, and turns an
+    # unrelated apply into a reload nobody asked for.
+    down_reason = Column(String(255))
+
     last_response_ms = Column(Float)
 
     # Rolling numbers so the GUI can show whether a backend is getting slower

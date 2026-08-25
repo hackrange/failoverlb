@@ -26,6 +26,7 @@ import logging
 import re
 import ssl
 import time
+from collections import deque
 from datetime import datetime, timezone
 
 import httpx
@@ -35,14 +36,16 @@ from app.models import HealthEvent, MemberState, Pool, PoolMember, utcnow
 
 log = logging.getLogger("nfm.health")
 
-# Wait this long after a state change before rewriting config.  Long enough to
-# collect a burst of changes into one reload, short enough that a dead backend
-# is out within a few seconds.
-RELOAD_DEBOUNCE_SECONDS = 3
+# Defaults for the three limits on how often a flapping backend may rewrite the
+# config.  All three are settings now, and these are only the fallback for a
+# caller that has no settings to hand.  See app/config.py for what they mean
+# and why they are as slow as they are.
+RELOAD_DEBOUNCE_SECONDS = 5
+MIN_SECONDS_BETWEEN_RELOADS = 60
+MAX_RELOADS_PER_HOUR = 12
 
-# Never reload more often than this, no matter what.  A pool flapping badly
-# could otherwise keep nginx reloading forever and never serving anything.
-MIN_SECONDS_BETWEEN_RELOADS = 10
+# The window the hourly ceiling is counted over.
+RELOAD_WINDOW_SECONDS = 3600
 
 
 class HealthChecker:
@@ -59,6 +62,16 @@ class HealthChecker:
         self._reload_pending = False
         self._last_reload = 0.0
         self._lock = asyncio.Lock()
+
+        # When each of the last hour's config rewrites happened, so the ceiling
+        # can be counted over a rolling window rather than a fixed one.  A
+        # fixed window lets twice the limit through across its boundary, which
+        # on a flapping fleet is exactly when it matters.
+        self._recent_reloads = deque()
+
+        # So the "something is flapping" message is said once per episode
+        # rather than on every held change.
+        self._throttle_announced = False
 
         # When each pool is next due a round of checks.  Keyed by pool id.
         # This is what lets a pool have its own interval while the loop itself
@@ -265,6 +278,9 @@ class HealthChecker:
             member.consecutive_ok += 1
             member.consecutive_fail = 0
             member.last_error = None
+            # Cleared here, not on the transition, so a member that recovers
+            # never carries a stale reason into the next render.
+            member.down_reason = None
 
             if old_state != MemberState.UP and member.consecutive_ok >= (pool.health_check_rise or 2):
                 member.state = MemberState.UP
@@ -282,6 +298,9 @@ class HealthChecker:
             if old_state != MemberState.DOWN and member.consecutive_fail >= (pool.health_check_fall or 3):
                 member.state = MemberState.DOWN
                 member.last_state_change = utcnow()
+                # Captured once, at the transition, and left alone from here.
+                # See PoolMember.down_reason for why this is not last_error.
+                member.down_reason = (result["detail"] or "")[:255]
                 self._record_event(session, pool, member, old_state, MemberState.DOWN,
                                    result["detail"], result["ms"])
                 return True
@@ -438,28 +457,96 @@ class HealthChecker:
         level("%s in pool %s: %s -> %s (%s)",
               member.label, pool.name, old_state, new_state, reason)
 
+    def _reload_limits(self):
+        """The three limits, from settings, falling back to the constants."""
+        try:
+            from app.config import get_settings
+            s = get_settings()
+            return (s.health_reload_debounce,
+                    s.health_reload_min_interval,
+                    s.health_reload_max_per_hour)
+        except Exception:
+            return (RELOAD_DEBOUNCE_SECONDS,
+                    MIN_SECONDS_BETWEEN_RELOADS,
+                    MAX_RELOADS_PER_HOUR)
+
+    async def _wait_for_room(self, cap):
+        """
+        Hold here until the last hour has room for another rewrite.
+
+        Held, not dropped.  A change that is thrown away leaves the config
+        disagreeing with reality until something unrelated happens to apply,
+        and the whole point of this file is that the config says which backends
+        are usable.  So a flapping pool makes the next rewrite late, never
+        missing.
+        """
+        while True:
+            now = time.time()
+            while self._recent_reloads and now - self._recent_reloads[0] > RELOAD_WINDOW_SECONDS:
+                self._recent_reloads.popleft()
+
+            if len(self._recent_reloads) < cap:
+                self._throttle_announced = False
+                return
+
+            wait = RELOAD_WINDOW_SECONDS - (now - self._recent_reloads[0]) + 1
+            if not self._throttle_announced:
+                self._throttle_announced = True
+                log.error(
+                    "backends have changed state often enough to rewrite the config "
+                    "%d times in the last hour, which is the ceiling.  Something is "
+                    "flapping and wants a person: check which pool is going up and "
+                    "down, and consider raising its rise and fall thresholds.  The "
+                    "pending change is not lost, it will be written in about %d "
+                    "seconds.", cap, int(wait),
+                )
+            await asyncio.sleep(min(wait, 60))
+
     async def _request_reload(self):
         """
         Ask for a config rewrite, but not right this second.
 
-        Everything that changed state in the last few seconds gets collected
-        into one reload.  Without this, a switch reboot that fails every check
-        at once would queue a reload per backend.
+        Three limits, and each one exists because of a different way this goes
+        wrong.  The debounce collects a burst into one rewrite, so a switch
+        rebooting and taking six backends with it is one reload rather than
+        six.  The floor puts a hard minimum between rewrites.  The hourly
+        ceiling catches the case neither of those does: a backend that flaps
+        steadily, slowly, for hours.
+
+        That last one is not theoretical.  On 24 August 2026 a pool went up and
+        down repeatedly, each transition rewrote the config on every node, and
+        four nginx reloads landed inside 102 seconds.  The fourth one killed
+        every worker on one node and took the site down for over an hour.  The
+        module that actually crashed has since been removed, but a health check
+        that can drive nginx that hard is worth fixing on its own, because the
+        next module to be unhappy about it will not announce itself either.
         """
+        debounce, floor, cap = self._reload_limits()
+
         async with self._lock:
             if self._reload_pending:
                 return
             self._reload_pending = True
 
-        await asyncio.sleep(RELOAD_DEBOUNCE_SECONDS)
+        try:
+            await asyncio.sleep(debounce)
 
-        since_last = time.time() - self._last_reload
-        if since_last < MIN_SECONDS_BETWEEN_RELOADS:
-            await asyncio.sleep(MIN_SECONDS_BETWEEN_RELOADS - since_last)
+            since_last = time.time() - self._last_reload
+            if since_last < floor:
+                await asyncio.sleep(floor - since_last)
 
-        async with self._lock:
-            self._reload_pending = False
-            self._last_reload = time.time()
+            await self._wait_for_room(cap)
+
+            async with self._lock:
+                now = time.time()
+                self._recent_reloads.append(now)
+                self._last_reload = now
+        finally:
+            # Cleared however we leave, including cancellation.  Left set, this
+            # node would never rewrite its config again for a health change and
+            # would look perfectly healthy while doing it.
+            async with self._lock:
+                self._reload_pending = False
 
         if self.on_change:
             try:
