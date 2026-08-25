@@ -1208,7 +1208,7 @@ map $cookie_{cookie} $sticky_set_{var} {{
         # ---- the names being sent somewhere else ----------------------------
         if moved:
             lines.append(self._render_canonical_redirect(
-                host, moved, served[0], cert if usable else None))
+                host, moved, served[0], cert if usable else None, cfg))
 
         # ---- the plain http server ------------------------------------------
         if host.listen_http:
@@ -1245,7 +1245,122 @@ map $cookie_{cookie} $sticky_set_{var} {{
 
         return "\n".join(lines)
 
-    def _render_canonical_redirect(self, host, moved, primary, cert) -> str:
+    def _tls_policy_lines(self, cfg, indent="    ", session_zone="SSL",
+                          default_protocols=None) -> list:
+        """
+        The TLS settings themselves: versions, ciphers, session, key exchange.
+
+        Every server block that terminates TLS needs these, and that includes
+        the redirect block, which for a long time did not get them.  It listens
+        on 443 with a certificate, so it is a real TLS endpoint, and a version
+        list applied only to the site block left the apex name answering on
+        whatever the default was.  A scan of the bare name then reports a
+        version the site page says is switched off, and the setting looks
+        broken when what is broken is its reach.
+
+        Everything here is derived from cfg alone, so every caller gets the same
+        answer for the same settings by construction rather than by keeping
+        several copies in step.
+
+        `indent` because stream nests a level deeper than http does.
+
+        `session_zone` because nginx keeps one shared memory zone namespace for
+        the whole config rather than one per block, the same trap the pool
+        zones already work around.  http and stream both asking for `SSL` is
+        two different uses of one name, and nginx refuses the whole config
+        rather than picking one.
+
+        `default_protocols` for what to write when nothing is set.  http says
+        1.3, which is what makes the post quantum exchange the normal case for
+        a new site.  A stream cannot say that yet: its settings have never
+        carried a version list, so every existing one would read as unset and
+        move to 1.3 on the next apply.  On a raw socket that surfaces as a
+        client that simply stops connecting, with no status code anywhere to
+        say why, so the stream caller keeps today's pair until somebody sets
+        one deliberately.
+        """
+        # Built without the indent and prefixed on the way out, so a blank
+        # separator stays genuinely blank rather than becoming a line of
+        # trailing spaces.
+        out = []
+
+        # 1.3 only, because that is what makes the post quantum key exchange
+        # the normal case: X25519MLKEM768 is a 1.3 group, and a client that
+        # prefers 1.2 never reaches it.  Existing sites are unaffected, because their
+        # versions were written down explicitly before this moved, so this
+        # fallback only ever applies to something new.
+        proto = list(cfg.get("ssl_protocols")
+                     or default_protocols or ["TLSv1.3"])
+
+        # Post quantum only.  This one overrules the version list on purpose,
+        # because the two cannot disagree and both be honoured: the quantum
+        # resistant exchange only exists in TLS 1.3, so leaving 1.2 switched on
+        # would quietly hand any client that asks for it a connection with none
+        # of the protection the setting was turned on for.  Better to move the
+        # version list and say so in the file than to serve a promise we are not
+        # keeping.
+        pq_only = bool(
+            cfg.get("ssl_post_quantum_only")
+            and self.caps and self.caps.supports_post_quantum()
+            and self.supports("ssl_post_quantum_only")
+        )
+        if pq_only:
+            proto = ["TLSv1.3"]
+
+        out.append(f"ssl_protocols {' '.join(proto)};")
+
+        # Ciphers are per version and the two lists are not interchangeable.
+        # ssl_ciphers is TLS 1.2 and older only, and TLS 1.3 ignores it
+        # completely, so writing it into a 1.3 only site is a line that looks
+        # like it is doing something and is not.  The 1.3 list is its own
+        # directive and has to go through ssl_conf_command.
+        legacy = [p for p in proto if p in ("TLSv1", "TLSv1.1", "TLSv1.2")]
+
+        if legacy:
+            ciphers = self._catalog_default(cfg, "ssl_ciphers")
+            if ciphers:
+                out.append(f"ssl_ciphers {ciphers};")
+            out.append("ssl_prefer_server_ciphers off;")
+        elif cfg.get("ssl_ciphers"):
+            out.append("# Cipher list left out.  TLS 1.3 is the only version enabled")
+            out.append("# here and it ignores ssl_ciphers, so writing it would only")
+            out.append("# look like it was doing something.")
+
+        if "TLSv1.3" in proto:
+            suites = self._catalog_default(cfg, "ssl_ciphersuites")
+            if suites:
+                out.append(f"ssl_conf_command Ciphersuites {esc(suites)};")
+
+        out.append(f"ssl_session_cache shared:{session_zone}:10m;")
+        out.append(f"ssl_session_timeout {cfg.get('ssl_session_timeout', '1d')};")
+        out.append(
+            f"ssl_session_tickets {'on' if cfg.get('ssl_session_tickets') else 'off'};"
+        )
+
+        # Post quantum key exchange.  Only offered when the box was built
+        # against OpenSSL 3.5 or newer, which the installer does.  On anything
+        # older this directive makes nginx refuse to start.
+        if pq_only:
+            out.append("")
+            out.append("# Post quantum only.  One group and no classic fallback, so a")
+            out.append("# client that cannot do it does not connect at all.  That is")
+            out.append("# the point of the setting, and it is why TLS 1.2 is off above:")
+            out.append("# this exchange only exists in 1.3, so leaving 1.2 on would let")
+            out.append("# a client opt straight back out of it.")
+            out.append(f"ssl_conf_command Groups {PQ_GROUP};")
+        elif (cfg.get("ssl_post_quantum", True) and self.caps
+                and self.caps.supports_post_quantum()
+                and self.supports("ssl_post_quantum")):
+            out.append("")
+            out.append("# Hybrid post quantum key exchange, from OpenSSL 3.5.  Clients")
+            out.append("# that do not know it fall back to a normal curve on their own.")
+            out.append(
+                f"ssl_conf_command Groups {PQ_GROUP}:{':'.join(CLASSIC_GROUPS)};"
+            )
+
+        return [f"{indent}{line}" if line else "" for line in out]
+
+    def _render_canonical_redirect(self, host, moved, primary, cert, cfg=None) -> str:
         """
         A server block whose only job is to send these names to the real one.
 
@@ -1270,6 +1385,7 @@ map $cookie_{cookie} $sticky_set_{var} {{
 
         lines = [f"# {', '.join(moved)} are served from {primary}."]
         lines.append("server {")
+        tls_lines = []
         if host.listen_http:
             lines.append(f"    listen {host.http_port or 80};")
             lines.append(f"    listen [::]:{host.http_port or 80};")
@@ -1283,9 +1399,19 @@ map $cookie_{cookie} $sticky_set_{var} {{
             else:
                 lines.append(listen + ";")
                 lines.append(f"    listen [::]:{host.https_port or 443} ssl;")
-            lines.append(f"    ssl_certificate     {cert_dir}/fullchain.pem;")
-            lines.append(f"    ssl_certificate_key {cert_dir}/privkey.pem;")
+            tls_lines.append(f"    ssl_certificate     {cert_dir}/fullchain.pem;")
+            tls_lines.append(f"    ssl_certificate_key {cert_dir}/privkey.pem;")
+            # The same TLS settings the site itself gets.  This block terminates
+            # TLS in its own right, so a version list left off here is not
+            # inherited from the site block next to it: the name answers on
+            # whatever the default server offers instead.  That is how a site
+            # switched to 1.3 only kept answering 1.2 on its bare name, which is
+            # the one name a scanner is most likely to be pointed at.
+            tls_lines.extend(self._tls_policy_lines(cfg or {}))
         lines.append(f"    server_name {names};")
+        if tls_lines:
+            lines.append("")
+            lines.extend(tls_lines)
         lines.append("")
         lines.append("    # Still has to answer a challenge, or these names can")
         lines.append("    # never be renewed on the certificate.")
@@ -1442,78 +1568,7 @@ map $cookie_{cookie} $sticky_set_{var} {{
         lines.append(f"    ssl_certificate     {cert_dir}/fullchain.pem;")
         lines.append(f"    ssl_certificate_key {cert_dir}/privkey.pem;")
 
-        # 1.3 only, because that is what makes the post quantum key exchange
-        # the normal case: X25519MLKEM768 is a 1.3 group, and a client that
-        # prefers 1.2 never reaches it.  Existing sites are unaffected, because their
-        # versions were written down explicitly before this moved, so this
-        # fallback only ever applies to something new.
-        proto = list(cfg.get("ssl_protocols") or ["TLSv1.3"])
-
-        # Post quantum only.  This one overrules the version list on purpose,
-        # because the two cannot disagree and both be honoured: the quantum
-        # resistant exchange only exists in TLS 1.3, so leaving 1.2 switched on
-        # would quietly hand any client that asks for it a connection with none
-        # of the protection the setting was turned on for.  Better to move the
-        # version list and say so in the file than to serve a promise we are not
-        # keeping.
-        pq_only = bool(
-            cfg.get("ssl_post_quantum_only")
-            and self.caps and self.caps.supports_post_quantum()
-            and self.supports("ssl_post_quantum_only")
-        )
-        if pq_only:
-            proto = ["TLSv1.3"]
-
-        lines.append(f"    ssl_protocols {' '.join(proto)};")
-
-        # Ciphers are per version and the two lists are not interchangeable.
-        # ssl_ciphers is TLS 1.2 and older only, and TLS 1.3 ignores it
-        # completely, so writing it into a 1.3 only site is a line that looks
-        # like it is doing something and is not.  The 1.3 list is its own
-        # directive and has to go through ssl_conf_command.
-        legacy = [p for p in proto if p in ("TLSv1", "TLSv1.1", "TLSv1.2")]
-
-        if legacy:
-            ciphers = self._catalog_default(cfg, "ssl_ciphers")
-            if ciphers:
-                lines.append(f"    ssl_ciphers {ciphers};")
-            lines.append("    ssl_prefer_server_ciphers off;")
-        elif cfg.get("ssl_ciphers"):
-            lines.append("    # Cipher list left out.  TLS 1.3 is the only version enabled")
-            lines.append("    # here and it ignores ssl_ciphers, so writing it would only")
-            lines.append("    # look like it was doing something.")
-
-        if "TLSv1.3" in proto:
-            suites = self._catalog_default(cfg, "ssl_ciphersuites")
-            if suites:
-                lines.append(f"    ssl_conf_command Ciphersuites {esc(suites)};")
-
-        lines.append("    ssl_session_cache shared:SSL:10m;")
-        lines.append(f"    ssl_session_timeout {cfg.get('ssl_session_timeout', '1d')};")
-        lines.append(
-            f"    ssl_session_tickets {'on' if cfg.get('ssl_session_tickets') else 'off'};"
-        )
-
-        # Post quantum key exchange.  Only offered when the box was built
-        # against OpenSSL 3.5 or newer, which the installer does.  On anything
-        # older this directive makes nginx refuse to start.
-        if pq_only:
-            lines.append("")
-            lines.append("    # Post quantum only.  One group and no classic fallback, so a")
-            lines.append("    # client that cannot do it does not connect at all.  That is")
-            lines.append("    # the point of the setting, and it is why TLS 1.2 is off above:")
-            lines.append("    # this exchange only exists in 1.3, so leaving 1.2 on would let")
-            lines.append("    # a client opt straight back out of it.")
-            lines.append(f"    ssl_conf_command Groups {PQ_GROUP};")
-        elif (cfg.get("ssl_post_quantum", True) and self.caps
-                and self.caps.supports_post_quantum()
-                and self.supports("ssl_post_quantum")):
-            lines.append("")
-            lines.append("    # Hybrid post quantum key exchange, from OpenSSL 3.5.  Clients")
-            lines.append("    # that do not know it fall back to a normal curve on their own.")
-            lines.append(
-                f"    ssl_conf_command Groups {PQ_GROUP}:{':'.join(CLASSIC_GROUPS)};"
-            )
+        lines.extend(self._tls_policy_lines(cfg))
 
         # Staple only when the certificate names a responder to staple from.
         #
@@ -3610,6 +3665,8 @@ map $cookie_{cookie} $sticky_set_{var} {{
             listen += " proxy_protocol"
         lines.append(listen + ";")
 
+        cfg = s.setting_map()
+
         if s.ssl_enabled and s.cert_id in cert_by_id:
             cert = cert_by_id[s.cert_id]
             usable = getattr(cert, "usable", True)
@@ -3618,7 +3675,20 @@ map $cookie_{cookie} $sticky_set_{var} {{
                 lines.append("        ssl_preread off;")
                 lines.append(f"        ssl_certificate     {cert_dir}/fullchain.pem;")
                 lines.append(f"        ssl_certificate_key {cert_dir}/privkey.pem;")
-                lines.append("        ssl_protocols TLSv1.2 TLSv1.3;")
+                # The same settings a site gets, rather than a version pair
+                # written into the renderer.  Hard coding it here meant a stream
+                # ignored the version list on its own page and got no post
+                # quantum exchange at all, however the fleet was configured.
+                #
+                # Its own session zone: nginx has one shared memory namespace
+                # for the whole config, so http and stream both naming `SSL`
+                # is two uses of one name and nginx refuses the lot.
+                lines.extend(self._tls_policy_lines(
+                    cfg,
+                    indent="        ",
+                    session_zone="SSL_STREAM",
+                    default_protocols=["TLSv1.2", "TLSv1.3"],
+                ))
             else:
                 # Same rule as a site: never point nginx at certificate files
                 # that are not there.  It refuses to load and then nothing can
@@ -3641,7 +3711,6 @@ map $cookie_{cookie} $sticky_set_{var} {{
         if s.pool:
             lines.append(f"        proxy_pass {_safe_name(s.pool.name)};")
 
-        cfg = s.setting_map()
         for key in ("proxy_timeout", "proxy_connect_timeout"):
             if cfg.get(key):
                 lines.append(f"        {key} {esc(cfg[key])};")

@@ -5728,7 +5728,7 @@ def _apply_stream_fields(g, stream, payload):
         clean = {}
         # A short list on purpose.  The catalog is written for http and most of
         # it means nothing on a raw socket, so rather than offer settings that
-        # quietly do nothing, a stream takes these two and hand written config
+        # quietly do nothing, a stream takes these few and hand written config
         # for anything else.
         for key in ("proxy_timeout", "proxy_connect_timeout"):
             value = str(raw.get(key) or "").strip()
@@ -5739,6 +5739,40 @@ def _apply_stream_fields(g, stream, payload):
                     status_code=400,
                     detail=f"{key} looks like 60s, 5m or 1h")
             clean[key] = value
+
+        # The TLS ones do mean something on a raw socket, and until they were
+        # allowed through here the renderer had a version pair written into it
+        # and no way to say otherwise.  A stream that has never been given a
+        # list keeps the pair it has always had; setting one here is how it
+        # moves, the same as a site.
+        if raw.get("ssl_protocols"):
+            wanted = raw["ssl_protocols"]
+            if isinstance(wanted, str):
+                wanted = wanted.split()
+            if not isinstance(wanted, list):
+                raise HTTPException(
+                    status_code=400,
+                    detail="ssl_protocols is a list like [\"TLSv1.2\", \"TLSv1.3\"]")
+            allowed = ("TLSv1", "TLSv1.1", "TLSv1.2", "TLSv1.3")
+            picked = [str(p).strip() for p in wanted if str(p).strip()]
+            bad = [p for p in picked if p not in allowed]
+            if bad:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{', '.join(bad)}: it is one of {', '.join(allowed)}")
+            if not picked:
+                raise HTTPException(
+                    status_code=400,
+                    detail=("a stream doing TLS needs at least one version.  "
+                            "Turn TLS off instead of emptying the list."))
+            # Keep the file in version order however the list arrived, so two
+            # streams that mean the same thing render the same way.
+            clean["ssl_protocols"] = [p for p in allowed if p in picked]
+
+        for key in ("ssl_post_quantum", "ssl_post_quantum_only"):
+            if key in raw:
+                clean[key] = bool(raw[key])
+
         stream.settings = json.dumps(clean)
 
     if stream.ssl_enabled and not stream.cert_id:
