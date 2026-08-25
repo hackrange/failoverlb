@@ -36,6 +36,7 @@ from app.core.agent_client import AgentError, get_agent
 from app.core.capabilities import set_local_capabilities
 from app.core.cluster import get_cluster
 from app.core.crypto import ClusterCA
+from app.core.frontend_probe import get_probe, get_watchdog
 from app.core import gslb
 from app.core.metrics import get_collector
 from app.db import init_db, session_scope
@@ -236,6 +237,67 @@ async def refresh_local_state():
         log.warning("could not check the WAF module: %s", exc)
     except Exception:
         log.exception("could not check the WAF module")
+
+
+async def refresh_frontend_state():
+    """
+    Put a request through this node's own listener and write down the answer.
+
+    Runs far more often than refresh_local_state, because this is the signal
+    the GSLB withdraws a node on and the record's TTL is measured in seconds.
+    Checking it once a minute would mean a minute of handing out a black hole
+    before DNS even began to move.
+
+    Kept out of refresh_local_state on purpose.  That function talks to the
+    host agent and does a lot of other work, so a slow agent would delay this,
+    and this is the one thing here that has to stay quick.
+    """
+    settings = get_settings()
+    probe = get_probe()
+
+    # Empty means ask on the address this node was configured with, which is
+    # the one a gslb answer hands out for it.  Nothing about the address is
+    # hard coded here: a fleet that renumbers changes NFM_NODE_ADDRESS and this
+    # follows it.
+    host = settings.frontend_probe_host.strip() or settings.node_address
+
+    try:
+        verdict = await probe.run_cycle(
+            host,
+            settings.frontend_probe_port,
+            settings.frontend_probe_server_name,
+            settings.frontend_probe_timeout,
+            settings.frontend_probe_fail_after,
+            settings.frontend_probe_pass_after,
+        )
+    except Exception:
+        # Never let a broken probe be the thing that decides a node is down.
+        # Leaving the last verdict alone is the safe failure here: a bug in
+        # this code should not be able to take a working node off the internet.
+        log.exception("the frontend probe blew up, leaving the last verdict alone")
+        return
+
+    if verdict is None:
+        return
+
+    with session_scope() as session:
+        node = session.query(Node).filter(Node.name == settings.node_name).first()
+        if node and (node.nginx_serving is not verdict
+                     or node.nginx_serving_detail != probe.detail):
+            node.nginx_serving = verdict
+            node.nginx_serving_detail = probe.detail[:255]
+            session.commit()
+
+    # Withdrawing from DNS routes around the problem.  This is the part that
+    # fixes it.  Deliberately after the write above, so the node is already on
+    # its way out of the answer before its listener drops for a restart.
+    if verdict is False and settings.frontend_watchdog:
+        await get_watchdog().repair(
+            time.time(),
+            settings.frontend_watchdog_cooldown,
+            settings.frontend_watchdog_max_per_day,
+            detail=probe.detail,
+        )
 
 
 async def refresh_public_ip():
@@ -637,6 +699,12 @@ def start_scheduler():
 
     scheduler.add_job(refresh_local_state, "interval", seconds=60, id="local_state",
                       max_instances=1, coalesce=True)
+
+    # Much more often than local_state, because this is what takes a wedged
+    # node out of DNS and the record's TTL is 30 seconds on a normal setup.
+    scheduler.add_job(refresh_frontend_state, "interval",
+                      seconds=get_settings().frontend_probe_interval,
+                      id="frontend_probe", max_instances=1, coalesce=True)
 
     # The public address does not move often, so once an hour is plenty and it
     # keeps us from hammering the services that tell us.

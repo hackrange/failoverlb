@@ -1496,6 +1496,12 @@ class ClusterManager:
                 "priority": self.settings.cluster_priority,
                 "applied_version": me.applied_version if me else 0,
                 "nginx_active": me.nginx_active if me else False,
+                # Whether our own listener answered a real request just now.
+                # None if we have not got a verdict yet, and it has to stay
+                # None rather than becoming False: the other node withdraws us
+                # from DNS on a False, and "has not said" is not "is down".
+                "nginx_serving": me.nginx_serving if me else None,
+                "nginx_serving_detail": me.nginx_serving_detail if me else None,
                 # Who somebody asked to be active, and when.  This rides the
                 # heartbeat because it has to reach the other node in seconds:
                 # both nodes run their own election from their own database, so
@@ -1530,6 +1536,12 @@ class ClusterManager:
                     node.applied_version = answer.get("applied_version", node.applied_version)
                     node.nginx_active = answer.get("nginx_active", False)
                     node.nginx_config_ok = answer.get("nginx_config_ok", False)
+                    # Absent means an older manager that does not probe itself,
+                    # so leave what we have rather than reading the silence as
+                    # a failure and taking that node out of DNS.
+                    if "nginx_serving" in answer:
+                        node.nginx_serving = answer["nginx_serving"]
+                        node.nginx_serving_detail = (answer.get("nginx_serving_detail") or "")[:255]
                     if "waf_module_loaded" in answer:
                         node.waf_module_loaded = answer["waf_module_loaded"]
                     node.nginx_version = answer.get("nginx_version") or node.nginx_version

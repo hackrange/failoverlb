@@ -168,6 +168,24 @@ class Node(Base):
     nginx_active = Column(Boolean, default=False)
     nginx_config_ok = Column(Boolean, default=False)
 
+    # Whether that node's own public listener actually answered a request.
+    #
+    # Not the same question as nginx_active, and the difference is the whole
+    # reason this column exists.  nginx_active is `systemctl is-active nginx`,
+    # which says the service is running.  A wedged nginx is running: on
+    # 24 August 2026 the master held its listening sockets while every worker
+    # sat blocked on a shared memory lock left locked by one that had died, so
+    # systemd said `active`, the kernel completed handshakes, and clients got
+    # silence for 73 minutes.  The GSLB went on handing that node out because
+    # the only signal it had was the one that could not see this.
+    #
+    # None means the node has not said yet, which is not the same as no.  A
+    # node is never withdrawn from a DNS answer for having stayed quiet about
+    # this, or a fleet part way through an upgrade would take itself off the
+    # internet one node at a time.
+    nginx_serving = Column(Boolean, default=None)
+    nginx_serving_detail = Column(String(255))
+
     # Whether nginx on that node has actually been told the WAF module exists.
     #
     # Separate from the module list, and it has to be.  The module list is read

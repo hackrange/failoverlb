@@ -124,6 +124,57 @@ class Settings(BaseSettings):
     # failover nobody asked for.
     node_dead_after: int = Field(default=20, ge=5, le=300)
 
+    # ---- is our own frontend actually serving -------------------------------
+    # A request put through this node's own public listener, so the GSLB can
+    # tell a wedged nginx from a running one.  See app/core/frontend_probe.py
+    # for why `systemctl is-active` is not enough on its own.
+    frontend_probe_interval: int = Field(default=10, ge=2, le=300)
+
+    # Where to knock.  Empty means this node's own address, the one it was
+    # given as NFM_NODE_ADDRESS, which is the same address a gslb answer hands
+    # out for it.  That is the point: ask on the address the outside world is
+    # being sent to, not on one that only proves the process is up.
+    #
+    # Set it to override, which is worth doing when nginx here does not listen
+    # on that address.
+    frontend_probe_host: str = Field(default="")
+    frontend_probe_port: int = Field(default=443, ge=1, le=65535)
+
+    # Sent as SNI and as the Host header, so the probe lands in a real server
+    # block rather than whichever one is the default.  Leave it empty and the
+    # request goes in without either, which still tells you whether a worker is
+    # answering.
+    frontend_probe_server_name: str = Field(default="")
+
+    # Short, because a wedged listener answers nothing at all and waiting longer
+    # only makes the outage longer.  A healthy local listener replies in
+    # milliseconds.
+    frontend_probe_timeout: float = Field(default=5.0, ge=0.5, le=60.0)
+
+    # How many in a row before the verdict moves.  Slower to condemn than to
+    # forgive on purpose: being wrong about down takes a working node off the
+    # internet, and being wrong about up costs one more probe interval.
+    frontend_probe_fail_after: int = Field(default=3, ge=1, le=20)
+    frontend_probe_pass_after: int = Field(default=2, ge=1, le=20)
+
+    # Restart nginx when the probe says this node has stopped serving.
+    #
+    # Taking the node out of DNS routes around a wedge.  This is what actually
+    # fixes it, and it has to be a restart: nginx builds its shared memory
+    # zones at startup and a reload hands the same ones back, so a zone left
+    # locked by a worker that died holding the lock survives a reload intact.
+    #
+    # Turn this off if you would rather a wedged node stayed wedged and out of
+    # DNS until somebody looks at it.
+    frontend_watchdog: bool = Field(default=True)
+
+    # How long to leave it before trying again, and how many times in a day.
+    # A restart that fixes nothing, repeated every cycle, drops connections
+    # over and over and buries the real fault.  Hitting the cap is meant to be
+    # the signal that a person is needed.
+    frontend_watchdog_cooldown: int = Field(default=600, ge=30, le=86400)
+    frontend_watchdog_max_per_day: int = Field(default=4, ge=1, le=50)
+
     # ---- day to day ---------------------------------------------------------
     log_level: str = Field(default="info")
 

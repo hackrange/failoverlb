@@ -104,6 +104,12 @@ async def heartbeat(request: Request):
             peer.last_heartbeat = utcnow()
             peer.applied_version = payload.get("applied_version", peer.applied_version)
             peer.nginx_active = payload.get("nginx_active", peer.nginx_active)
+            # Only move this if they actually said something.  An older manager
+            # leaves the key out, and reading that as a failure would withdraw
+            # them from DNS for running last week's build.
+            if "nginx_serving" in payload:
+                peer.nginx_serving = payload["nginx_serving"]
+                peer.nginx_serving_detail = (payload.get("nginx_serving_detail") or "")[:255]
             if payload.get("role"):
                 try:
                     adopt_peer_role(session, peer, NodeRole(payload["role"]),
@@ -132,6 +138,8 @@ async def heartbeat(request: Request):
             "preferred_active_at": _wanted_at,
             "applied_version": me.applied_version if me else 0,
             "nginx_active": me.nginx_active if me else False,
+            "nginx_serving": me.nginx_serving if me else None,
+            "nginx_serving_detail": me.nginx_serving_detail if me else None,
             "nginx_config_ok": me.nginx_config_ok if me else False,
             "waf_module_loaded": me.waf_module_loaded if me else None,
             "nginx_version": me.nginx_version if me else None,

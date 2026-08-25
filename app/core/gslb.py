@@ -757,6 +757,22 @@ def healthy_node_names(session) -> set:
     connection on port 80 from nobody, so sending traffic there is worse than
     leaving it out.  What matters for an answer is whether the thing that
     serves the site is running, not whether the thing that manages it is.
+
+    Three gates, and the third one is here because the first two were not
+    enough.  On 24 August 2026 a node passed both for 73 minutes while serving
+    nobody: its manager was online and answering, and `systemctl is-active
+    nginx` said `active`, because a wedged nginx is still a running one.  Half
+    of every DNS answer pointed at it the whole time.
+
+    So `nginx_serving` is the answer to a different question, asked by putting
+    a real request through that node's own listener.  See
+    app/core/frontend_probe.py.
+
+    Only an explicit False withdraws a node.  None means nothing has reported
+    yet, and a node is not taken off the internet for having been quiet: during
+    a rolling upgrade the node running the older manager never sets this, and
+    treating that as a failure would withdraw each node in turn as it was
+    upgraded.
     """
     from app.models import Node, NodeState
 
@@ -765,6 +781,8 @@ def healthy_node_names(session) -> set:
         if node.state != NodeState.ONLINE:
             continue
         if not node.nginx_active:
+            continue
+        if node.nginx_serving is False:
             continue
         out.add(node.name)
     return out
