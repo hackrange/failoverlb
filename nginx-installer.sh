@@ -111,9 +111,36 @@ THIRD_PARTY_MODULES=(
   "upload-progress|https://github.com/masterzen/nginx-upload-progress-module|master"
   "auth-pam|https://github.com/sto/ngx_http_auth_pam_module|master"
   "geoip2|https://github.com/leev/ngx_http_geoip2_module|master"
-  "nchan|https://github.com/slact/nchan|master"
   "upstream-fair|https://github.com/itoffshore/nginx-upstream-fair|master"
 )
+
+# nchan was here and was taken out on 25 August 2026.  Please do not put it
+# back without reading this.
+#
+# It is a publish and subscribe server built into nginx: an application posts a
+# message to a channel and every browser holding a connection open gets it, over
+# websockets, server sent events or long polling.  A good module, and nothing
+# here has ever used it.  The manager generates no nchan directive of any kind,
+# and the GUI's live pages poll on a timer rather than being pushed to.
+#
+# It cost two outages.  On 17 August and again on 24 August, seconds after an
+# nginx reload, every worker aborted inside it and died holding the lock on its
+# shared memory zone.  A zone left locked by a dead process stays locked, and
+# nginx builds those zones once at startup, so a reload hands the same poisoned
+# zone straight back to the replacement workers and they block on it too.  The
+# master keeps the listening sockets throughout, so the machine goes on
+# accepting connections and answering none of them.  It looks alive from
+# outside and from systemd, and the second time it took 72 minutes and a manual
+# restart to clear.
+#
+# Being compiled in is what made it unavoidable.  It claimed a 128 MB shared
+# memory zone on every node at startup purely because it was present, with no
+# directive asking for it.  The note under the dynamic module list below makes
+# this same argument about ModSecurity, and it applies here: a compiled in
+# module is part of the binary whether anybody wants it or not.
+#
+# If push ever is wanted, add it to the dynamic list below instead, so it sits
+# on disk doing nothing until a node's config actually asks for it.
 
 # Modules built as loadable .so files instead of compiled in.  Same
 # "folder|git-url|git-ref" format as the list above.

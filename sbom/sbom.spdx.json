@@ -3,7 +3,7 @@
   "dataLicense": "CC0-1.0",
   "SPDXID": "SPDXRef-DOCUMENT",
   "name": "failover-lb-1.0.0",
-  "documentNamespace": "https://failoverlb.net/sbom/spdx/aeca285c65d549be7880034101d6a2d90bb1c82c",
+  "documentNamespace": "https://failoverlb.net/sbom/spdx/d7ad8118de3a2c1b9ae563f6ba218210a3526254",
   "creationInfo": {
     "creators": [
       "Tool: tools/sbom.py",
@@ -22,7 +22,7 @@
       "supplier": "Organization: Failover LB",
       "licenseDeclared": "MIT",
       "licenseConcluded": "MIT",
-      "comment": "[product] the manager itself, from the LICENSE file in its own repository.  Version from app/__init__.py, which is what the software calls itself when it starts.  Built from aeca285."
+      "comment": "[product] the manager itself, from the LICENSE file in its own repository.  Version from app/__init__.py, which is what the software calls itself when it starts.  Built from d7ad811."
     },
     {
       "SPDXID": "SPDXRef-python-0",
@@ -691,25 +691,7 @@
       ]
     },
     {
-      "SPDXID": "SPDXRef-nchan-37",
-      "name": "nchan",
-      "versionInfo": "master",
-      "downloadLocation": "https://github.com/slact/nchan",
-      "filesAnalyzed": false,
-      "supplier": "NOASSERTION",
-      "comment": "[nginx] compiled into the nginx binary.  Tracks a branch rather than a tag, so two builds on different days are not the same build",
-      "licenseDeclared": "MIT",
-      "licenseConcluded": "MIT",
-      "externalRefs": [
-        {
-          "referenceCategory": "PACKAGE-MANAGER",
-          "referenceType": "purl",
-          "referenceLocator": "pkg:github/slact/nchan@master"
-        }
-      ]
-    },
-    {
-      "SPDXID": "SPDXRef-upstream-fair-38",
+      "SPDXID": "SPDXRef-upstream-fair-37",
       "name": "upstream-fair",
       "versionInfo": "master",
       "downloadLocation": "https://github.com/itoffshore/nginx-upstream-fair",
@@ -727,7 +709,7 @@
       ]
     },
     {
-      "SPDXID": "SPDXRef-modsecurity-nginx-39",
+      "SPDXID": "SPDXRef-modsecurity-nginx-38",
       "name": "modsecurity-nginx",
       "versionInfo": "v1.0.4",
       "downloadLocation": "https://github.com/owasp-modsecurity/ModSecurity-nginx",
@@ -745,7 +727,7 @@
       ]
     },
     {
-      "SPDXID": "SPDXRef-luajit2-40",
+      "SPDXID": "SPDXRef-luajit2-39",
       "name": "luajit2",
       "versionInfo": "master",
       "downloadLocation": "https://github.com/openresty/luajit2",
@@ -763,7 +745,7 @@
       ]
     },
     {
-      "SPDXID": "SPDXRef-lua-resty-core-41",
+      "SPDXID": "SPDXRef-lua-resty-core-40",
       "name": "lua-resty-core",
       "versionInfo": "v0.1.31",
       "downloadLocation": "https://github.com/openresty/lua-resty-core",
@@ -781,7 +763,7 @@
       ]
     },
     {
-      "SPDXID": "SPDXRef-lua-resty-lrucache-42",
+      "SPDXID": "SPDXRef-lua-resty-lrucache-41",
       "name": "lua-resty-lrucache",
       "versionInfo": "v0.15",
       "downloadLocation": "https://github.com/openresty/lua-resty-lrucache",
@@ -799,7 +781,7 @@
       ]
     },
     {
-      "SPDXID": "SPDXRef-owasp-crs-43",
+      "SPDXID": "SPDXRef-owasp-crs-42",
       "name": "owasp-crs",
       "versionInfo": "fetched at run time, lts or latest track",
       "downloadLocation": "https://github.com/coreruleset/coreruleset",
@@ -817,7 +799,7 @@
       ]
     },
     {
-      "SPDXID": "SPDXRef-geolite2-country-44",
+      "SPDXID": "SPDXRef-geolite2-country-43",
       "name": "geolite2-country",
       "versionInfo": "fetched at run time",
       "downloadLocation": "https://www.maxmind.com/",
@@ -1022,42 +1004,37 @@
     {
       "spdxElementId": "SPDXRef-DOCUMENT",
       "relationshipType": "DESCRIBES",
-      "relatedSpdxElement": "SPDXRef-nchan-37"
+      "relatedSpdxElement": "SPDXRef-upstream-fair-37"
     },
     {
       "spdxElementId": "SPDXRef-DOCUMENT",
       "relationshipType": "DESCRIBES",
-      "relatedSpdxElement": "SPDXRef-upstream-fair-38"
+      "relatedSpdxElement": "SPDXRef-modsecurity-nginx-38"
     },
     {
       "spdxElementId": "SPDXRef-DOCUMENT",
       "relationshipType": "DESCRIBES",
-      "relatedSpdxElement": "SPDXRef-modsecurity-nginx-39"
+      "relatedSpdxElement": "SPDXRef-luajit2-39"
     },
     {
       "spdxElementId": "SPDXRef-DOCUMENT",
       "relationshipType": "DESCRIBES",
-      "relatedSpdxElement": "SPDXRef-luajit2-40"
+      "relatedSpdxElement": "SPDXRef-lua-resty-core-40"
     },
     {
       "spdxElementId": "SPDXRef-DOCUMENT",
       "relationshipType": "DESCRIBES",
-      "relatedSpdxElement": "SPDXRef-lua-resty-core-41"
+      "relatedSpdxElement": "SPDXRef-lua-resty-lrucache-41"
     },
     {
       "spdxElementId": "SPDXRef-DOCUMENT",
       "relationshipType": "DESCRIBES",
-      "relatedSpdxElement": "SPDXRef-lua-resty-lrucache-42"
+      "relatedSpdxElement": "SPDXRef-owasp-crs-42"
     },
     {
       "spdxElementId": "SPDXRef-DOCUMENT",
       "relationshipType": "DESCRIBES",
-      "relatedSpdxElement": "SPDXRef-owasp-crs-43"
-    },
-    {
-      "spdxElementId": "SPDXRef-DOCUMENT",
-      "relationshipType": "DESCRIBES",
-      "relatedSpdxElement": "SPDXRef-geolite2-country-44"
+      "relatedSpdxElement": "SPDXRef-geolite2-country-43"
     }
   ],
   "hasExtractedLicensingInfos": [

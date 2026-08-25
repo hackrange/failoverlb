@@ -1,7 +1,7 @@
 {
   "bomFormat": "CycloneDX",
   "specVersion": "1.5",
-  "serialNumber": "urn:uuid:099ec155-7a52-50f0-58b7-978cefbd4a94",
+  "serialNumber": "urn:uuid:a6716b3c-0a87-0eeb-800a-a6c864b91dd0",
   "version": 1,
   "metadata": {
     "timestamp": "1970-01-01T00:00:00Z",
@@ -27,11 +27,11 @@
     "properties": [
       {
         "name": "failoverlb:commit",
-        "value": "aeca285c65d549be7880034101d6a2d90bb1c82c"
+        "value": "d7ad8118de3a2c1b9ae563f6ba218210a3526254"
       },
       {
         "name": "failoverlb:build",
-        "value": "aeca285"
+        "value": "d7ad811"
       }
     ]
   },
@@ -843,32 +843,6 @@
         {
           "license": {
             "id": "BSD-2-Clause"
-          }
-        }
-      ],
-      "properties": [
-        {
-          "name": "failoverlb:layer",
-          "value": "nginx"
-        }
-      ]
-    },
-    {
-      "type": "library",
-      "name": "nchan",
-      "version": "master",
-      "purl": "pkg:github/slact/nchan@master",
-      "externalReferences": [
-        {
-          "type": "distribution",
-          "url": "https://github.com/slact/nchan"
-        }
-      ],
-      "description": "compiled into the nginx binary.  Tracks a branch rather than a tag, so two builds on different days are not the same build",
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
           }
         }
       ],

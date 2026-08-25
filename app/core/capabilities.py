@@ -138,6 +138,9 @@ THIRD_PARTY_ALIASES = {
     "geoip2": "geoip2",
     "modsecurity-nginx": "modsecurity",
     "ModSecurity-nginx": "modsecurity",
+    # nchan is no longer in the build, see the note in nginx-installer.sh.
+    # This mapping stays because a node that has not been rebuilt yet still has
+    # it compiled in, and its module list should still read properly.
     "nchan": "nchan",
     "nginx-upstream-fair": "upstream_fair",
     "upstream-fair": "upstream_fair",
