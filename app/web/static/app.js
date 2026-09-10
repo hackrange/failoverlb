@@ -584,6 +584,7 @@
         closeModal: closeModal,
         confirmThen: confirmThen,
         escapeHtml: escapeHtml,
-        icon: icon
+        icon: icon,
+        csrfToken: csrfToken
     };
 })();

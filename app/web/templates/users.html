@@ -268,8 +268,7 @@ document.addEventListener("DOMContentLoaded", function () {
   document.getElementById("new-user").addEventListener("click", function () {
     NFM.openModal("New user", "local account", `
       <form method="post" action="${document.querySelector('meta[name=nfm-base]').content}/users/create">
-        <input type="hidden" name="csrf_token" value="${NFM.escapeHtml(
-          document.cookie.match(/(?:^|;\\s*)nfm_csrf=([^;]+)/)?.[1] || "")}">
+        <input type="hidden" name="csrf_token" value="${NFM.escapeHtml(NFM.csrfToken())}">
         <div class="field">
           <label for="u-name">Username</label>
           <input type="text" id="u-name" name="username" required autofocus>
