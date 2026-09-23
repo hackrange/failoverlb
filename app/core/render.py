@@ -2843,14 +2843,28 @@ map $cookie_{cookie} $sticky_set_{var} {{
                 value += "; includeSubDomains"
             add.append(("Strict-Transport-Security", value))
 
-        xfo = cfg.get("x_frame_options", "SAMEORIGIN")
+        # These two fall back to nothing, and the catalog default is written
+        # into the settings blob when a site is created instead.
+        #
+        # They are dropdowns whose "do not send the header" option is the empty
+        # string, and the GUI does not send an empty value: it treats it as the
+        # setting having been cleared and leaves the key out.  With a default
+        # here, leaving the key out meant SAMEORIGIN, so choosing not to send
+        # the header stored nothing, rendered the default, and the header came
+        # back on the next apply.  There was no way to turn either of them off
+        # at all, and nothing said so.
+        #
+        # An absent key now means what the person asked for.  Sites that
+        # predate this got the value they were already serving written down by
+        # pin_existing_security_headers, so nothing they serve changes.
+        xfo = cfg.get("x_frame_options", "")
         if xfo:
             add.append(("X-Frame-Options", xfo))
 
         if cfg.get("x_content_type_options", True):
             add.append(("X-Content-Type-Options", "nosniff"))
 
-        ref = cfg.get("referrer_policy", "strict-origin-when-cross-origin")
+        ref = cfg.get("referrer_policy", "")
         if ref:
             add.append(("Referrer-Policy", ref))
 

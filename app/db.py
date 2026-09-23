@@ -225,11 +225,68 @@ def pin_existing_tls_versions():
                     "1.3 only default changes nothing they already serve", pinned)
 
 
+def pin_existing_security_headers():
+    """
+    Write down the security headers existing sites already serve.
+
+    Same shape as pin_existing_tls_versions above, and the same reason.
+
+    X-Frame-Options and Referrer-Policy are dropdowns whose "do not send the
+    header" option is the empty string, and the GUI does not send an empty
+    value: it reads it as the setting having been cleared and leaves the key
+    out.  The renderer used to fall back to SAMEORIGIN and
+    strict-origin-when-cross-origin when the key was missing, so choosing not to
+    send either header stored nothing, rendered the default, and the header was
+    back on the next apply.  Neither could be turned off at all.
+
+    The fix is for a missing key to mean no header, which is what the person
+    choosing that option is asking for.  The danger is entirely in the sites
+    that already exist: every one of them is missing both keys and is serving
+    both headers from the fallback, so moving it would quietly strip two
+    security headers off the whole fleet on the next apply, on sites nobody
+    touched.
+
+    So they get written down first, from the catalog, which is where the old
+    fallback values came from.  After that the fallback can mean nothing without
+    changing a single existing site.  Idempotent, and it does nothing on a fresh
+    install because there is nothing to pin.
+    """
+    from app.catalog import get_feature
+    from app.models import VirtualHost, json_get, json_set
+
+    engine = get_engine()
+    pinned = 0
+
+    with Session(engine) as session:
+        for host in session.query(VirtualHost).all():
+            settings = json_get(host.settings, {})
+            changed = False
+            for key in ("x_frame_options", "referrer_policy"):
+                if key in settings:
+                    continue
+                feature = get_feature(key)
+                if feature is None:          # a key retired from the catalog
+                    continue
+                settings[key] = feature.default
+                changed = True
+            if changed:
+                host.settings = json_set(settings)
+                pinned += 1
+        if pinned:
+            session.commit()
+
+    if pinned:
+        log.warning("pinned the security headers on %d existing sites, so an "
+                    "absent setting can now mean the header is off without "
+                    "changing what they already serve", pinned)
+
+
 def init_db():
     engine = get_engine()
     Base.metadata.create_all(engine)
     ensure_schema()
     pin_existing_tls_versions()
+    pin_existing_security_headers()
 
     with engine.connect() as conn:
         conn.execute(text("PRAGMA optimize"))

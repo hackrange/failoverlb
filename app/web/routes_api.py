@@ -1772,6 +1772,43 @@ async def get_host(host_id: str, g: ObjectGuard = Depends(guard)):
     return _host_detail(host)
 
 
+def _seed_security_headers(host):
+    """
+    Write the catalog's header defaults onto a brand new site.
+
+    X-Frame-Options and Referrer-Policy are the two whose "do not send the
+    header" option is the empty string, which the forms cannot store: an empty
+    value means cleared and the key is left out.  So the renderer treats a
+    missing key as no header, and the value a new site gets has to be written
+    down here instead of living in a fallback nobody can override.
+
+    The form already shows the catalog default selected on a new site, so
+    without this the dropdown would say SAMEORIGIN while the rendered config
+    sent nothing, which is the same class of lie the fallback was.
+
+    Only on create, and only for keys nobody set.  Doing it in
+    _apply_host_fields would put the header back every time somebody saved after
+    choosing not to send it, which is the bug this is fixing.
+
+    Deliberately not for an imported site: those are built straight from
+    somebody's existing nginx config and do not come through here, so a config
+    that never sent these headers does not start sending them because we
+    imported it.
+    """
+    settings = host.setting_map()
+    changed = False
+    for key in ("x_frame_options", "referrer_policy"):
+        if key in settings:
+            continue
+        feature = get_feature(key)
+        if feature is None:
+            continue
+        settings[key] = feature.default
+        changed = True
+    if changed:
+        host.settings = json.dumps(settings)
+
+
 @router.post("/hosts")
 async def create_host(request: Request, g: ObjectGuard = Depends(changing)):
     g.require("edit_sites")
@@ -1782,6 +1819,7 @@ async def create_host(request: Request, g: ObjectGuard = Depends(changing)):
     name = validate_name(payload.get("name"), "site name")
     host = VirtualHost(name=name)
     _apply_host_fields(g, host, payload)
+    _seed_security_headers(host)
     g.session.add(host)
     g.session.commit()
 
