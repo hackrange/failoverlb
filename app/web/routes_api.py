@@ -40,7 +40,7 @@ from app.core.capabilities import fleet_capabilities, get_local_capabilities
 from app.core.cluster import ClusterError, PeerClient, RoleNotSettled, get_cluster
 from app.core.crypto import encrypt, new_token
 from app.core.nginx_parser import ParseError, extract_settings, parse, quick_check
-from app.core.render import Renderer, safe_name, safe_var
+from app.core.render import OFFLOAD_ONLY_FORCES, Renderer, safe_name, safe_var
 from app.core.snapshot import capture as snapshot_capture
 from app.db import get_db, session_scope
 from app.models import (
@@ -555,6 +555,12 @@ async def catalog(request: Request, context: str = "server",
             "unit": feature.unit,
             "placeholder": feature.placeholder,
             "advanced": feature.advanced,
+            # Whether SSL offload only mode decides this one, so the form can
+            # grey it out and say why rather than letting somebody set a value
+            # the renderer is going to override.  Read from the renderer's own
+            # list, because two copies of it would drift the first time the mode
+            # covered one more setting.
+            "offload_forced": feature.key in OFFLOAD_ONLY_FORCES,
             "confirm": feature.confirm,
             "depends_on": feature.depends_on,
             "directive": feature.directive,
@@ -1755,6 +1761,7 @@ HOST_FIELDS = {
     "http_port", "https_port", "default_server", "http2", "force_https",
     "cert_id", "mode", "pool_id", "document_root", "redirect_target",
     "redirect_code", "settings", "access_list_id", "admin_only",
+    "tls_offload_only",
     "error_page_template_id", "redirect_to_primary",
     "custom_config", "notes", "config_mode",
 }
@@ -1909,6 +1916,7 @@ async def duplicate_host(host_id: str, request: Request,
         access_list_id=original.access_list_id,
         error_page_template_id=original.error_page_template_id,
         admin_only=original.admin_only,
+        tls_offload_only=original.tls_offload_only,
         custom_config=original.custom_config,
         config_mode=original.config_mode,
         notes=f"Copied from {original.name}." +
@@ -2138,7 +2146,8 @@ def _apply_host_fields(g, host, payload):
         host.server_names = json.dumps(names)
 
     for field in ("enabled", "listen_http", "listen_https", "default_server",
-                  "http2", "force_https", "admin_only", "redirect_to_primary"):
+                  "http2", "force_https", "admin_only", "redirect_to_primary",
+                  "tls_offload_only"):
         if field in payload:
             setattr(host, field, bool(payload[field]))
 
@@ -2508,6 +2517,7 @@ def _host_detail(h):
         "http2": h.http2,
         "force_https": h.force_https,
         "redirect_to_primary": h.redirect_to_primary,
+        "tls_offload_only": bool(h.tls_offload_only),
         "pool_id": h.pool_id,
         "cert_id": h.cert_id,
         "access_list_id": h.access_list_id,

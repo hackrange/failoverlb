@@ -400,6 +400,22 @@ class VirtualHost(Base):
     # staging site or an admin panel that should never face the internet.
     admin_only = Column(Boolean, default=False)
 
+    # Terminate TLS and change nothing else.
+    #
+    # The job people actually arrive with: a site that already works, in front
+    # of which they want a load balancer holding the certificate, with the
+    # application's own headers reaching the browser exactly as it sent them.
+    # Without this it is a dozen settings across three pages, every one of them
+    # a default that is right for a site you own and wrong for one you are only
+    # carrying traffic for, and the way you find out you missed one is a
+    # Content-Security-Policy that no longer matches the application.
+    #
+    # One switch instead, and the renderer forces the lot.  What it covers is
+    # OFFLOAD_ONLY_FORCES in the renderer, next to the reasons for what it
+    # leaves alone.  It forces rather than clears, so turning it off gives the
+    # site back the settings it had.
+    tls_offload_only = Column(Boolean, default=False)
+
     # Free text nginx that goes in the server block.  We still run nginx -t on
     # it, so a typo cannot take the fleet down, but it is your rope.
     custom_config = Column(Text)

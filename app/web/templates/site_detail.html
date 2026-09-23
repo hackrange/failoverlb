@@ -245,6 +245,27 @@
         <input type="checkbox" id="f-http2" {{ 'checked' if host.http2 }}>
         <label for="f-http2">HTTP/2</label>
       </div>
+      {# The job people actually arrive with, as one switch rather than a dozen
+         settings across three pages.  On the Basics tab because it is a
+         statement about what this site is for, the same as the mode picker
+         above it, and because somebody who wants it does not know yet that the
+         settings it turns off exist. #}
+      <div class="checkline">
+        <input type="checkbox" id="f-offload" {{ 'checked' if host.tls_offload_only }}>
+        <label for="f-offload">
+          SSL offload only
+          <button class="help-btn" data-help-static="h-offload"
+                  data-help-title="SSL offload only" data-help-wide aria-label="Help">?</button>
+        </label>
+      </div>
+      <p class="small muted" style="margin:-4px 0 14px 23px">
+        Terminate TLS here and change nothing else.  The backend's own headers
+        reach the browser exactly as it sent them, and the settings that would
+        rewrite them are greyed out on the
+        <a href="#" data-goto-tab="settings">Settings</a> tab while this is on.
+        For a site you do not own, or one whose application already sets its own
+        security headers.
+      </p>
       <div class="checkline">
         <input type="checkbox" id="f-default" {{ 'checked' if host.default_server }}>
         <label for="f-default">
@@ -1066,6 +1087,60 @@ A default that returns a plain 404 keeps that tidy.</p>
   </div>
 </div>
 
+<div hidden id="h-offload">
+  <div class="help-section">
+    <p>Terminate TLS here, hold the certificate here, and pass everything else
+       through untouched.</p>
+  </div>
+  <div class="help-section">
+    <h4>What it stops doing</h4>
+    <p>Normally a site is assumed to be yours, so it gets a set of security
+       headers whether or not the application behind it sent its own: HSTS,
+       X-Frame-Options, X-Content-Type-Options and a Referrer-Policy.  Each one
+       is written by hiding the backend's copy first, because two copies that
+       disagree is worse than either alone.  That is right for a site you own
+       and wrong for one you are only carrying traffic for, where the
+       application's own Content-Security-Policy is the one that has been
+       tested.</p>
+    <p>With this on, none of those are written and none of the backend's are
+       hidden.  Neither are the redirect and cookie rewrites, the response text
+       replacement, the custom response headers, or this site's own Server
+       header handling.  Serving a whole website under a path is off too, since
+       a mount is nothing but rewriting.</p>
+  </div>
+  <div class="help-section">
+    <h4>The one it cannot undo</h4>
+    <p>The Server header.  The installer writes
+       <code>more_set_headers "Server: server"</code> into nginx.conf for the
+       whole box, so every response says that whatever any one site asks for,
+       and nginx replaces an upstream's Server and Date headers with its own
+       before any site setting is read.  A site cannot override a decision made
+       for the box.  If the application's own Server header has to reach the
+       browser, that line comes out of nginx.conf, which is a change to every
+       site on the node rather than to this one.</p>
+  </div>
+  <div class="help-section">
+    <h4>What it still does</h4>
+    <p>Host, X-Real-IP and the four X-Forwarded headers, which are how the
+       backend learns who asked and that the request arrived over https.  SNI to
+       the backend, and a backend path if the pool has one, because those are
+       how the request reaches the application at all rather than rewrites of
+       anything.</p>
+    <p>A pool token is left alone as well.  That one is this load balancer
+       proving itself to the backend, not a rewrite of something the backend
+       sent, and dropping it from here would either break a backend that checks
+       it or quietly remove the check.  The WAF, CORS, geo blocking and the
+       access list are untouched too: they decide who gets through rather than
+       what their headers say, and each has a tab of its own.</p>
+  </div>
+  <div class="help-section">
+    <h4>Turning it off</h4>
+    <p>Gives the site back exactly the settings it had.  Nothing is cleared,
+       the renderer simply stops reading them while the mode is on, so this is
+       safe to try on a site that is already configured.</p>
+  </div>
+</div>
+
 <div hidden id="h-adminonly">
   <div class="help-section">
     <p>Locks this site to the management networks and the cluster nodes.</p>
@@ -1147,6 +1222,31 @@ document.addEventListener("DOMContentLoaded", function () {
     });
   });
 
+  // The hint under SSL offload only points at the tab where the greyed out
+  // settings are, so the link has to move the tabs rather than the page.
+  document.querySelectorAll("[data-goto-tab]").forEach(function (link) {
+    link.addEventListener("click", function (event) {
+      event.preventDefault();
+      const want = link.getAttribute("data-goto-tab");
+      const tab = document.querySelector('.tab[data-tab="' + want + '"]');
+      if (tab) tab.click();
+    });
+  });
+
+  // ---- SSL offload only ----
+  //
+  // The switch lives on Basics and decides what the Settings tab may offer, so
+  // ticking it redraws that tab rather than waiting for a save and a reload.
+  // Somebody who ticks it and goes looking for what changed should find the
+  // answer already on screen.
+  function offloadOnly() {
+    const box = document.getElementById("f-offload");
+    return !!(box && box.checked);
+  }
+  document.getElementById("f-offload").addEventListener("change", function () {
+    if (catalog) renderSettings();
+  });
+
   // ---- show the right field for the chosen mode ----
   function syncMode() {
     const mode = document.getElementById("f-mode").value;
@@ -1214,7 +1314,22 @@ document.addEventListener("DOMContentLoaded", function () {
       html += "</div></div>";
     });
 
-    holder.innerHTML = html || '<div class="empty"><strong>Nothing matches that filter</strong></div>';
+    // Said once at the top as well as on each greyed out control, because
+    // somebody arriving on this tab to change a header needs to know why before
+    // they start hunting for the setting that will not take.
+    //
+    // Added after the empty check rather than before it, or a filter matching
+    // nothing would show the notice and call that a result.
+    const notice = offloadOnly()
+      ? '<div class="notice info"><div>This site is in <strong>SSL offload only' +
+        '</strong> mode, so the settings that would rewrite a header are greyed ' +
+        'out and the backend\'s own headers reach the browser untouched.  Nothing ' +
+        'below is lost: untick it on the Basics tab and these come back as they ' +
+        'were.</div></div>'
+      : "";
+
+    holder.innerHTML = notice +
+      (html || '<div class="empty"><strong>Nothing matches that filter</strong></div>');
 
     holder.querySelectorAll("[data-setting]").forEach(function (el) {
       el.addEventListener("change", markDirty);
@@ -1246,7 +1361,23 @@ document.addEventListener("DOMContentLoaded", function () {
     const store = opts.saved || saved;
     const val = store[f.key] !== undefined ? store[f.key] : f.default;
     const id = (opts.idPrefix || "s-") + f.key;
-    const disabled = f.available ? "" : " disabled";
+
+    // Two separate reasons a control can be dead, and the message is not the
+    // same.  A module this build does not have is never going to work here.  A
+    // setting the site's mode decides is working exactly as asked, and the way
+    // to get it back is a checkbox on Basics, so the note says which one.
+    //
+    // Greyed out rather than hidden, and the stored value is still shown, so
+    // somebody can see what the site will go back to when the mode comes off.
+    const forced = f.offload_forced && offloadOnly();
+    const disabled = (f.available && !forced) ? "" : " disabled";
+    const deadNote = !f.available
+      ? '<div class="hint" style="color:var(--bad)">' +
+        NFM.escapeHtml(f.unavailable_reason || "not available on this build") + "</div>"
+      : (forced
+         ? '<div class="hint">SSL offload only is on for this site, so this is ' +
+           'not written.  Untick it on the Basics tab to use it again.</div>'
+         : "");
 
     let input = "";
     if (f.type === "bool") {
@@ -1266,7 +1397,7 @@ document.addEventListener("DOMContentLoaded", function () {
               (val ? " checked" : "") + disabled + '>' +
               '<label for="' + id + '">' + NFM.escapeHtml(f.label) + "</label>" +
               help(f, opts.helpContext) + "</div>";
-      return input;
+      return deadNote ? input + deadNote : input;
     }
 
     if (f.type === "select") {
@@ -1306,8 +1437,7 @@ document.addEventListener("DOMContentLoaded", function () {
            '<label for="' + id + '">' + NFM.escapeHtml(f.label) + help(f, opts.helpContext) + "</label>" +
            input +
            (f.directive ? '<div class="hint mono">' + NFM.escapeHtml(f.directive) + "</div>" : "") +
-           (f.available ? "" : '<div class="hint" style="color:var(--bad)">' +
-              NFM.escapeHtml(f.unavailable_reason || "not available on this build") + "</div>") +
+           deadNote +
            "</div>";
   }
 
@@ -1752,9 +1882,13 @@ document.addEventListener("DOMContentLoaded", function () {
         <select id="l-pool"><option value="">none</option>${poolOpts}</select></div>
       <div class="field" data-lmode="proxy">
         <div class="checkline">
-          <input type="checkbox" id="l-mount" ${l.mount_site ? "checked" : ""}>
+          <input type="checkbox" id="l-mount" ${l.mount_site ? "checked" : ""}
+                 ${offloadOnly() ? "disabled" : ""}>
           <label for="l-mount">Serve a whole website here</label>
         </div>
+        ${offloadOnly() ? '<div class="hint">SSL offload only is on for this site, ' +
+          'and a mount is nothing but rewriting, so this is off.  Untick SSL offload ' +
+          'only on the Basics tab to use it.</div>' : ""}
         <div class="hint">For putting an entire site under this path when the
           site itself has no idea it is not at the root.  Everything it needs
           gets written for you: the path comes off, the links and assets in the
@@ -1854,7 +1988,7 @@ document.addEventListener("DOMContentLoaded", function () {
     });
   }
 
-  function collectPath() {
+  function collectPath(existing) {
     const v = id => (document.getElementById(id) || {}).value || "";
     const body = {
       path: v("l-path").trim(),
@@ -1880,9 +2014,28 @@ document.addEventListener("DOMContentLoaded", function () {
     // object because the section was left closed.  Sending {} would wipe every
     // setting the path already had, which is the same trap the site save has a
     // comment about, one level down.
+    //
+    // And merged onto what the path already has rather than replacing it, the
+    // same as the site save, because a settings put replaces the whole blob and
+    // collectSettings leaves out every control that is drawn disabled.  A
+    // module missing from this build did that already; SSL offload only mode
+    // greys out a dozen more, so saving a path while it was on would have
+    // deleted exactly the settings the mode exists to preserve, and turning the
+    // mode back off would have given back a site with them gone.
+    //
+    // A control that was built and left empty still means clear it, which is
+    // what collectSettings leaving it out has always meant.
     const lHolder = document.getElementById("l-settings-holder");
     if (lHolder && lHolder.getAttribute("data-built") === "yes") {
-      body.settings = collectSettings(lHolder);
+      const shown = collectSettings(lHolder);
+      const merged = Object.assign({}, (existing && existing.settings) || {});
+      lHolder.querySelectorAll("[data-setting]").forEach(function (el) {
+        const key = el.getAttribute("data-setting");
+        if (controlDisabled(el)) return;
+        if (Object.prototype.hasOwnProperty.call(shown, key)) merged[key] = shown[key];
+        else delete merged[key];
+      });
+      body.settings = merged;
     }
     return body;
   }
@@ -1982,7 +2135,7 @@ document.addEventListener("DOMContentLoaded", function () {
     }
 
     document.getElementById("l-save").addEventListener("click", async function () {
-      const body = collectPath();
+      const body = collectPath(existing);
       if (!body.path) { NFM.toast("A path is required", "warn"); return; }
       try {
         if (existing) {
@@ -2033,6 +2186,7 @@ document.addEventListener("DOMContentLoaded", function () {
       http2: document.getElementById("f-http2").checked,
       default_server: document.getElementById("f-default").checked,
       admin_only: document.getElementById("f-admin").checked,
+      tls_offload_only: offloadOnly(),
       notes: document.getElementById("f-notes").value
     };
 
