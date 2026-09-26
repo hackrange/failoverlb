@@ -34,16 +34,11 @@ class Settings(BaseSettings):
     # add a node.  Change these if you run your own fork or install somewhere
     # other than the default, so the command the GUI hands out actually works.
     #
-    # The short form, with no namespace, and it only works because the
-    # git.failoverlb.net site rewrites it onto the namespaced path GitLab really
-    # serves.  Worth knowing because of how it fails if that rewrite is ever
-    # lost: GitLab answers 401 for a path it will not show you, so that it never
-    # confirms whether a private project is there, and git reads the 401 as
-    # "log in" and asks for a password.  A missing rewrite therefore does not
-    # look like a broken URL, it looks like the repository having gone private,
-    # and what anybody adding a node meets is a password prompt they have no
-    # password for.  `regressions.py` clones this anonymously for that reason.
-    repo_url: str = Field(default="https://git.failoverlb.net/failoverlb.git")
+    # The public repository on GitHub.  Cloned anonymously, so a wrong URL here
+    # does not look like a 404: GitHub answers a missing or private repository
+    # with a request to log in, and what anybody adding a node meets is a
+    # password prompt they have no password for.
+    repo_url: str = Field(default="https://github.com/hackrange/failoverlb.git")
     install_dir: str = Field(default="/data/docker/failoverlb")
 
     # ---- listeners ----------------------------------------------------------

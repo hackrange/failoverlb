@@ -131,11 +131,14 @@ nothing.
 
 ## Getting started
 
-On a fresh box, all of it in one go:
+The code lives at <https://github.com/hackrange/failoverlb>.  On a fresh box,
+get it and run all of it in one go:
 
 ```bash
+sudo git clone https://github.com/hackrange/failoverlb.git /data/docker/failoverlb
+cd /data/docker/failoverlb
 sudo ./nginx-installer.sh install      # build nginx from source
-sudo ./failoverlb_setup.sh             # docker, clone, install, start
+sudo ./failoverlb_setup.sh             # docker, install, start
 ```
 
 The setup script clones into `/data/docker/failoverlb`, sets up docker if it
@@ -301,7 +304,7 @@ On the running node, go to **Cluster** and press **Add a node**.  You get a
 command to paste on the new box:
 
 ```bash
-sudo git clone https://git.failoverlb.net/failoverlb.git /data/docker/failoverlb \
+sudo git clone https://github.com/hackrange/failoverlb.git /data/docker/failoverlb \
   && sudo /data/docker/failoverlb/failoverlb_setup.sh \
        --join 10.0.0.10:7444 --token <token>
 ```

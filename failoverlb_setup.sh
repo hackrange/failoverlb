@@ -23,11 +23,10 @@
 {
 set -euo pipefail
 
-# The short form works because the git.failoverlb.net site rewrites it onto the
-# namespaced path.  If that rewrite goes missing this does not 404: GitLab
-# answers 401 for a path it will not show you, git reads that as "log in", and
-# the failure presents as the repository being private rather than as a bad URL.
-REPO_URL="${NFM_REPO_URL:-https://git.failoverlb.net/failoverlb.git}"
+# The public repository on GitHub.  A wrong URL here does not 404: GitHub
+# answers a missing or private repository with a request to log in, so the
+# failure presents as the repository being private rather than as a bad URL.
+REPO_URL="${NFM_REPO_URL:-https://github.com/hackrange/failoverlb.git}"
 INSTALL_DIR="${NFM_INSTALL_DIR:-/data/docker/failoverlb}"
 BRANCH="${NFM_BRANCH:-master}"
 
