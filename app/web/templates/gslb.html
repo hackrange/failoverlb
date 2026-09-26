@@ -1,0 +1,578 @@
+{% extends "base.html" %}
+{% block title %}DNS Failover &middot; Failover LB{% endblock %}
+
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <h1>DNS Failover</h1>
+    <div class="sub">
+      Hand out the address of a node that is up.  When one goes down, the next
+      answer takes its place within a minute.
+    </div>
+  </div>
+  <div class="page-actions">
+    {% if can('edit_sites') %}
+      <button class="btn primary" id="new-zone">Add a zone</button>
+    {% endif %}
+  </div>
+</div>
+
+<div class="notice info">
+  <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 3a.9.9 0 1 1 0 1.8A.9.9 0 0 1 8 4zm1.2 8H6.8v-.9h.7V7.9h-.7V7h2.1v4.1h.3V12z"/></svg>
+  <div>
+    A load balancer can only move traffic that reaches it.  If the whole node is
+    gone, nothing reaches it, and the only thing left that can send people
+    somewhere else is DNS.  These nodes answer DNS themselves for the names you
+    list here, and they leave out any node that is not answering.  Your domain
+    host has to point the name at these nodes first, which is the
+    <strong>delegation</strong> shown under each zone.
+  </div>
+</div>
+
+<div class="card" id="status-card">
+  <div class="card-head"><h2>The DNS listener</h2></div>
+  <div class="card-body" id="status-body">
+    <div class="faint">Loading...</div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head"><h2>Zones</h2></div>
+  <div class="card-body no-pad">
+    <div id="zone-list"><div class="pad faint">Loading...</div></div>
+  </div>
+</div>
+
+<style>
+  .pad { padding: 1rem; }
+  .zone-block { border-bottom: 1px solid var(--line); padding: 1rem; }
+  .zone-block:last-child { border-bottom: 0; }
+  .zone-head { display: flex; justify-content: space-between;
+               align-items: flex-start; gap: 1rem; }
+  .rec-table { width: 100%; margin-top: .75rem; }
+  .answer-line { display: flex; align-items: center; gap: .4rem;
+                 margin-bottom: .2rem; }
+  .dot { width: .55rem; height: .55rem; border-radius: 50%;
+         display: inline-block; flex: 0 0 auto; }
+  .dot.up { background: var(--ok, #2e9e4f); }
+  .dot.down { background: var(--bad, #c23b3b); }
+  .dot.unknown { background: var(--muted, #999); }
+  .deleg { margin-top: .75rem; }
+  .deleg pre { margin: .4rem 0 0; padding: .6rem .75rem; overflow-x: auto;
+               background: var(--code-bg, #f6f7f9); border-radius: 4px;
+               font-size: .8rem; line-height: 1.5; }
+  .answer-row { display: grid; grid-template-columns: 1fr 1fr auto auto;
+                gap: .5rem; margin-bottom: .4rem; align-items: center; }
+  .answer-row input, .answer-row select { width: 100%; }
+</style>
+
+<script nonce="{{ csp_nonce }}">
+// Waits for app.js, which the layout loads after this block, so window.NFM
+// exists by the time anything here runs.
+document.addEventListener("DOMContentLoaded", function () {
+  const CAN_EDIT = {{ 'true' if can('edit_sites') else 'false' }};
+  let NODES = [];
+  let HEALTHY = [];
+
+  function el(id) { return document.getElementById(id); }
+  function val(id) { const e = el(id); return e ? e.value.trim() : ""; }
+  function esc(s) { return NFM.escapeHtml(s == null ? "" : String(s)); }
+
+  async function load() {
+    let data;
+    try {
+      data = await NFM.api("/gslb/zones");
+    } catch (err) {
+      const msg = "Could not load: " + (err && err.message ? err.message : err);
+      el("zone-list").textContent = msg;
+      el("zone-list").className = "pad faint";
+      el("status-body").textContent = msg;
+      return;
+    }
+    NODES = data.nodes || [];
+    HEALTHY = data.healthy_nodes || [];
+    drawStatus(data.server || {}, data.zones || []);
+    drawZones(data.zones || []);
+  }
+
+  // The listener and the database are two different things, and the whole of
+  // what goes wrong here lives in the gap between them.  A zone can be saved,
+  // look right on this page, and still resolve nowhere, so this panel reports
+  // what the listener is doing rather than what was typed in.
+  function drawStatus(server, zones) {
+    const up = !!server.listening;
+    const loaded = server.zones_loaded || 0;
+    const saved = zones.filter(function (z) { return z.enabled; }).length;
+    const stats = server.stats || {};
+
+    let html = '<div class="answer-line"><span class="dot ' +
+      (up ? "up" : "down") + '"></span><strong>' +
+      (up ? "Answering DNS on " + esc(server.address) + " port " + esc(server.port)
+          : "Not listening") + "</strong></div>";
+
+    if (up) {
+      html += '<div class="small faint" style="margin-left:1rem">' +
+        loaded + " zone" + (loaded === 1 ? "" : "s") + " loaded" +
+        (saved !== loaded
+          ? ' <span class="badge warn">' + saved + " turned on here</span>"
+          : "") +
+        (stats.queries != null ? " &middot; " + esc(stats.queries) + " queries answered" : "") +
+        "</div>";
+
+      // Port 53 is what the world asks on, and the listener is deliberately not
+      // on it.  Saying so here saves somebody testing the high port, getting an
+      // answer, and assuming the public path works.
+      if (String(server.port) !== "53") {
+        html += '<div class="small faint" style="margin-top:.5rem">' +
+          "The world asks on port 53.  This node listens on " + esc(server.port) +
+          " and forwards port 53 to it with a firewall rule, so it never has to " +
+          "run as root.  Test the real path with " +
+          "<code>dig @" + esc(server.address) + " yourname." +
+          (zones.length ? esc(zones[0].name) : "example.com") + "</code>, with no " +
+          "port on the end.</div>";
+      }
+    } else {
+      html += '<div class="small faint" style="margin-left:1rem">' +
+        "Nothing on this node is answering DNS, so every name below is only in " +
+        "the database.  Check the container log.</div>";
+    }
+
+    const healthyNames = NODES.filter(function (n) {
+      return HEALTHY.indexOf(n.name) !== -1;
+    }).map(function (n) { return n.name; });
+
+    html += '<div class="small" style="margin-top:.75rem">' +
+      "<strong>Handed out right now:</strong> " +
+      (healthyNames.length ? esc(healthyNames.join(", "))
+                           : '<span class="faint">no node is healthy</span>') +
+      "</div>";
+
+    el("status-body").innerHTML = html;
+  }
+
+  function answerLine(a) {
+    // A node an answer is tied to that is not healthy is the interesting case,
+    // because that is the answer being held back on purpose.
+    let state = "unknown", why = "always handed out, not tied to a node";
+    if (a.node_name) {
+      const up = HEALTHY.indexOf(a.node_name) !== -1;
+      state = up ? "up" : "down";
+      why = up ? "node is up, handed out"
+               : "node is down, held back";
+    }
+    if (!a.enabled) { state = "unknown"; why = "turned off here"; }
+
+    // An address that does not belong to the node it is tied to.  Said here,
+    // beside the answer, because that is where somebody can act on it.  It is
+    // a warning and never a refusal: a floating address that moves between
+    // machines looks exactly the same from here and is perfectly valid.
+    //
+    // It matters because it is invisible in normal running.  The other node's
+    // answer covers for it, and the day that node goes away the name resolves
+    // only to an address belonging to nobody.
+    let warn = "";
+    if (a.address_warning) {
+      warn = '<div class="faint small" style="margin-left:1.2rem;color:#b45309">' +
+        "&#9888; " + esc(a.address_warning.detail) + "</div>";
+    }
+
+    return '<div class="answer-line"><span class="dot ' + state +
+      '" title="' + esc(why) + '"></span><span class="mono small">' +
+      esc(a.value) + "</span>" +
+      (a.node_name ? ' <span class="faint small">' + esc(a.node_name) + "</span>" : "") +
+      ' <span class="faint small">&middot; ' + esc(why) + "</span></div>" + warn;
+  }
+
+  function recordRows(zone) {
+    if (!zone.records.length) {
+      return '<div class="faint small" style="margin-top:.75rem">' +
+        "No names here yet.  Add one and point it at your nodes.</div>";
+    }
+    return '<table class="table rec-table"><thead><tr>' +
+      "<th>Name</th><th>Answers</th><th>TTL</th><th>When one is down</th><th></th>" +
+      "</tr></thead><tbody>" +
+      zone.records.map(function (r) {
+        return "<tr><td><strong>" + esc(r.fqdn) + "</strong>" +
+          ' <span class="badge neutral">' + esc(r.record_type) + "</span>" +
+          (r.enabled ? "" : ' <span class="badge warn">off</span>') +
+          (r.description ? "<div class='small faint'>" + esc(r.description) + "</div>" : "") +
+          "</td><td>" +
+          (r.answers.length ? r.answers.map(answerLine).join("")
+                            : '<span class="faint small">nothing to hand out</span>') +
+          "</td><td class='small'>" + esc(r.ttl) + "s</td>" +
+          "<td class='small'>" +
+          (r.policy === "all" ? "hand out the rest" : "fall to the next in line") +
+          "</td><td class='right'>" +
+          (CAN_EDIT
+            ? '<button class="btn small" data-rec="' + r.id + '">Edit</button> ' +
+              '<button class="btn small danger" data-rec-del="' + r.id +
+              '" data-name="' + esc(r.fqdn) + '">Delete</button>'
+            : "") +
+          "</td></tr>";
+      }).join("") + "</tbody></table>";
+  }
+
+  // The delegation is the step people miss, and missing it looks exactly like
+  // the feature being broken: everything on this page reads fine and the name
+  // still does not resolve.  So the records are spelled out per zone, with this
+  // cluster's real addresses already filled in rather than described.
+  function delegation(zone) {
+    const ns = zone.nameservers || [];
+    if (!ns.length) {
+      return '<div class="deleg small faint">Set the nameserver names on this ' +
+        "zone and the records to create at your domain host will be listed here.</div>";
+    }
+    const parent = zone.name.split(".").slice(1).join(".") || zone.name;
+    let lines = ns.map(function (n) {
+      return zone.name + ".   300   IN   NS   " + n + ".";
+    });
+    // Glue.  A nameserver named inside the zone it serves cannot be looked up
+    // without it, which is a loop, and it is the second thing people miss.
+    ns.forEach(function (n, i) {
+      const node = NODES[i];
+      if (!node) { return; }
+      if (node.address_v4) { lines.push(n + ".   300   IN   A     " + node.address_v4); }
+      if (node.address_v6) { lines.push(n + ".   300   IN   AAAA  " + node.address_v6); }
+    });
+    return '<div class="deleg"><div class="small"><strong>At your domain host, ' +
+      "in the <span class='mono'>" + esc(parent) + "</span> zone, create these:" +
+      "</strong></div><pre class='mono'>" + esc(lines.join("\n")) + "</pre>" +
+      "<div class='small faint' style='margin-top:.4rem'>" +
+      "The NS lines say who answers for this zone.  The A lines are the " +
+      "<strong>glue</strong>, and they matter because a nameserver named inside " +
+      "the zone it serves cannot be looked up without them.  Then point a site " +
+      "at it with a CNAME to one of the names below.</div></div>";
+  }
+
+  function drawZones(zones) {
+    if (!zones.length) {
+      el("zone-list").innerHTML = '<div class="pad faint">' +
+        "No zones yet.  A zone is the part of your domain these nodes answer " +
+        "for, and it is usually a piece of a domain you already own, like " +
+        "<span class='mono'>gslb.example.com</span>, rather than the whole thing." +
+        "</div>";
+      return;
+    }
+    el("zone-list").innerHTML = zones.map(function (z) {
+      return '<div class="zone-block"><div class="zone-head"><div>' +
+        "<h3 style='margin:0'>" + esc(z.name) + "</h3>" +
+        (z.enabled ? "" : ' <span class="badge warn">turned off</span>') +
+        (z.description ? "<div class='small faint'>" + esc(z.description) + "</div>" : "") +
+        "</div><div>" +
+        (CAN_EDIT
+          ? '<button class="btn small" data-rec-new="' + z.id + '">Add a name</button> ' +
+            '<button class="btn small" data-zone="' + z.id + '">Edit zone</button> ' +
+            '<button class="btn small danger" data-zone-del="' + z.id +
+            '" data-name="' + esc(z.name) + '">Delete</button>'
+          : "") +
+        "</div></div>" +
+        recordRows(z) + delegation(z) + "</div>";
+    }).join("");
+  }
+
+  function zoneForm(z) {
+    z = z || { soa_contact: "hostmaster", soa_refresh: 3600, soa_retry: 600,
+               soa_expire: 604800, soa_minimum: 30, nameservers: [], enabled: true };
+    return `
+      <div class="field">
+        <label for="z-name">Zone name</label>
+        <input type="text" id="z-name" value="${esc(z.name || "")}"
+               placeholder="gslb.example.com">
+        <div class="hint">The part of your domain these nodes answer for.  A
+          piece of a domain you own is the safe choice, because delegating the
+          whole domain moves every other record here too.</div>
+      </div>
+      <div class="field">
+        <label for="z-ns">Nameserver names</label>
+        <input type="text" id="z-ns" class="mono"
+               value="${esc((z.nameservers || []).join(", "))}"
+               placeholder="ns1.example.com, ns2.example.com">
+        <div class="hint">One per node, in the same order as your nodes.  These
+          are the names you will point at your domain host, and the page will
+          show you the exact records to create once they are set.</div>
+      </div>
+      <div class="field">
+        <label for="z-desc">Note</label>
+        <input type="text" id="z-desc" value="${esc(z.description || "")}"
+               placeholder="what this is for">
+      </div>
+      <div class="form-grid">
+        <div class="field">
+          <label for="z-contact">Contact</label>
+          <input type="text" id="z-contact" value="${esc(z.soa_contact || "hostmaster")}">
+        </div>
+        <div class="field">
+          <label for="z-min">Negative cache, seconds</label>
+          <input type="number" id="z-min" value="${esc(z.soa_minimum)}" min="1" max="86400">
+          <div class="hint">How long a "no such name" is remembered.  Keep it low.</div>
+        </div>
+      </div>
+      <div class="checkline">
+        <input type="checkbox" id="z-enabled" ${z.enabled ? "checked" : ""}>
+        <label for="z-enabled">Answer for this zone</label>
+      </div>
+      <div class="mt"><button class="btn primary" id="z-save">Save</button></div>`;
+  }
+
+  function answerRow(a) {
+    a = a || { value: "", node_id: "", priority: 10, enabled: true };
+    const opts = ['<option value="">not tied to a node</option>'].concat(
+      NODES.map(function (n) {
+        return '<option value="' + esc(n.id) +
+               '" data-v4="' + esc(n.address_v4) + '"' +
+               ' data-v6="' + esc(n.address_v6) + '"' +
+               (a.node_id === n.id ? " selected" : "") + ">" + esc(n.name) + "</option>";
+      })).join("");
+    return '<div class="answer-row" data-answer>' +
+      '<input type="text" class="mono" data-value placeholder="address to hand out" value="' +
+      esc(a.value) + '">' +
+      "<select data-node>" + opts + "</select>" +
+      '<input type="number" data-priority style="width:5rem" value="' +
+      esc(a.priority) + '" title="lower goes first when falling through">' +
+      '<button class="btn small danger" data-drop type="button">Remove</button>' +
+      "</div>";
+  }
+
+  function recordForm(r, zoneName) {
+    r = r || { name: "www", record_type: "A", ttl: 30, policy: "all",
+               when_all_down: "serve_all", answers: [], enabled: true };
+    const types = ["A", "AAAA", "CNAME"].map(function (t) {
+      return '<option value="' + t + '"' + (r.record_type === t ? " selected" : "") +
+             ">" + t + "</option>";
+    }).join("");
+    return `
+      <div class="form-grid">
+        <div class="field">
+          <label for="r-name">Name</label>
+          <input type="text" id="r-name" value="${esc(r.name)}" placeholder="www">
+          <div class="hint">Just the label.  This makes
+            <span class="mono">${esc(r.name)}.${esc(zoneName)}</span>.  Use
+            <span class="mono">@</span> for the zone itself.</div>
+        </div>
+        <div class="field">
+          <label for="r-type">Type</label>
+          <select id="r-type">${types}</select>
+        </div>
+      </div>
+      <div class="form-grid">
+        <div class="field">
+          <label for="r-ttl">TTL, seconds</label>
+          <input type="number" id="r-ttl" value="${esc(r.ttl)}" min="1" max="86400">
+          <div class="hint">How long the answer is remembered elsewhere, and so
+            roughly how long a failover takes.  30 is a sensible low number.
+            Going much lower mostly buys extra queries.</div>
+        </div>
+        <div class="field">
+          <label for="r-policy">When a node is down</label>
+          <select id="r-policy">
+            <option value="all" ${r.policy === "all" ? "selected" : ""}>Hand out all the healthy ones</option>
+            <option value="failover" ${r.policy === "failover" ? "selected" : ""}>Hand out the best one only</option>
+          </select>
+          <div class="hint">The first spreads people across every node that is
+            up.  The second keeps everybody on one node until it fails, which is
+            what you want when the nodes are not equal.</div>
+        </div>
+      </div>
+      <div class="field">
+        <label for="r-alldown">If every node is down</label>
+        <select id="r-alldown">
+          <option value="serve_all" ${r.when_all_down === "serve_all" ? "selected" : ""}>Hand out all of them anyway</option>
+          <option value="serve_none" ${r.when_all_down === "serve_none" ? "selected" : ""}>Hand out nothing</option>
+        </select>
+        <div class="hint">Handing them out anyway is usually right.  If the
+          health check is what is broken rather than the nodes, an empty answer
+          takes the site down when it did not have to be.</div>
+      </div>
+
+      <h3>Answers</h3>
+      <div class="hint" style="margin-bottom:.5rem">
+        Tie an answer to a node and it is only handed out while that node is up.
+        Leave it untied and it is always handed out, which is right for an
+        address that is not one of these nodes.
+      </div>
+      <div id="r-answers">${(r.answers || []).map(answerRow).join("")}</div>
+      <button class="btn small" id="r-add" type="button">Add an answer</button>
+
+      <div class="checkline mt">
+        <input type="checkbox" id="r-enabled" ${r.enabled ? "checked" : ""}>
+        <label for="r-enabled">Answer for this name</label>
+      </div>
+      <div class="mt"><button class="btn primary" id="r-save">Save</button></div>`;
+  }
+
+  function collectAnswers() {
+    return Array.prototype.slice.call(
+      document.querySelectorAll("#r-answers [data-answer]")).map(function (row) {
+      return {
+        value: row.querySelector("[data-value]").value.trim(),
+        node_id: row.querySelector("[data-node]").value || null,
+        priority: parseInt(row.querySelector("[data-priority]").value, 10) || 10,
+        enabled: true
+      };
+    }).filter(function (a) { return a.value; });
+  }
+
+  function wireAnswers() {
+    el("r-add").addEventListener("click", function () {
+      el("r-answers").insertAdjacentHTML("beforeend", answerRow(null));
+    });
+    el("r-answers").addEventListener("click", function (ev) {
+      const drop = ev.target.closest("[data-drop]");
+      if (drop) { drop.closest("[data-answer]").remove(); }
+    });
+    // Picking a node fills in its address, because that is what the answer is
+    // nearly always meant to be and retyping it is just a chance to get it
+    // wrong.  Only when the box is empty, so a deliberate value is never eaten.
+    //
+    // Which address depends on the record type, and it has to: these nodes have
+    // a public IPv6 as well as an IPv4, and putting the v6 one in an A record
+    // gives you a field that looks filled in and will not save.
+    el("r-answers").addEventListener("change", function (ev) {
+      const pick = ev.target.closest("[data-node]");
+      if (!pick) { return; }
+      const box = pick.closest("[data-answer]").querySelector("[data-value]");
+      const opt = pick.options[pick.selectedIndex];
+      if (box.value || !opt) { return; }
+      const want = el("r-type").value === "AAAA" ? opt.dataset.v6 : opt.dataset.v4;
+      if (want) { box.value = want; }
+    });
+  }
+
+  function openZone(existing) {
+    NFM.openModal(existing ? "Edit " + existing.name : "Add a zone", "",
+                  zoneForm(existing), true);
+    el("z-save").addEventListener("click", async function () {
+      const body = {
+        name: val("z-name"),
+        description: val("z-desc"),
+        soa_contact: val("z-contact"),
+        soa_minimum: parseInt(val("z-min"), 10) || 30,
+        nameservers: val("z-ns"),
+        enabled: el("z-enabled").checked
+      };
+      if (!body.name) { NFM.toast("Give the zone a name", "bad"); return; }
+      try {
+        if (existing) {
+          await NFM.api("/gslb/zones/" + existing.id, { method: "PUT", body: body });
+        } else {
+          await NFM.api("/gslb/zones", { method: "POST", body: body });
+        }
+      } catch (err) { NFM.toast(err.message, "bad"); return; }
+      NFM.closeModal();
+      NFM.toast("Saved.  The listener picked it up.", "ok");
+      load();
+    });
+  }
+
+  async function openRecord(zoneId, zoneName, existing) {
+    NFM.openModal(existing ? "Edit " + existing.fqdn : "Add a name to " + zoneName,
+                  "", recordForm(existing, zoneName), true);
+    wireAnswers();
+
+    el("r-save").addEventListener("click", async function () {
+      const body = {
+        name: val("r-name") || "@",
+        record_type: el("r-type").value,
+        ttl: parseInt(val("r-ttl"), 10) || 30,
+        policy: el("r-policy").value,
+        when_all_down: el("r-alldown").value,
+        enabled: el("r-enabled").checked
+      };
+      const answers = collectAnswers();
+      if (!answers.length) {
+        NFM.toast("Add at least one answer, or it resolves to nothing", "bad");
+        return;
+      }
+      try {
+        let rec;
+        if (existing) {
+          rec = await NFM.api("/gslb/records/" + existing.id,
+                              { method: "PUT", body: body });
+          // The answer endpoints add and remove one at a time, so an edit
+          // replaces the set: drop what was there, then put back what the form
+          // holds.  Doing it in this order means a changed address is not
+          // briefly present twice, which the record would hand out.
+          for (const old of existing.answers || []) {
+            await NFM.api("/gslb/answers/" + old.id, { method: "DELETE" });
+          }
+        } else {
+          rec = await NFM.api("/gslb/zones/" + zoneId + "/records",
+                              { method: "POST", body: body });
+        }
+        for (const a of answers) {
+          await NFM.api("/gslb/records/" + rec.id + "/answers",
+                        { method: "POST", body: a });
+        }
+      } catch (err) { NFM.toast(err.message, "bad"); return; }
+      NFM.closeModal();
+      NFM.toast("Saved.  It is answering now.", "ok");
+      load();
+    });
+  }
+
+  el("zone-list").addEventListener("click", async function (ev) {
+    const zoneEdit = ev.target.closest("[data-zone]");
+    if (zoneEdit) {
+      try { openZone(await NFM.api("/gslb/zones/" + zoneEdit.dataset.zone)); }
+      catch (err) { NFM.toast(err.message, "bad"); }
+      return;
+    }
+    const zoneDel = ev.target.closest("[data-zone-del]");
+    if (zoneDel) {
+      if (!confirm("Delete the zone " + zoneDel.dataset.name +
+                   " and every name in it?\n\nAnything pointed at it stops " +
+                   "resolving.")) { return; }
+      try { await NFM.api("/gslb/zones/" + zoneDel.dataset.zoneDel, { method: "DELETE" }); }
+      catch (err) { NFM.toast(err.message, "bad"); return; }
+      NFM.toast("Deleted", "ok");
+      load();
+      return;
+    }
+    const recNew = ev.target.closest("[data-rec-new]");
+    if (recNew) {
+      try {
+        const z = await NFM.api("/gslb/zones/" + recNew.dataset.recNew);
+        openRecord(z.id, z.name, null);
+      } catch (err) { NFM.toast(err.message, "bad"); }
+      return;
+    }
+    const recEdit = ev.target.closest("[data-rec]");
+    if (recEdit) {
+      try {
+        const data = await NFM.api("/gslb/zones");
+        for (const z of data.zones || []) {
+          const found = (z.records || []).find(function (r) {
+            // Both sides through String, because one of them always is.  An
+            // id read off an attribute is text and an id out of json is a
+            // number, so a strict compare between them is never true.  It
+            // found nothing, threw nothing, and the button just did nothing.
+            return String(r.id) === String(recEdit.dataset.rec);
+          });
+          if (found) { openRecord(z.id, z.name, found); return; }
+        }
+        NFM.toast("Could not find that record to edit, try reloading", "bad");
+      } catch (err) { NFM.toast(err.message, "bad"); }
+      return;
+    }
+    const recDel = ev.target.closest("[data-rec-del]");
+    if (recDel) {
+      if (!confirm("Delete " + recDel.dataset.name + "?")) { return; }
+      try { await NFM.api("/gslb/records/" + recDel.dataset.recDel, { method: "DELETE" }); }
+      catch (err) { NFM.toast(err.message, "bad"); return; }
+      NFM.toast("Deleted", "ok");
+      load();
+    }
+  });
+
+  const add = el("new-zone");
+  if (add) { add.addEventListener("click", function () { openZone(null); }); }
+
+  load();
+  // Health moves on its own, so the dots go stale sitting here.  Slow enough
+  // that it is not a load on the box, quick enough to watch a failover happen.
+  setInterval(load, 15000);
+});
+</script>
+
+{% endblock %}

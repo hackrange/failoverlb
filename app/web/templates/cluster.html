@@ -1,0 +1,330 @@
+{% extends "base.html" %}
+{% block title %}Cluster &middot; Failover LB{% endblock %}
+
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <h1>Cluster</h1>
+    <div class="sub">
+      Every node runs the same config.  One takes the changes, the rest stay in
+      sync.  Config version {{ latest_version }}.
+    </div>
+  </div>
+  <div class="page-actions">
+    {% if can('join_nodes') %}
+      <button class="btn" id="join-token">Add a node</button>
+    {% endif %}
+    {% if can('manage_cluster') %}
+      <button class="btn" id="resync">Sync now</button>
+    {% endif %}
+  </div>
+</div>
+
+{% if pending %}
+  <div class="notice warn">
+    <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.5 15 14H1L8 1.5zm0 4a.7.7 0 0 0-.7.8l.25 3.2a.45.45 0 0 0 .9 0l.25-3.2A.7.7 0 0 0 8 5.5zm0 5.4a.8.8 0 1 0 0 1.6.8.8 0 0 0 0-1.6z"/></svg>
+    <div>
+      <strong>Some nodes are behind.</strong>
+      Their changes are queued and go out the moment they answer again.  Nothing
+      is lost and nothing has drifted.
+    </div>
+  </div>
+{% endif %}
+
+{% if modules and not modules.consistent %}
+  <div class="notice warn">
+    <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.5 15 14H1L8 1.5zm0 4a.7.7 0 0 0-.7.8l.25 3.2a.45.45 0 0 0 .9 0l.25-3.2A.7.7 0 0 0 8 5.5zm0 5.4a.8.8 0 1 0 0 1.6.8.8 0 0 0 0-1.6z"/></svg>
+    <div>
+      <strong>Your nodes were built with different modules.</strong>
+      Only the ones every node has are offered in the GUI, because config that
+      uses a module one box is missing would fail its test there and the change
+      would never go out.
+      <ul style="margin:6px 0 0">
+        {% for node, missing in modules.missing.items() %}
+          <li><strong>{{ node }}</strong> is missing:
+            <span class="mono small">{{ missing[:8]|join(', ') }}{% if missing|length > 8 %} and {{ missing|length - 8 }} more{% endif %}</span>
+          </li>
+        {% endfor %}
+      </ul>
+      <div class="small mt">
+        To fix it, add the module to the list at the top of
+        <code>nginx-installer.sh</code> and run the install again on that box.
+        The settings appear on their own once the build is done.
+      </div>
+    </div>
+  </div>
+{% endif %}
+
+<div class="card">
+  <div class="card-head">
+    <h2>Nodes</h2>
+    <button class="help-btn" data-help-static="help-roles"
+            data-help-title="Active and standby" data-help-wide aria-label="Help">?</button>
+  </div>
+  <div class="card-body tight">
+    <div class="table-scroll">
+    <table>
+      <thead>
+        <tr>
+          <th>Node</th>
+          <th>Role</th>
+          <th>State</th>
+          <th class="right">Priority</th>
+          <th class="right">Version</th>
+          <th>nginx</th>
+          <th>Public IP</th>
+          <th>Last seen</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for n in nodes %}
+          <tr>
+            <td>
+              <strong>{{ n.name }}</strong>
+              {% if n.is_self %}<span class="badge neutral">this one</span>{% endif %}
+              <div class="small faint mono">{{ n.address }}:{{ n.peer_port }}</div>
+            </td>
+            <td>
+              {% if n.role.value == 'active' %}
+                <span class="badge ok">active</span>
+              {% else %}
+                <span class="badge neutral">standby</span>
+              {% endif %}
+              {% if n.forced_standby %}
+                <span class="badge warn">pinned</span>
+              {% endif %}
+            </td>
+            <td>
+              {% if n.state.value == 'online' %}
+                <span class="badge ok">online</span>
+              {% elif n.state.value == 'offline' %}
+                <span class="badge bad">offline</span>
+              {% elif n.state.value == 'degraded' %}
+                <span class="badge warn">degraded</span>
+              {% else %}
+                <span class="badge neutral">{{ n.state.value }}</span>
+              {% endif %}
+            </td>
+            <td class="num">{{ n.priority }}</td>
+            <td class="num">
+              {% if n.applied_version == latest_version %}
+                {{ n.applied_version }}
+              {% else %}
+                <span class="badge warn">{{ n.applied_version }}</span>
+              {% endif %}
+              {% if pending.get(n.name) %}
+                <div class="small faint">{{ pending[n.name].count }} queued</div>
+              {% endif %}
+            </td>
+            <td class="small">
+              {% if n.nginx_active %}
+                <span class="dot ok"></span>{{ n.nginx_version or 'running' }}
+                {% if modules and modules.nodes.get(n.name) %}
+                  <div class="faint">{{ modules.nodes[n.name] }} modules</div>
+                {% endif %}
+              {% else %}
+                <span class="dot bad"></span>not running
+              {% endif %}
+            </td>
+            <td class="mono small faint">{{ n.public_ip or '-'|safe }}</td>
+            <td class="small faint">
+              {% if n.is_self %}
+                now
+              {% elif n.seconds_since_heartbeat is not none %}
+                {{ '%.0f'|format(n.seconds_since_heartbeat) }}s ago
+              {% else %}
+                never
+              {% endif %}
+            </td>
+            <td class="right nowrap">
+              {% if can('failover') and n.role.value != 'active' and n.state.value == 'online' %}
+                <button class="btn sm" data-failover="{{ n.name }}">Make active</button>
+              {% endif %}
+              {% if can('manage_cluster') and not n.is_self and n.role.value != 'active' %}
+                <button class="btn sm danger" data-remove-node="{{ n.name }}">Remove</button>
+              {% endif %}
+            </td>
+          </tr>
+          {% if n.last_error %}
+            <tr>
+              <td colspan="9" class="small" style="color:var(--bad); padding-top:0;">
+                {{ n.last_error[:200] }}
+              </td>
+            </tr>
+          {% endif %}
+        {% endfor %}
+      </tbody>
+    </table>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head">
+    <h2>Recent config versions</h2>
+  </div>
+  <div class="card-body tight">
+    {% if versions %}
+      <div class="table-scroll">
+      <table>
+        <thead>
+          <tr><th>Version</th><th>When</th><th>Who</th><th>What</th><th>From</th></tr>
+        </thead>
+        <tbody>
+          {% for v in versions %}
+            <tr>
+              <td class="mono">
+                {{ v.version }}
+                {% if v.version == latest_version %}<span class="badge ok">current</span>{% endif %}
+              </td>
+              <td class="small faint">{{ v.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
+              <td class="small">{{ v.author or 'system' }}</td>
+              <td class="small">{{ v.summary or '' }}</td>
+              <td class="small faint">{{ v.origin_node or '' }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      </div>
+    {% else %}
+      <div class="empty"><strong>Nothing applied yet</strong></div>
+    {% endif %}
+  </div>
+</div>
+
+<div hidden id="help-roles">
+  <div class="help-section">
+    <p>One node is active and takes the changes.  The rest are standby, stay in
+       sync, and are ready to take over.</p>
+  </div>
+  <div class="help-section">
+    <h4>Why not let every node take changes</h4>
+    <p>Two people editing the same site on two nodes at once gives you two
+       different answers and no way to tell which is right.  Load balancer
+       config is not something you want to merge and hope.  One writer means
+       there is always exactly one truth.</p>
+  </div>
+  <div class="help-section">
+    <h4>How the active one gets picked</h4>
+    <p>Highest priority among the nodes that are answering.  A tie breaks on the
+       node name, so the answer is the same every time and never a coin flip.
+
+There is one important rule on top: a node will not make itself active unless it
+can see more than half the cluster.  In a network split the smaller side stands
+down.  Without that, both halves would elect themselves and start writing
+different config to different load balancers.</p>
+  </div>
+  <div class="help-section">
+    <h4>What happens when a node is down</h4>
+    <p>Changes still go through on the nodes that are up.  The ones that are
+       down get the change written into a queue, and when they come back the
+       manager pushes the newest config at them and clears the backlog in one
+       go.  They never quietly drift.</p>
+  </div>
+  <div class="help-section">
+    <h4>Applying is two phases</h4>
+    <p>Every reachable node stages the config and runs nginx -t on it first.
+       Nothing goes live anywhere until they have all said yes.  If one says no,
+       nothing changes at all.  If a node fails partway through the second
+       phase, everything rolls back together.
+
+That is the difference between one bad config breaking one box and one bad
+config breaking your whole edge.</p>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script nonce="{{ csp_nonce }}">
+document.addEventListener("DOMContentLoaded", function () {
+
+  const jt = document.getElementById("join-token");
+  if (jt) jt.addEventListener("click", async function () {
+    try {
+      const result = await NFM.api("/cluster/join-token", { method: "POST", body: {} });
+      NFM.openModal("Add a node to the cluster", "single use, expires in 2 hours", `
+        <div class="help-section">
+          <p>Build nginx on the new box first if you have not already, then run
+             this.  It gets the code, sets up docker if it is missing, installs
+             the agent, starts the container, and joins it to this cluster.</p>
+        </div>
+        <pre>${NFM.escapeHtml(result.command)}</pre>
+
+        <div class="help-section" style="margin-top:14px">
+          <p>Already have the project folder on that box?  Cd into it and run
+             this instead.  No git access needed.</p>
+        </div>
+        <pre>${NFM.escapeHtml(result.command_have_code)}</pre>
+
+        <div class="help-section" style="margin-top:14px">
+          <p>The new node comes up as a standby.  It pulls the current config
+             from the cluster, so you do not have to set anything up on it
+             twice.  Make sure it can reach this node on port
+             ${NFM.escapeHtml(String(result.sponsor).split(":").pop())}.</p>
+        </div>
+
+        <div class="notice warn" style="margin-top:14px">
+          ${NFM.icon("warn")}
+          <div>
+            Treat this token like a password.  Anybody holding it can get a
+            signed cluster certificate and become a member.  It only works once
+            and it expires in 2 hours.
+          </div>
+        </div>
+      `, true);
+    } catch (err) {
+      NFM.toast(err.message, "bad");
+    }
+  });
+
+  const rs = document.getElementById("resync");
+  if (rs) rs.addEventListener("click", async function () {
+    try {
+      await NFM.api("/cluster/resync", { method: "POST", body: {} });
+      NFM.toast("Pushed the current config at anybody who was behind", "ok");
+      setTimeout(function () { window.location.reload(); }, 1200);
+    } catch (err) {
+      NFM.toast(err.message, "bad");
+    }
+  });
+
+  document.body.addEventListener("click", function (e) {
+    const rm = e.target.closest("[data-remove-node]");
+    if (rm) {
+      const node = rm.getAttribute("data-remove-node");
+      NFM.confirmThen(
+        "Remove " + node + " from the cluster?\n\n" +
+        "This only forgets it here.  Nothing is uninstalled, so if that box is " +
+        "still running the manager it will heartbeat and come back.  Stop it " +
+        "there first if you mean this to stick.",
+        async function () {
+          try {
+            await NFM.api("/cluster/nodes/" + encodeURIComponent(node), { method: "DELETE" });
+            NFM.toast(node + " removed", "ok");
+            setTimeout(function () { window.location.reload(); }, 900);
+          } catch (err) { NFM.toast(err.message, "bad"); }
+        });
+      return;
+    }
+
+    const btn = e.target.closest("[data-failover]");
+    if (!btn) return;
+
+    const node = btn.getAttribute("data-failover");
+    NFM.confirmThen(
+      "Make " + node + " the active node?\n\n" +
+      "Config changes will be made there from now on.  Nothing about the " +
+      "traffic your nginx is serving changes, only where you edit from.",
+      async function () {
+        await NFM.api("/cluster/failover", { method: "POST", body: { node: node } });
+        NFM.toast(node + " is now the active node", "ok");
+        setTimeout(function () { window.location.reload(); }, 1000);
+      }
+    );
+  });
+});
+</script>
+{% endblock %}

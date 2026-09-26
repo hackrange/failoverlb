@@ -1,0 +1,1453 @@
+{% extends "base.html" %}
+{% block title %}{{ pool.name }} &middot; Failover LB{% endblock %}
+
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <h1>{{ pool.name }}</h1>
+    <div class="sub">
+      {{ pool.description or 'backend pool' }} &middot;
+      {{ pool.healthy_count }} of {{ pool.total_count }} healthy
+    </div>
+  </div>
+  <div class="page-actions">
+    <a href="{{ base }}/pools" class="btn">Back to pools</a>
+    {% if can('apply_config') %}
+      <button class="btn primary" id="apply-config">Apply config</button>
+    {% endif %}
+  </div>
+</div>
+
+<div class="notice info" id="unsaved" hidden>
+  <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 3a.9.9 0 1 1 0 1.8A.9.9 0 0 1 8 4zm1.2 8H6.8v-.9h.7V7.9h-.7V7h2.1v4.1h.3V12z"/></svg>
+  <div>Unsaved changes.  <strong>Save</strong> stores them, <strong>Apply config</strong> sends them to nginx.</div>
+</div>
+
+<div class="tabs" role="tablist">
+  <button class="tab active" data-tab="members" role="tab">Backends</button>
+  <button class="tab" data-tab="balancing" role="tab">Load balancing</button>
+  <button class="tab" data-tab="health" role="tab">Health checks</button>
+  <button class="tab" data-tab="parity" role="tab">Sticky and slow start</button>
+  <button class="tab" data-tab="trust" role="tab">Backend trust</button>
+</div>
+
+{# ============================ members ============================ #}
+<div class="tab-panel" data-panel="members">
+  <div class="card">
+    <div class="card-head">
+      <h2>Backends</h2>
+      {% if can('edit_pools') %}
+        <button class="btn sm" id="add-member">Add backend</button>
+        <button class="btn sm" id="import-members">Add a list</button>
+      {% endif %}
+    </div>
+    <div class="card-body tight">
+      {% if pool.members %}
+        <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Address</th><th>State</th>
+              <th class="nowrap">Weight
+                <button class="help-btn" data-help-static="h-weight"
+                        data-help-title="Weight" aria-label="Help">?</button>
+              </th>
+              <th>Fails</th>
+              <th>Timeout</th>
+              <th class="nowrap">Max conns
+                <button class="help-btn" data-help-static="h-maxconns"
+                        data-help-title="Max connections" aria-label="Help">?</button>
+              </th>
+              <th>Backup</th>
+              <th class="right">Response</th><th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for m in pool.members %}
+              {% set st = m.effective_state.value %}
+              <tr data-member="{{ m.id }}">
+                <td class="mono">
+                  {% if st == 'up' %}<span class="dot ok"></span>
+                  {% elif st == 'down' %}<span class="dot bad"></span>
+                  {% elif st in ('draining','maintenance') %}<span class="dot warn"></span>
+                  {% else %}<span class="dot neutral"></span>{% endif %}
+                  {{ m.label }}
+                </td>
+                <td>
+                  {% if st == 'up' %}<span class="badge ok">up</span>
+                  {% elif st == 'down' %}<span class="badge bad">down</span>
+                  {% elif st == 'draining' %}<span class="badge warn">draining</span>
+                  {% elif st == 'maintenance' %}<span class="badge warn">maintenance</span>
+                  {% else %}<span class="badge neutral">not checked</span>{% endif %}
+                </td>
+                <td><input type="number" class="m-field" data-field="weight"
+                           value="{{ m.weight }}" min="1" max="1000" style="width:70px"></td>
+                <td><input type="number" class="m-field" data-field="max_fails"
+                           value="{{ m.max_fails }}" min="0" max="100" style="width:60px"></td>
+                <td><input type="text" class="m-field" data-field="fail_timeout"
+                           value="{{ m.fail_timeout }}" style="width:70px"></td>
+                <td><input type="number" class="m-field" data-field="max_conns"
+                           value="{{ m.max_conns or 0 }}" min="0" style="width:80px"></td>
+                <td style="text-align:center">
+                  <input type="checkbox" class="m-field" data-field="backup"
+                         {{ 'checked' if m.backup }}>
+                </td>
+                <td class="num faint small">
+                  {{ '%.0f ms'|format(m.avg_response_ms) if m.avg_response_ms else '-'|safe }}
+                </td>
+                <td class="right nowrap">
+                  {% if can('drain_member') %}
+                    {% if m.admin_state == 'up' %}
+                      <button class="btn sm" data-state="{{ m.id }}" data-to="draining">Drain</button>
+                    {% else %}
+                      <button class="btn sm" data-state="{{ m.id }}" data-to="up">Enable</button>
+                    {% endif %}
+                  {% endif %}
+                  {% if can('edit_pools') %}
+                    <button class="btn sm danger" data-remove="{{ m.id }}">Remove</button>
+                  {% endif %}
+                </td>
+              </tr>
+              {% if m.last_error %}
+                <tr><td colspan="9" class="small" style="color:var(--bad); padding-top:0">
+                  {{ m.last_error[:160] }}
+                </td></tr>
+              {% endif %}
+            {% endfor %}
+          </tbody>
+        </table>
+        </div>
+      {% else %}
+        <div class="empty">
+          <strong>No backends yet</strong>
+          <p>A pool needs at least one server to send traffic to.</p>
+        </div>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="notice info">
+    <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 3a.9.9 0 1 1 0 1.8A.9.9 0 0 1 8 4zm1.2 8H6.8v-.9h.7V7.9h-.7V7h2.1v4.1h.3V12z"/></svg>
+    <div>
+      <strong>Fails</strong> and <strong>timeout</strong> are nginx's own passive
+      checks: after that many failed real requests it stops using a backend for
+      that long.  The active checks on the next tab are ours and catch a bad
+      backend before a user does.
+    </div>
+  </div>
+</div>
+
+{# ============================ balancing ============================ #}
+<div class="tab-panel" data-panel="balancing" hidden>
+  <div class="card">
+    <div class="card-head">
+      <h2>How traffic is spread</h2>
+      <button class="help-btn" data-help-static="h-lb"
+              data-help-title="Load balancing methods" data-help-wide aria-label="Help">?</button>
+    </div>
+    <div class="card-body">
+      <div class="form-grid">
+        <div class="field">
+          <label for="p-name">Name</label>
+          <input type="text" id="p-name" value="{{ pool.name }}">
+          <div class="hint">This is the upstream name in the config.  You can change
+            it whenever you like: the sites using this pool point at it by id, not by
+            name, so they follow the rename on their own.  It takes effect on the next
+            apply, and shows up in the pending changes as the old upstream file going
+            and a new one arriving.</div>
+        </div>
+        <div class="field">
+          <label for="p-desc">Description</label>
+          <input type="text" id="p-desc" value="{{ pool.description or '' }}">
+        </div>
+        <div class="field">
+          <label for="p-lb">Method</label>
+          <select id="p-lb">
+            <option value="round_robin" {{ 'selected' if pool.lb_method=='round_robin' }}>Round robin, take turns</option>
+            <option value="least_conn"  {{ 'selected' if pool.lb_method=='least_conn' }}>Least connections</option>
+            <option value="ip_hash"     {{ 'selected' if pool.lb_method=='ip_hash' }}>Pin by client address</option>
+            <option value="hash"        {{ 'selected' if pool.lb_method=='hash' }}>Pin by a value you choose</option>
+            <option value="random"      {{ 'selected' if pool.lb_method=='random' }}>Random</option>
+            <option value="random_two"  {{ 'selected' if pool.lb_method=='random_two' }}>Random two, least connections</option>
+          </select>
+        </div>
+        <div class="field" id="wrap-hash" style="display:none">
+          <label for="p-hashkey">What to pin on</label>
+          <input type="text" id="p-hashkey" value="{{ pool.hash_key or '' }}"
+                 placeholder="$cookie_JSESSIONID">
+          <div class="hint">An nginx variable.  A cookie your app already sets is usually the best choice.</div>
+        </div>
+      </div>
+
+      <div class="checkline" id="wrap-consistent" style="display:none">
+        <input type="checkbox" id="p-consistent" {{ 'checked' if pool.hash_consistent }}>
+        <label for="p-consistent">
+          Consistent hashing
+          <button class="help-btn" data-help-static="h-consistent"
+                  data-help-title="Consistent hashing" aria-label="Help">?</button>
+        </label>
+      </div>
+
+      <h3 style="font-size:0.92rem; margin:18px 0 8px">Connections to the backends</h3>
+
+      <div class="field" style="margin-bottom:14px">
+        <label for="p-backendkind">
+          What is on the other end
+          <button class="help-btn" data-help-static="h-backendkind"
+                  data-help-title="What is on the other end" data-help-wide aria-label="Help">?</button>
+        </label>
+        <select id="p-backendkind">
+          <option value="servers" {{ 'selected' if (pool.backend_kind or 'servers')=='servers' }}>
+            Servers running my app, answering to my site's name
+          </option>
+          <option value="site" {{ 'selected' if pool.backend_kind=='site' }}>
+            Another website, on its own name
+          </option>
+        </select>
+        <div class="hint">
+          Servers running your app get the name your visitor typed, so they serve
+          the right site.  Another website only answers to its own name, so it
+          gets that instead, and its redirects get pointed back at you rather
+          than walking your visitor onto its address.
+        </div>
+      </div>
+
+      <div class="field" style="margin-bottom:14px">
+        <label for="p-backendpath">Where the application sits on these backends</label>
+        <input type="text" id="p-backendpath" class="mono"
+               value="{{ settings.get('backend_path','') }}"
+               placeholder="/shop/">
+        <div class="hint">
+          Leave this empty unless the application is not at the root.  If your
+          visitors ask for <span class="mono">/basket</span> and the backend
+          wants <span class="mono">/shop/basket</span>, put
+          <span class="mono">/shop/</span> here.  A path only: no scheme, no
+          host and no port, because this is where the application sits and not
+          how to reach it.  The redirects the backend sends get the path taken
+          back off on the way out, so it never reaches your visitor's address
+          bar.  A site or a path can override this if the same backend is
+          reached two ways.
+        </div>
+      </div>
+
+      <div class="checkline">
+        <input type="checkbox" id="p-backendtls" {{ 'checked' if pool.uses_backend_tls }}>
+        <label for="p-backendtls">
+          Talk to these backends over https
+          <button class="help-btn" data-help-static="h-backendtls"
+                  data-help-title="Backend TLS" aria-label="Help">?</button>
+        </label>
+      </div>
+      <p class="small muted" style="margin:-4px 0 14px 23px">
+        Leave this off for a backend on a network you trust.  Turn it on when the
+        backend only speaks TLS, which a member on port 443 usually does.
+      </p>
+
+      <div id="wrap-backendtlsname" style="display:none">
+        <div class="checkline" style="margin-left:23px">
+          <input type="checkbox" id="p-backendtlsverify" {{ 'checked' if pool.backend_tls_verify }}>
+          <label for="p-backendtlsverify">Check the backend's certificate is real</label>
+        </div>
+        <p class="small muted" style="margin:-4px 0 14px 46px">
+          Encrypting the hop and knowing who is on the far end are two different
+          things.  Turn this off only for a backend with a self signed
+          certificate that you cannot point at a CA file below.
+        </p>
+
+        <div class="form-grid" style="margin-bottom:14px">
+          <div class="field">
+            <label for="p-backendtlsname">Certificate name to expect</label>
+            <input type="text" id="p-backendtlsname" value="{{ pool.backend_tls_name or '' }}"
+                   placeholder="{{ pool.backend_name or 'taken from the members' }}">
+            <div class="hint">
+              Sent as SNI and checked against the certificate.  Blank works out to
+              the first member that is a hostname.
+            </div>
+          </div>
+          <div class="field">
+            <label for="p-backendtlsca">CA file</label>
+            <input type="text" id="p-backendtlsca" value="{{ pool.backend_tls_ca or '' }}"
+                   placeholder="the system list">
+            <div class="hint">
+              Blank uses the system list, which is what a certificate from a
+              public CA needs.  Point it at your own CA file for an internal one.
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="form-grid">
+        <div class="field">
+          <label for="p-keepalive">
+            Keep-alive connections
+            <button class="help-btn" data-help-static="h-keepalive"
+                    data-help-title="Backend keep-alive" aria-label="Help">?</button>
+          </label>
+          <input type="number" id="p-keepalive" value="{{ pool.keepalive }}" min="0" max="10000">
+        </div>
+        <div class="field">
+          <label for="p-karequests">Requests per connection</label>
+          <input type="number" id="p-karequests" value="{{ pool.keepalive_requests }}" min="1">
+        </div>
+        <div class="field">
+          <label for="p-zone">Shared memory zone</label>
+          <input type="text" id="p-zone" value="{{ pool.zone_size }}">
+          <div class="hint">Lets every worker agree on what is up.  64k is plenty.</div>
+        </div>
+        <div class="field">
+          <label for="p-minhealthy">
+            Never go below this many healthy
+            <button class="help-btn" data-help-static="h-minhealthy"
+                    data-help-title="The safety net" aria-label="Help">?</button>
+          </label>
+          <input type="number" id="p-minhealthy" value="{{ pool.min_healthy_members }}" min="0">
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+{# ============================ health ============================ #}
+<div class="tab-panel" data-panel="health" hidden>
+  <div class="card">
+    <div class="card-head">
+      <h2>Active health checks</h2>
+      <button class="help-btn" data-help-static="h-hc"
+              data-help-title="How health checks work" data-help-wide aria-label="Help">?</button>
+    </div>
+    <div class="card-body">
+      <div class="checkline">
+        <input type="checkbox" id="h-enabled" {{ 'checked' if pool.health_check_enabled }}>
+        <label for="h-enabled">Check these backends on a schedule</label>
+      </div>
+      <p class="small muted" style="margin:-4px 0 14px 23px">
+        With this off, nginx only notices a bad backend after a real request to
+        it has already failed, which means a user got the error first.
+      </p>
+
+      <div class="form-grid">
+        <div class="field">
+          <label for="h-type">Check type</label>
+          <select id="h-type">
+            <option value="http"  {{ 'selected' if pool.effective_health_check_type=='http' }}>HTTP</option>
+            <option value="https" {{ 'selected' if pool.effective_health_check_type=='https' }}>HTTPS</option>
+            <option value="tcp"   {{ 'selected' if pool.effective_health_check_type=='tcp' }}>TCP connect only</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="h-path">Path</label>
+          <input type="text" id="h-path" value="{{ pool.health_check_path or '/' }}">
+          <div class="hint">
+            Something cheap that says whether the app really works.  A path that
+            touches the database catches more than a static file does.
+          </div>
+        </div>
+        <div class="field">
+          <label for="h-method">Method</label>
+          <select id="h-method">
+            {% for m in ['GET','HEAD','POST','OPTIONS'] %}
+              <option value="{{ m }}" {{ 'selected' if pool.health_check_method==m }}>{{ m }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="field">
+          <label for="h-host">
+            Host header
+            <button class="help-btn" data-help-static="h-hosthdr"
+                    data-help-title="The Host header on a check" aria-label="Help">?</button>
+          </label>
+          <input type="text" id="h-host" value="{{ pool.health_check_host_header or '' }}"
+                 placeholder="www.example.com">
+        </div>
+        <div class="field">
+          <label for="h-status">Healthy status codes</label>
+          <input type="text" id="h-status" value="{{ pool.health_check_expect_status }}"
+                 placeholder="200-399">
+          <div class="hint">Codes or ranges, comma separated.</div>
+        </div>
+        <div class="field">
+          <label for="h-body">Body must contain</label>
+          <input type="text" id="h-body" value="{{ pool.health_check_expect_body or '' }}"
+                 placeholder="ok">
+          <div class="hint">Optional.  Catches a backend returning 200 with an error page.</div>
+        </div>
+        <div class="field">
+          <label for="h-interval">Every (seconds)</label>
+          <input type="number" id="h-interval" value="{{ pool.health_check_interval }}" min="2" max="300">
+        </div>
+        <div class="field">
+          <label for="h-timeout">Give up after (seconds)</label>
+          <input type="number" id="h-timeout" value="{{ pool.health_check_timeout }}" min="1" max="120">
+        </div>
+        <div class="field">
+          <label for="h-fall">Down after this many fails</label>
+          <input type="number" id="h-fall" value="{{ pool.health_check_fall }}" min="1" max="20">
+        </div>
+        <div class="field">
+          <label for="h-rise">Back up after this many passes</label>
+          <input type="number" id="h-rise" value="{{ pool.health_check_rise }}" min="1" max="20">
+        </div>
+        <div class="field">
+          <label for="h-port">Check port</label>
+          <input type="number" id="h-port" value="{{ pool.health_check_port or '' }}"
+                 placeholder="same as the backend">
+        </div>
+      </div>
+
+      <div class="checkline">
+        <input type="checkbox" id="h-verify" {{ 'checked' if pool.health_check_verify_tls }}>
+        <label for="h-verify">Verify the backend's TLS certificate</label>
+      </div>
+    </div>
+  </div>
+</div>
+
+{# ============================ parity ============================ #}
+<div class="tab-panel" data-panel="parity" hidden>
+  <div class="notice info">
+    <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 3a.9.9 0 1 1 0 1.8A.9.9 0 0 1 8 4zm1.2 8H6.8v-.9h.7V7.9h-.7V7h2.1v4.1h.3V12z"/></svg>
+    <div>
+      These three are paid nginx features rebuilt out here in the manager.  See
+      <a href="{{ base }}/parity">Open Source Parity</a> for what each one does
+      and where it differs from the real thing.
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <h2>Sticky sessions</h2>
+      <button class="help-btn" data-help-static="h-sticky"
+              data-help-title="Sticky sessions" data-help-wide aria-label="Help">?</button>
+    </div>
+    <div class="card-body">
+      <div class="checkline">
+        <input type="checkbox" id="s-enabled" {{ 'checked' if settings.get('sticky_enabled') }}>
+        <label for="s-enabled">Keep a client on the same backend</label>
+      </div>
+      <div class="form-grid">
+        <div class="field">
+          <label for="s-cookie">Cookie name</label>
+          <input type="text" id="s-cookie" value="{{ settings.get('sticky_cookie_name','nfm_route') }}">
+        </div>
+        <div class="field">
+          <label for="s-maxage">Cookie lifetime (seconds)</label>
+          <input type="number" id="s-maxage" value="{{ settings.get('sticky_cookie_max_age',3600) }}" min="60">
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <h2>Slow start</h2>
+      <button class="help-btn" data-help-static="h-slow"
+              data-help-title="Slow start" data-help-wide aria-label="Help">?</button>
+    </div>
+    <div class="card-body">
+      <div class="checkline">
+        <input type="checkbox" id="ss-enabled" {{ 'checked' if settings.get('slow_start_enabled') }}>
+        <label for="ss-enabled">Ease traffic back onto a recovered backend</label>
+      </div>
+      <div class="field" style="max-width:240px">
+        <label for="ss-seconds">Over how long (seconds)</label>
+        <input type="number" id="ss-seconds" value="{{ settings.get('slow_start_seconds',60) }}" min="10" max="600">
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <h2>Adaptive weighting</h2>
+      <button class="help-btn" data-help-static="h-adaptive"
+              data-help-title="Adaptive weighting" data-help-wide aria-label="Help">?</button>
+    </div>
+    <div class="card-body">
+      <div class="checkline">
+        <input type="checkbox" id="aw-enabled" {{ 'checked' if settings.get('adaptive_weight_enabled') }}>
+        <label for="aw-enabled">Lean traffic toward the faster backends</label>
+      </div>
+      <div class="form-grid">
+        <div class="field">
+          <label for="aw-base">Base weight</label>
+          <input type="number" id="aw-base" value="{{ settings.get('adaptive_base_weight',10) }}" min="1">
+        </div>
+        <div class="field">
+          <label for="aw-min">Never below</label>
+          <input type="number" id="aw-min" value="{{ settings.get('adaptive_min_weight',1) }}" min="1">
+        </div>
+        <div class="field">
+          <label for="aw-max">Never above</label>
+          <input type="number" id="aw-max" value="{{ settings.get('adaptive_max_weight',20) }}" min="1">
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <h2>What the backends are doing</h2>
+    </div>
+    <div class="card-body">
+      <div class="field">
+        <label for="mm-url">Where these backends publish their own numbers</label>
+        <input type="text" id="mm-url" class="mono"
+               value="{{ settings.get('member_metrics_url','') }}"
+               placeholder="http://{host}:9100/metrics">
+        <div class="hint">
+          One template for the whole pool, since the members are nearly always
+          the same kind of box.  <code>{{ '{host}' }}</code> becomes the
+          backend's address and <code>{{ '{port}' }}</code> the port it serves
+          on.  Leave it blank and the Utilization page says these are not
+          measured, which is the honest answer for a backend that publishes
+          nothing.
+        </div>
+        <div class="hint mt">
+          It wants the Prometheus text format.  A
+          <code>node_exporter</code> on 9100 is the usual answer and reports the
+          whole machine.  An application endpoint works too, and reports that
+          one process, which is a different number and is labelled as such: a
+          JVM at 100% of one core is not a busy server.
+        </div>
+        <div class="hint mt">
+          There is deliberately no option to log in to the backends and read
+          <code>/proc</code>.  That would mean this manager holding credentials
+          for every server in the estate, which is a much bigger thing to
+          protect than a chart is worth.
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="card" style="position:sticky; bottom:0; z-index:50">
+  <div class="card-body flex-between">
+    <div class="small faint">Saving stores it.  Apply sends it to nginx.</div>
+    <div class="flex">
+      {% if can('edit_pools') %}
+        <button class="btn danger" id="delete-pool">Delete pool</button>
+        <button class="btn primary" id="save-pool">Save</button>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+{# ============================ trust ============================ #}
+<div class="tab-panel" data-panel="trust" hidden>
+  <div class="card">
+    <div class="card-head">
+      <h2>Pool token</h2>
+      <button class="help-btn" data-help-static="h-trust"
+              data-help-title="Proving a request came from the fleet" data-help-wide
+              aria-label="Help">?</button>
+    </div>
+    <div class="card-body">
+      <p class="small muted" style="margin-top:0">
+        A shared secret nginx puts on every request it sends to this pool.  Your
+        backend checks it and turns away anything that did not come through the
+        fleet, so somebody who finds the app server's address cannot just talk
+        to it directly.
+      </p>
+
+      <div id="trust-none" hidden>
+        <div class="notice info">
+          <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 3a.9.9 0 1 1 0 1.8A.9.9 0 0 1 8 4zm1.2 8H6.8v-.9h.7V7.9h-.7V7h2.1v4.1h.3V12z"/></svg>
+          <div>
+            This pool has no token.  Right now any box that can reach these
+            backends on their port is treated exactly like nginx is.
+          </div>
+        </div>
+        {% if can('edit_pools') %}
+          <button class="btn primary" id="trust-create">Create a token</button>
+        {% endif %}
+      </div>
+
+      <div id="trust-on" hidden>
+        <div class="kv">
+          <div class="kv-row">
+            <span class="kv-key">Header</span>
+            <span class="kv-val"><code id="trust-header">X-Fleet-Token</code></span>
+          </div>
+          <div class="kv-row">
+            <span class="kv-key">Sending</span>
+            <span class="kv-val" id="trust-state"></span>
+          </div>
+          <div class="kv-row">
+            <span class="kv-key">Last changed</span>
+            <span class="kv-val" id="trust-rotated"></span>
+          </div>
+        </div>
+
+        <div class="notice warn" id="trust-pending" hidden style="margin-top:14px">
+          <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.5 15 14H1L8 1.5zm0 4a.7.7 0 0 0-.7.8l.25 3.2a.45.45 0 0 0 .9 0l.25-3.2A.7.7 0 0 0 8 5.5zm0 5.4a.8.8 0 1 0 0 1.6.8.8 0 0 0 0-1.6z"/></svg>
+          <div>
+            <strong>A rotation is half done.</strong>
+            nginx is still sending the old token, so nothing is broken.  Once
+            every backend accepts the new one, press Activate.
+          </div>
+        </div>
+
+        <div class="btn-row" style="margin-top:16px">
+          {% if can('edit_pools') %}
+            <button class="btn" id="trust-show">Show the token</button>
+            <button class="btn" id="trust-rotate">Rotate</button>
+            <button class="btn primary" id="trust-activate" hidden>Activate the new one</button>
+            <button class="btn" id="trust-cancel" hidden>Cancel the rotation</button>
+            <button class="btn danger" id="trust-remove">Turn off</button>
+          {% endif %}
+        </div>
+
+        <h3 style="font-size:0.92rem; margin:22px 0 8px">Checking it on your backend</h3>
+        <p class="small muted" style="margin-top:0">
+          Pick the one that matches your backend.  Press Show the token to get
+          the value to paste in.
+        </p>
+        <div class="tabs sub" role="tablist" id="snippet-tabs">
+          <button class="tab active" data-snippet="nginx" role="tab">nginx</button>
+          <button class="tab" data-snippet="apache" role="tab">Apache</button>
+          <button class="tab" data-snippet="node" role="tab">Express</button>
+          <button class="tab" data-snippet="python" role="tab">Django</button>
+          <button class="tab" data-snippet="java" role="tab">Spring</button>
+        </div>
+        <pre id="snippet-body" class="snippet"></pre>
+      </div>
+    </div>
+  </div>
+</div>
+
+{# ---- help ---- #}
+<div hidden id="h-trust">
+  <div class="help-section">
+    <p>Your backends sit on a port somewhere.  Anything that can reach that port
+       can talk to them, and as far as the app can tell it looks the same as
+       nginx.  A pool token is how the backend tells the difference.</p>
+  </div>
+  <div class="help-section">
+    <h4>How it works</h4>
+    <p>nginx adds a header holding a shared secret to every request it proxies to
+       this pool.  The backend checks it and returns 403 if it is missing or
+       wrong.  A scanner that finds your app server on port 8080 gets nothing.</p>
+    <p>The header is set, not added, so a client sending that header itself has
+       it thrown away and replaced.  You cannot forge your way in from outside.
+       We also hide the header on the way back, in case the backend echoes it.</p>
+  </div>
+  <div class="help-section">
+    <h4>What it is not</h4>
+    <p>It is a bearer secret.  Anybody holding it can pretend to be the fleet, so
+       it belongs behind a firewall rather than instead of one.  If the hop to
+       your backend crosses a network you do not trust, run that hop over TLS as
+       well, or the token is readable to anybody watching.</p>
+  </div>
+  <div class="help-section">
+    <h4>Rotating without an outage</h4>
+    <p>You cannot change both ends at the same instant, and nginx can only send
+       one value, so it takes two steps.</p>
+    <p><strong>1. Rotate.</strong>  A new token is generated but nginx keeps
+       sending the old one.  Nothing changes on the wire.  Teach your backends
+       to accept either.</p>
+    <p><strong>2. Activate.</strong>  nginx starts sending the new one, which
+       your backends already take.  Apply the config, watch traffic, then delete
+       the old one from your backends.</p>
+    <p>Doing it in one step means every request in the gap gets a 403.</p>
+  </div>
+  <div class="help-section">
+    <h4>Health checks</h4>
+    <p>The manager sends the token on its health checks too.  Without that, the
+       moment your backend started enforcing it every check would come back 403,
+       the pool would be marked down, and it would be pulled out of service
+       while being perfectly healthy.</p>
+  </div>
+  <div class="help-section">
+    <h4>Turning it off</h4>
+    <p>Turn it off here and apply the config <em>first</em>, then stop checking
+       for it on your backends.  The other order locks the fleet out.</p>
+  </div>
+</div>
+
+<div hidden id="h-lb">
+  <div class="help-section"><p>How nginx decides which backend gets each request.</p></div>
+  <div class="help-section">
+    <h4>What is available</h4>
+    <ul>
+      <li><strong>Round robin</strong> takes turns.  Right when your backends are much the same.</li>
+      <li><strong>Least connections</strong> picks whoever has fewest open.  Better when requests
+          take very different amounts of time, because a slow backend piles up connections and
+          naturally stops being chosen.</li>
+      <li><strong>Pin by client address</strong> sends a given IP to the same backend.  Careful:
+          a whole office behind one NAT address all lands on one server.</li>
+      <li><strong>Pin by a value</strong> is the same idea on anything you name, usually a cookie.
+          Nearly always better than pinning on the address.</li>
+      <li><strong>Random two, least connections</strong> picks two at random and takes the quieter.
+          Good on big pools, where plain least connections makes everything pile onto whichever
+          server just freed up.</li>
+    </ul>
+  </div>
+  <div class="help-section">
+    <h4>Not here</h4>
+    <p>least_time is paid only.  Least connections tracks it closely in practice, and the
+       adaptive weighting on the last tab gets you the rest of the way.</p>
+  </div>
+</div>
+
+<div hidden id="h-consistent">
+  <div class="help-section">
+    <p>Changes what happens to everybody else when one backend goes away.</p>
+  </div>
+  <div class="help-section">
+    <h4>Why it matters</h4>
+    <p>Without it, removing one backend from a pool of four reshuffles roughly everybody, because
+       the hash is taken modulo the number of servers and that number just changed.  Every user
+       lands somewhere new and, if you are relying on stickiness, every session breaks at once.
+
+With it, only the users who were on the server that went away move.  Everybody else stays
+exactly where they were.</p>
+  </div>
+</div>
+
+<div hidden id="h-weight">
+  <div class="help-section">
+    <p>How big a share of the traffic this backend takes.  <strong>Higher gets more.</strong></p>
+  </div>
+  <div class="help-section">
+    <h4>Which way round it goes</h4>
+    <p>This is a share, not a priority, and it is the opposite of the ranking most
+       people expect.  A 10 is not first in line ahead of a 1.  A 10 takes ten times
+       as many requests as a 1, and both are used at the same time.</p>
+    <p>Three backends on 1, 1 and 1 is an even split, a third each.  Change one to 2
+       and it takes half of everything while the other two take a quarter each, because
+       the shares are 2 out of 4, 1 out of 4 and 1 out of 4.</p>
+  </div>
+  <div class="help-section">
+    <h4>What it is for</h4>
+    <p>Backends that are not the same size.  A box with twice the cores can carry twice
+       the traffic, so give it 2 while the others stay on 1 rather than sending an even
+       split to machines that cannot take it evenly.</p>
+    <p>Leave everything on 1 when the machines match, which is the normal case.</p>
+  </div>
+  <div class="help-section">
+    <h4>Not a way to take a backend out</h4>
+    <p>There is no weight that means "do not use this".  Even a 1 next to a 100 still
+       takes one request in a hundred.  To stop traffic reaching a backend, drain it or
+       turn it off, both on this page.</p>
+  </div>
+</div>
+
+<div hidden id="h-maxconns">
+  <div class="help-section">
+    <p>The most requests nginx will have in flight to this backend at once.  Past that
+       it queues rather than piling more on.</p>
+  </div>
+  <div class="help-section">
+    <h4>Zero means no limit</h4>
+    <p>Which is the default, and is right until you know the number.  A limit invented
+       out of nowhere turns a backend that was coping into one that queues.</p>
+  </div>
+  <div class="help-section">
+    <h4>When to set it</h4>
+    <p>When the backend falls over under load rather than slowing down.  A database with
+       a connection pool of 50 behind an app that opens one per request has a real limit,
+       and it is better for nginx to hold requests than for the backend to start
+       refusing them.</p>
+    <p>Set it to what the backend can actually take, not to what you hope it can.  The
+       number belongs to the backend, not to this page.</p>
+  </div>
+  <div class="help-section">
+    <h4>What a visitor sees</h4>
+    <p>Nothing, while the queue drains fast enough.  If it does not, they wait, and then
+       they time out, so this trades a fast error for a slow success.  Watch the response
+       column after changing it.</p>
+  </div>
+</div>
+
+<div hidden id="h-backendkind">
+  <div class="help-section">
+    <p>One question that settles three fiddly things, because getting any of them wrong
+       looks like the proxy working.</p>
+  </div>
+  <div class="help-section">
+    <h4>Servers running my app</h4>
+    <p>The normal case.  Several boxes behind one name, all serving the site your visitor
+       asked for.  They get the visitor's name in the Host header, so they serve the right
+       site and build links that point back at you.  Their redirects already point at your
+       site, so nothing needs rewriting.</p>
+  </div>
+  <div class="help-section">
+    <h4>Another website</h4>
+    <p>You are putting your name in front of something that already lives on its own name.
+       It only answers to that name, so that is what goes in the Host header, and it is what
+       we check its certificate against.</p>
+    <p>Its redirects point at itself.  Left alone, the first redirect walks your visitor off
+       your site and onto the backend's address, and because that address works, it reads as
+       fine until somebody looks at the address bar.  So those get pointed back at you.</p>
+  </div>
+  <div class="help-section">
+    <h4>What goes wrong if you pick the wrong one</h4>
+    <p>Nothing that says "wrong Host header".  You get the backend's default site, or a 404,
+       or a login page that redirects somewhere strange.  All three look like a problem with
+       the backend, which is where the next hour goes.</p>
+  </div>
+</div>
+
+<div hidden id="h-backendtls">
+  <div class="help-section">
+    <p>Whether nginx speaks http or https on the hop from here to your backends.</p>
+  </div>
+  <div class="help-section">
+    <h4>When you need it</h4>
+    <p>When the backend only listens for TLS, which a member on port 443 almost always does, and
+       when the hop crosses anything you would not want somebody reading.  Inside a rack you
+       control, plain http is fine and cheaper.</p>
+  </div>
+  <div class="help-section">
+    <h4>How it goes wrong without this</h4>
+    <p>Sending plain http at a TLS port does not fail in a way that tells you anything.  The
+       backend answers 400 Bad Request and nothing in the message mentions the scheme, so it
+       looks like the backend is broken rather than like it is being spoken to in the wrong
+       language.</p>
+  </div>
+  <div class="help-section">
+    <h4>The name we send</h4>
+    <p>TLS needs a name, not an address, so nginx has to be told which one to ask for.  Its own
+       default is the upstream block's name, and no backend has a certificate for
+       <code>your_pool_name</code>, so we always send something real: what you type in the box,
+       or the first member that is a hostname.</p>
+    <p>If every member is a bare IP there is no name to send, so we turn the whole thing off
+       rather than put a made up one on the wire.  Certificates for bare addresses are rare and
+       guessing at one would be wrong more often than right.</p>
+  </div>
+  <div class="help-section">
+    <h4>Checking the certificate</h4>
+    <p>Turning this on encrypts the hop.  It does not on its own check who is on the other end of
+       it.  For that, turn on <code>proxy_ssl_verify</code> in the site's settings, which is where
+       the trusted certificate and the depth live too.</p>
+  </div>
+  <div class="help-section">
+    <h4>Health checks are separate</h4>
+    <p>This setting covers real traffic.  The active health check has its own type on the Health
+       tab, so a pool talking https should usually be checked with HTTPS as well.  Leaving that on
+       HTTP means the check talks the wrong language to the same port that traffic works fine
+       on.</p>
+  </div>
+</div>
+
+<div hidden id="h-keepalive">
+  <div class="help-section">
+    <p>How many idle connections to each backend nginx holds open for reuse.</p>
+  </div>
+  <div class="help-section">
+    <h4>Worth having</h4>
+    <p>Without it every single request opens a fresh TCP connection, and over TLS pays for a
+       full handshake too.  On a busy site that is a lot of work for nothing.</p>
+  </div>
+  <div class="help-section">
+    <h4>The catch</h4>
+    <p>It only does anything if the proxy is speaking HTTP/1.1 and the Connection header is
+       cleared.  The manager writes both of those for you, so setting a number here is enough.</p>
+  </div>
+</div>
+
+<div hidden id="h-minhealthy">
+  <div class="help-section">
+    <p>A floor on how far the health checker is allowed to take the pool down.</p>
+  </div>
+  <div class="help-section">
+    <h4>What it protects against</h4>
+    <p>If applying the failures would leave fewer than this many backends up, the manager leaves
+       them all in instead and logs loudly.
+
+A pool serving errors is bad.  A pool serving nothing at all, because a switch rebooted and
+every check failed in the same second, is worse.  That failure mode is avoidable so we avoid it.</p>
+  </div>
+</div>
+
+<div hidden id="h-hc">
+  <div class="help-section"><p>Two different things watch your backends.</p></div>
+  <div class="help-section">
+    <h4>nginx does passive checks</h4>
+    <p>It notices when a real request fails and stops using that backend for a while.  That is
+       the Fails and Timeout columns on the backends tab.  It is all the free nginx has on its
+       own, and the catch is that a user had to get an error first.</p>
+  </div>
+  <div class="help-section">
+    <h4>The manager does active checks</h4>
+    <p>It reaches out on a schedule whether or not anybody is browsing.  When a backend fails
+       enough times in a row the upstream is rewritten with that server marked down and nginx
+       reloads.  So it is out of rotation before a user finds it.
+
+Every node checks separately and the results are kept apart, so a backend one load balancer can
+reach and another cannot shows up as exactly that, which is usually the whole answer.</p>
+  </div>
+  <div class="help-section">
+    <h4>Picking the numbers</h4>
+    <p>Down after 3 at a 5 second interval means a dead backend is out within about 15 seconds.
+       Lower is twitchier and reacts to a single dropped packet.  Higher is calmer and slower.</p>
+  </div>
+</div>
+
+<div hidden id="h-hosthdr">
+  <div class="help-section">
+    <p>What to put in the Host header when checking.</p>
+  </div>
+  <div class="help-section">
+    <h4>When you need it</h4>
+    <p>If the backend serves several sites by name, a request with no Host, or the wrong one,
+       gets the default site or a 404.  The check then reports the backend as down when it is
+       perfectly healthy, and you spend an hour looking at the wrong thing.</p>
+  </div>
+</div>
+
+<div hidden id="h-sticky">
+  <div class="help-section">
+    <p>Keeps a user on the same backend, which apps holding session state in local memory need.</p>
+  </div>
+  <div class="help-section">
+    <h4>How this is done here</h4>
+    <p>The paid nginx has a sticky cookie feature.  The free one does not, but it can hash on
+       anything, so the manager writes the cookie half: a map that reads a route cookie, a header
+       that sets it when the client has none, and an upstream hashing on it with consistent
+       turned on.
+
+Same result, put together from parts that are in the free build.</p>
+  </div>
+  <div class="help-section">
+    <h4>Worth saying</h4>
+    <p>The real fix is not needing it.  Put sessions in redis or the database and any backend can
+       serve any user, so you can take a server out whenever you like.  Sticky sessions are a
+       workaround, and they come with a cost: when a backend dies, everybody on it is logged out.</p>
+  </div>
+</div>
+
+<div hidden id="h-slow">
+  <div class="help-section">
+    <p>Eases traffic back onto a backend that just came back, rather than all at once.</p>
+  </div>
+  <div class="help-section">
+    <h4>Why</h4>
+    <p>A JVM app that just restarted has a cold JIT, an empty connection pool and no warm cache.
+       Give it a third of your traffic the instant it passes one health check and it can fall
+       straight back over.  Then it recovers, gets slammed again, and flaps.  That is worse than
+       it having stayed down.</p>
+  </div>
+  <div class="help-section">
+    <h4>How it works here</h4>
+    <p>The manager ramps the weight in a handful of steps across your window.  Not as smooth as
+       doing it inside nginx, since each step is a config reload, but the point is simply to not
+       hit a cold server with everything at once, and steps do that fine.</p>
+  </div>
+</div>
+
+<div hidden id="h-adaptive">
+  <div class="help-section">
+    <p>Leans traffic toward whichever backends are answering fastest.</p>
+  </div>
+  <div class="help-section">
+    <h4>Where the numbers come from</h4>
+    <p>The health checker is already timing every check, so it knows which backends are slow.
+       This turns that into weights.</p>
+  </div>
+  <div class="help-section">
+    <h4>The rails on it</h4>
+    <p>Weights move one step at a time between a floor and a ceiling, so one slow check cannot
+       pull a server out of rotation.  And if everything is slow, nothing changes, because that
+       means the problem is downstream and shuffling weights would just pile load onto whichever
+       box is least broken.</p>
+  </div>
+  <div class="help-section">
+    <h4>Honest comparison</h4>
+    <p>The paid least_time reacts per request.  This reacts on a cycle, so minutes not
+       milliseconds.  Good for backends that are consistently different speeds, like mixed
+       hardware.  For traffic that spikes in seconds, plain least connections reacts faster and
+       you should just use that.</p>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script nonce="{{ csp_nonce }}">
+// nginx will not accept a backup server in a pool that balances by hashing,
+// and its own complaint arrives only after an apply has been refused.  The
+// boxes are turned off here instead, with the reason next to them, so the
+// restriction is visible before anybody spends a change on finding out.
+document.addEventListener("DOMContentLoaded", function () {
+  var NO_BACKUP = {
+    ip_hash: "pinning by client address",
+    hash:    "hashing a value you choose",
+    random:  "picking at random"
+  };
+  var sel = document.getElementById("p-lb");
+  if (!sel) { return; }
+
+  function sync() {
+    var why = NO_BACKUP[sel.value];
+    var boxes = document.querySelectorAll(
+      '[data-field="backup"], #nm-backup');
+    boxes.forEach(function (box) {
+      box.disabled = !!why;
+      if (why) { box.checked = false; }
+      box.title = why
+        ? "Not available while this pool balances by " + why +
+          ".  nginx has no way to express a backup with that method."
+        : "";
+      var note = box.parentElement.querySelector(".backup-note");
+      if (why && !note) {
+        note = document.createElement("div");
+        note.className = "hint backup-note";
+        note.textContent = "Backup needs round robin or least connections.";
+        box.parentElement.appendChild(note);
+      } else if (!why && note) {
+        note.remove();
+      }
+    });
+  }
+  sel.addEventListener("change", sync);
+  sync();
+  // The member rows are drawn from the api after load, so run it again once
+  // they exist rather than only against the markup that shipped with the page.
+  new MutationObserver(sync).observe(document.body, {childList: true, subtree: true});
+});
+</script>
+
+<script nonce="{{ csp_nonce }}">
+document.addEventListener("DOMContentLoaded", function () {
+  const POOL_ID = {{ pool.id }};
+  const BASE = document.querySelector('meta[name=nfm-base]').content;
+  let dirty = false;
+
+  function markDirty() {
+    dirty = true;
+    document.getElementById("unsaved").hidden = false;
+  }
+
+  // Scoped to [data-tab] so the snippet sub tabs further down do not get
+  // swept up by this and hide the panel they live in.
+  document.querySelectorAll(".tab[data-tab]").forEach(function (t) {
+    t.addEventListener("click", function () {
+      document.querySelectorAll(".tab[data-tab]").forEach(x => x.classList.remove("active"));
+      t.classList.add("active");
+      const want = t.getAttribute("data-tab");
+      document.querySelectorAll(".tab-panel").forEach(function (p) {
+        p.hidden = p.getAttribute("data-panel") !== want;
+      });
+    });
+  });
+
+  function syncHash() {
+    const m = document.getElementById("p-lb").value;
+    document.getElementById("wrap-hash").style.display = m === "hash" ? "" : "none";
+    document.getElementById("wrap-consistent").style.display = m === "hash" ? "" : "none";
+  }
+  document.getElementById("p-lb").addEventListener("change", function () { syncHash(); markDirty(); });
+  syncHash();
+
+  // The name only means anything when we are actually speaking TLS, so keep it
+  // out of the way until then.
+  function syncBackendTls() {
+    document.getElementById("wrap-backendtlsname").style.display =
+      document.getElementById("p-backendtls").checked ? "" : "none";
+  }
+  document.getElementById("p-backendtls").addEventListener("change", function () {
+    syncBackendTls();
+    markDirty();
+  });
+  document.getElementById("p-backendkind").addEventListener("change", markDirty);
+  syncBackendTls();
+
+  document.querySelectorAll("input, select, textarea").forEach(function (el) {
+    el.addEventListener("change", markDirty);
+  });
+
+  const num = id => parseInt(document.getElementById(id).value, 10);
+  const str = id => document.getElementById(id).value.trim();
+  const chk = id => document.getElementById(id).checked;
+
+  document.getElementById("save-pool").addEventListener("click", async function () {
+    const btn = this;
+    btn.disabled = true;
+    try {
+      // A settings put replaces the whole blob, and the fields below are the
+      // ones this page has controls for, which is not the same as every
+      // setting a pool can hold.  adaptive_floor_ms is the live example: the
+      // api takes it, the adaptive weighting reads it, and no control here
+      // offers it, so saving a pool from this page used to delete it without
+      // saying anything.  Read the pool back and merge, the way the site page
+      // does.  If the read fails, save nothing rather than a guess.
+      let existing;
+      try {
+        existing = await NFM.api("/pools/" + POOL_ID);
+      } catch (err) {
+        NFM.toast("Could not read the pool back, so nothing was saved: " +
+                  err.message, "bad");
+        btn.disabled = false;
+        return;
+      }
+      await NFM.api("/pools/" + POOL_ID, { method: "PUT", body: {
+        name: str("p-name"),
+        description: str("p-desc"),
+        lb_method: document.getElementById("p-lb").value,
+        hash_key: str("p-hashkey") || null,
+        hash_consistent: chk("p-consistent"),
+        keepalive: num("p-keepalive"),
+        keepalive_requests: num("p-karequests"),
+        zone_size: str("p-zone"),
+        min_healthy_members: num("p-minhealthy"),
+        backend_tls: chk("p-backendtls"),
+        backend_tls_name: str("p-backendtlsname") || null,
+        backend_kind: document.getElementById("p-backendkind").value,
+        backend_tls_verify: chk("p-backendtlsverify"),
+        backend_tls_ca: str("p-backendtlsca") || null,
+
+        health_check_enabled: chk("h-enabled"),
+        health_check_type: document.getElementById("h-type").value,
+        health_check_path: str("h-path"),
+        health_check_method: document.getElementById("h-method").value,
+        health_check_host_header: str("h-host") || null,
+        health_check_expect_status: str("h-status"),
+        health_check_expect_body: str("h-body") || null,
+        health_check_interval: num("h-interval"),
+        health_check_timeout: num("h-timeout"),
+        health_check_fall: num("h-fall"),
+        health_check_rise: num("h-rise"),
+        health_check_port: document.getElementById("h-port").value
+                           ? num("h-port") : null,
+        health_check_verify_tls: chk("h-verify"),
+
+        settings: Object.assign({}, existing.settings || {}, {
+          sticky_enabled: chk("s-enabled"),
+          sticky_cookie_name: str("s-cookie"),
+          sticky_cookie_max_age: num("s-maxage"),
+          sticky_consistent: true,
+          slow_start_enabled: chk("ss-enabled"),
+          slow_start_seconds: num("ss-seconds"),
+          member_metrics_url: str("mm-url"),
+          backend_path: str("p-backendpath"),
+          adaptive_weight_enabled: chk("aw-enabled"),
+          adaptive_base_weight: num("aw-base"),
+          adaptive_min_weight: num("aw-min"),
+          adaptive_max_weight: num("aw-max")
+        })
+      }});
+
+      // Members are separate rows, so they save separately.
+      const rows = document.querySelectorAll("tr[data-member]");
+      for (const row of rows) {
+        const id = row.getAttribute("data-member");
+        const body = {};
+        row.querySelectorAll(".m-field").forEach(function (f) {
+          const field = f.getAttribute("data-field");
+          body[field] = f.type === "checkbox" ? f.checked
+                      : (f.type === "number" ? parseInt(f.value, 10) : f.value.trim());
+        });
+        await NFM.api("/members/" + id, { method: "PUT", body: body });
+      }
+
+      dirty = false;
+      document.getElementById("unsaved").hidden = true;
+      NFM.toast("Saved.  Apply config to send it to nginx.", "ok");
+      setTimeout(() => window.location.reload(), 900);
+    } catch (err) {
+      NFM.toast(err.message, "bad");
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  document.getElementById("delete-pool").addEventListener("click", function () {
+    NFM.confirmThen("Delete this pool?\n\nAny site pointing at it has to be changed first.",
+      async function () {
+        await NFM.api("/pools/" + POOL_ID, { method: "DELETE" });
+        window.location.href = BASE + "/pools";
+      });
+  });
+
+  document.body.addEventListener("click", async function (e) {
+    const st = e.target.closest("[data-state]");
+    if (st) {
+      const to = st.getAttribute("data-to");
+      NFM.confirmThen(
+        to === "draining"
+          ? "Drain this backend?\n\nIt stops taking new connections but finishes what it has."
+          : "Put this backend back into rotation?",
+        async function () {
+          await NFM.api("/members/" + st.getAttribute("data-state") + "/state",
+                        { method: "POST", body: { state: to } });
+          NFM.toast("Backend set to " + to, "ok");
+          setTimeout(() => window.location.reload(), 900);
+        });
+      return;
+    }
+
+    const rm = e.target.closest("[data-remove]");
+    if (rm) {
+      NFM.confirmThen("Remove this backend from the pool?", async function () {
+        await NFM.api("/members/" + rm.getAttribute("data-remove"), { method: "DELETE" });
+        window.location.reload();
+      });
+    }
+  });
+
+  document.getElementById("add-member").addEventListener("click", function () {
+    NFM.openModal("Add a backend", "", `
+      <div class="field">
+        <label for="nm-addr">Address</label>
+        <input type="text" id="nm-addr" placeholder="10.20.30.51" autofocus>
+      </div>
+      <div class="field">
+        <label for="nm-port">Port</label>
+        <input type="number" id="nm-port" value="8080" min="1" max="65535">
+      </div>
+      <div class="field">
+        <label for="nm-weight">Weight</label>
+        <input type="number" id="nm-weight" value="1" min="1" max="1000">
+      </div>
+      <div class="checkline">
+        <input type="checkbox" id="nm-backup">
+        <label for="nm-backup">Backup only, used when everything else is down</label>
+      </div>
+      <div class="mt"><button class="btn primary" id="nm-save">Add</button></div>
+    `);
+    document.getElementById("nm-save").addEventListener("click", async function () {
+      try {
+        await NFM.api("/pools/" + POOL_ID + "/members", { method: "POST", body: {
+          address: document.getElementById("nm-addr").value.trim(),
+          port: parseInt(document.getElementById("nm-port").value, 10),
+          weight: parseInt(document.getElementById("nm-weight").value, 10),
+          backup: document.getElementById("nm-backup").checked
+        }});
+        NFM.closeModal();
+        window.location.reload();
+      } catch (err) { NFM.toast(err.message, "bad"); }
+    });
+  });
+
+  document.getElementById("import-members").addEventListener("click", function () {
+    NFM.openModal("Add a list of backends", "", `
+      <div class="field">
+        <label for="im-text">One backend per line</label>
+        <textarea id="im-text" rows="10" spellcheck="false"
+                  style="width:100%; font-family:var(--mono, monospace); font-size:0.86rem"
+                  placeholder="10.20.30.51:8080&#10;10.20.30.52:8080&#10;app-03.internal.example 8080&#10;app-04.internal.example&#10;[2001:db8::1]:8080"></textarea>
+        <div class="hint">
+          Address and port, split by a colon, a space or a comma.  No port means 80.
+          IPv6 goes in brackets.  Blank lines and anything after a # are ignored,
+          so a list with comments in it can go straight in.
+        </div>
+      </div>
+      <div class="field">
+        <label for="im-file">Or pick a file</label>
+        <input type="file" id="im-file" accept=".txt,.csv,.list,text/plain">
+        <div class="hint">Read here in the browser and dropped into the box above, so you can see it before it goes anywhere.</div>
+      </div>
+      <div class="mt"><button class="btn primary" id="im-save">Add them</button></div>
+    `);
+
+    document.getElementById("im-file").addEventListener("change", function () {
+      const file = this.files && this.files[0];
+      if (!file) return;
+      if (file.size > 100000) { NFM.toast("that file is too big, split it up", "bad"); return; }
+      const reader = new FileReader();
+      reader.onload = function () {
+        const box = document.getElementById("im-text");
+        box.value = (box.value.trim() ? box.value.replace(/\s*$/, "\n") : "") + reader.result;
+      };
+      reader.onerror = function () { NFM.toast("could not read that file", "bad"); };
+      reader.readAsText(file);
+    });
+
+    document.getElementById("im-save").addEventListener("click", async function () {
+      const btn = this;
+      btn.disabled = true;
+      try {
+        const res = await NFM.api("/pools/" + POOL_ID + "/members/bulk", {
+          method: "POST",
+          body: { text: document.getElementById("im-text").value }
+        });
+        NFM.closeModal();
+        // Say what was skipped.  Silently dropping the duplicates would leave
+        // somebody counting rows to work out what happened.
+        if (res.skipped && res.skipped.length) {
+          NFM.toast("added " + res.added.length + ", already there: " + res.skipped.join(", "), "warn");
+          setTimeout(function () { window.location.reload(); }, 2500);
+        } else {
+          window.location.reload();
+        }
+      } catch (err) {
+        btn.disabled = false;
+        NFM.toast(err.message, "bad");
+      }
+    });
+  });
+
+  // ======================= backend trust =======================
+
+  const TRUST = {{ trust_json|safe }};
+  let shownToken = null;   // only set once somebody presses Show
+
+  function renderTrust() {
+    const on = TRUST.active;
+    document.getElementById("trust-none").hidden = on;
+    document.getElementById("trust-on").hidden = !on;
+    if (!on) return;
+
+    document.getElementById("trust-header").textContent = TRUST.header || "X-Fleet-Token";
+    document.getElementById("trust-state").innerHTML = TRUST.enabled
+      ? '<span class="badge ok">yes</span>'
+      : '<span class="badge warn">turned off, secret kept</span>';
+    document.getElementById("trust-rotated").textContent =
+      TRUST.rotated_at ? new Date(TRUST.rotated_at).toLocaleString() : "never";
+
+    document.getElementById("trust-pending").hidden = !TRUST.rotation_pending;
+    document.getElementById("trust-activate").hidden = !TRUST.rotation_pending;
+    document.getElementById("trust-cancel").hidden = !TRUST.rotation_pending;
+    document.getElementById("trust-rotate").hidden = TRUST.rotation_pending;
+    renderSnippet();
+  }
+
+  // The value only appears here after Show, so a shoulder surfer looking at an
+  // open pool page does not get the secret for free.
+  function tokenForSnippet() {
+    return shownToken || "PRESS-SHOW-THE-TOKEN-TO-SEE-THIS";
+  }
+
+  const SNIPPETS = {
+    nginx: t => `# In the server block on your backend\nif ($http_${(TRUST.header||"X-Fleet-Token").toLowerCase().replace(/-/g,"_")} != "${t}") {\n    return 403;\n}`,
+    apache: t => `# Needs mod_headers and mod_rewrite\nRewriteEngine On\nRewriteCond %{HTTP:${TRUST.header}} !^${t}$\nRewriteRule .* - [F,L]`,
+    node: t => `// Express, mount this before your routes\napp.use((req, res, next) => {\n  if (req.get(${JSON.stringify(TRUST.header)}) !== ${JSON.stringify(t)}) {\n    return res.sendStatus(403);\n  }\n  next();\n});`,
+    python: t => `# Django middleware\nFLEET_TOKEN = ${JSON.stringify(t)}\n\nclass FleetOnly:\n    def __init__(self, get_response):\n        self.get_response = get_response\n\n    def __call__(self, request):\n        sent = request.headers.get(${JSON.stringify(TRUST.header)})\n        if sent != FLEET_TOKEN:\n            return HttpResponseForbidden()\n        return self.get_response(request)`,
+    java: t => `// Spring, a OncePerRequestFilter\n@Component\npublic class FleetOnlyFilter extends OncePerRequestFilter {\n    private static final String TOKEN = ${JSON.stringify(t)};\n\n    @Override\n    protected void doFilterInternal(HttpServletRequest req,\n            HttpServletResponse res, FilterChain chain)\n            throws ServletException, IOException {\n        String sent = req.getHeader(${JSON.stringify(TRUST.header)});\n        if (!TOKEN.equals(sent)) {\n            res.setStatus(403);\n            return;\n        }\n        chain.doFilter(req, res);\n    }\n}`,
+  };
+  let snippetPick = "nginx";
+
+  function renderSnippet() {
+    const body = document.getElementById("snippet-body");
+    if (body) body.textContent = SNIPPETS[snippetPick](tokenForSnippet());
+  }
+
+  document.querySelectorAll("[data-snippet]").forEach(function (t) {
+    t.addEventListener("click", function () {
+      document.querySelectorAll("[data-snippet]").forEach(x => x.classList.remove("active"));
+      t.classList.add("active");
+      snippetPick = t.getAttribute("data-snippet");
+      renderSnippet();
+    });
+  });
+
+  function tokenModal(title, value, note) {
+    NFM.openModal(title, "copy it now", `
+      <div class="help-section"><p>${NFM.escapeHtml(note)}</p></div>
+      <pre>${NFM.escapeHtml(TRUST.header)}: ${NFM.escapeHtml(value)}</pre>
+      <div class="notice warn" style="margin-top:14px">
+        ${NFM.icon("warn")}
+        <div>Treat this like a password.  Anybody holding it can pretend to be
+             the fleet.  It is stored encrypted, and you can see it again from
+             this page, but do not paste it anywhere it will be logged.</div>
+      </div>
+    `, true);
+  }
+
+  const tCreate = document.getElementById("trust-create");
+  if (tCreate) tCreate.addEventListener("click", async function () {
+    try {
+      const r = await NFM.api("/pools/" + POOL_ID + "/token", { method: "POST", body: {} });
+      TRUST.active = true; TRUST.enabled = true; TRUST.header = r.header;
+      TRUST.rotated_at = new Date().toISOString();
+      shownToken = r.value;
+      renderTrust();
+      tokenModal("Token created", r.value, r.next_step);
+    } catch (err) { NFM.toast(err.message, "bad"); }
+  });
+
+  const tShow = document.getElementById("trust-show");
+  if (tShow) tShow.addEventListener("click", async function () {
+    try {
+      const r = await NFM.api("/pools/" + POOL_ID + "/token");
+      shownToken = r.current;
+      renderSnippet();
+      let note = "This is what nginx is sending right now.";
+      let extra = "";
+      if (r.staged) {
+        extra = `<div class="help-section"><h4>Staged, not sent yet</h4>
+                 <p>Add this one to your backends as well, then press Activate.</p></div>
+                 <pre>${NFM.escapeHtml(r.staged)}</pre>`;
+      }
+      if (r.previous) {
+        extra += `<div class="help-section"><h4>The old one</h4>
+                  <p>Safe to delete from your backends once traffic looks normal.</p></div>
+                  <pre>${NFM.escapeHtml(r.previous)}</pre>`;
+      }
+      NFM.openModal("Pool token", TRUST.header, `
+        <div class="help-section"><p>${note}</p></div>
+        <pre>${NFM.escapeHtml(r.current)}</pre>
+        ${extra}
+      `, true);
+    } catch (err) { NFM.toast(err.message, "bad"); }
+  });
+
+  const tRotate = document.getElementById("trust-rotate");
+  if (tRotate) tRotate.addEventListener("click", async function () {
+    NFM.confirmThen(
+      "Rotate this pool's token?\n\nA new one gets generated but nginx keeps sending " +
+      "the old one, so nothing breaks yet.  You add the new one to your backends, " +
+      "then press Activate.",
+      async function () {
+        try {
+          const r = await NFM.api("/pools/" + POOL_ID + "/token", { method: "POST", body: {} });
+          TRUST.rotation_pending = true;
+          renderTrust();
+          tokenModal("New token staged", r.value, r.next_step);
+        } catch (err) { NFM.toast(err.message, "bad"); }
+      });
+  });
+
+  const tAct = document.getElementById("trust-activate");
+  if (tAct) tAct.addEventListener("click", async function () {
+    NFM.confirmThen(
+      "Switch to the new token?\n\nOnly do this once every backend accepts it.  " +
+      "Any backend still checking only for the old one will start returning 403.",
+      async function () {
+        try {
+          const r = await NFM.api("/pools/" + POOL_ID + "/token/activate", { method: "POST", body: {} });
+          TRUST.rotation_pending = false;
+          TRUST.rotated_at = new Date().toISOString();
+          shownToken = null;
+          renderTrust();
+          NFM.toast(r.next_step, "ok");
+        } catch (err) { NFM.toast(err.message, "bad"); }
+      });
+  });
+
+  const tCancel = document.getElementById("trust-cancel");
+  if (tCancel) tCancel.addEventListener("click", async function () {
+    try {
+      const r = await NFM.api("/pools/" + POOL_ID + "/token/cancel", { method: "POST", body: {} });
+      TRUST.rotation_pending = false;
+      renderTrust();
+      NFM.toast(r.message, "ok");
+    } catch (err) { NFM.toast(err.message, "bad"); }
+  });
+
+  const tRemove = document.getElementById("trust-remove");
+  if (tRemove) tRemove.addEventListener("click", function () {
+    NFM.confirmThen(
+      "Turn off the token for this pool?\n\nApply the config first, then stop " +
+      "checking for it on your backends.  The other way round and they will " +
+      "reject the fleet.",
+      async function () {
+        try {
+          const r = await NFM.api("/pools/" + POOL_ID + "/token", { method: "DELETE" });
+          TRUST.active = false; TRUST.enabled = false;
+          TRUST.rotation_pending = false; shownToken = null;
+          renderTrust();
+          NFM.toast(r.message, "ok");
+        } catch (err) { NFM.toast(err.message, "bad"); }
+      });
+  });
+
+  renderTrust();
+
+  window.addEventListener("beforeunload", function (e) {
+    if (dirty) { e.preventDefault(); e.returnValue = ""; }
+  });
+});
+</script>
+{% endblock %}

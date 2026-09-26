@@ -1,0 +1,316 @@
+{% extends "base.html" %}
+{% block title %}Changes &middot; Failover LB{% endblock %}
+
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <h1>Changes</h1>
+    <div class="sub">
+      What is waiting to go out to nginx, and what already has.
+    </div>
+  </div>
+</div>
+
+{# ============================ waiting ============================ #}
+<div class="card">
+  <div class="card-head">
+    <h2>Waiting to be applied</h2>
+    {% if can('edit_sites') %}
+      <button class="btn" id="changes-repair">Check and repair</button>
+    {% endif %}
+    {% if can('apply_config') %}
+      <button class="btn primary" id="changes-apply">Apply config</button>
+    {% endif %}
+  </div>
+  <div class="card-body">
+    <div id="pending-empty" class="empty" hidden>
+      <strong>Nothing waiting</strong>
+      <p>What is saved and what nginx is running are the same.</p>
+    </div>
+
+    <div id="pending-body" hidden>
+      <p class="small muted" id="pending-summary" style="margin-top:0"></p>
+
+      {# Everything goes together, and saying so here saves somebody hunting for
+         a per change apply button that cannot exist.  The config is rendered
+         from what is saved right now, as a whole, not replayed as a list of
+         edits, so there is no way to send one and hold another back. #}
+      <div class="notice info">
+        <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 3a.9.9 0 1 1 0 1.8A.9.9 0 0 1 8 4zm1.2 8H6.8v-.9h.7V7.9h-.7V7h2.1v4.1h.3V12z"/></svg>
+        <div>
+          These go out together.  The config is built from everything that is
+          saved, all at once, rather than replayed as a list of edits, so there
+          is no way to send one of these and hold the rest back.  To leave one
+          out, change it back first.
+        </div>
+      </div>
+
+      <div id="pending-diffs"></div>
+    </div>
+  </div>
+</div>
+
+{# ============================ history ============================ #}
+<div class="card">
+  <div class="card-head">
+    <h2>Already applied</h2>
+  </div>
+  <div class="card-body tight">
+    {% if versions %}
+      <div class="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>Version</th>
+            <th>When</th>
+            <th>Who</th>
+            <th>What</th>
+            <th>From</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for v in versions %}
+            <tr>
+              <td class="mono">{{ v.version }}</td>
+              <td class="small faint">{{ v.created_at.strftime('%Y-%m-%d %H:%M:%S') }}</td>
+              <td class="small">
+                {# The health checker applies on its own when a backend changes
+                   state.  Worth showing plainly, so a version nobody remembers
+                   making does not look like somebody else touching your fleet. #}
+                {% if v.author in ('health check', 'system') %}
+                  <span class="badge neutral">{{ v.author }}</span>
+                {% else %}
+                  {{ v.author or 'unknown' }}
+                {% endif %}
+              </td>
+              <td class="small">{{ v.summary or '' }}</td>
+              <td class="small faint">{{ v.origin_node or '' }}</td>
+              <td class="right nowrap">
+                <button class="btn sm" data-version-diff="{{ v.version }}">What changed</button>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      </div>
+    {% else %}
+      <div class="empty">
+        <strong>Nothing has been applied yet</strong>
+        <p>The first apply will show up here.</p>
+      </div>
+    {% endif %}
+  </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script nonce="{{ csp_nonce }}">
+document.addEventListener("DOMContentLoaded", function () {
+
+  async function loadPending() {
+    try {
+      const r = await NFM.api("/config/pending");
+      const empty = document.getElementById("pending-empty");
+      const body = document.getElementById("pending-body");
+
+      if (!r.changed_files) {
+        empty.hidden = false;
+        body.hidden = true;
+        return;
+      }
+
+      empty.hidden = true;
+      body.hidden = false;
+      document.getElementById("pending-summary").textContent =
+        r.changed_files + " file" + (r.changed_files === 1 ? "" : "s") +
+        (r.never_applied
+          ? " would be written, and nothing has ever been applied."
+          : " would change against version " + r.applied_version + ".");
+
+      let html = "";
+      r.changes.forEach(function (c) {
+        html += '<h3 style="font-size:0.92rem; margin:16px 0 6px">' +
+                NFM.escapeHtml(c.path) +
+                ' <span class="faint small">' + c.kind + "</span></h3>" +
+                '<pre style="max-height:320px; overflow:auto">' +
+                NFM.escapeHtml(c.diff.join("\n")) +
+                (c.truncated ? "\n... trimmed" : "") + "</pre>";
+      });
+      document.getElementById("pending-diffs").innerHTML = html;
+    } catch (err) {
+      NFM.toast(err.message, "bad");
+    }
+  }
+
+  loadPending();
+
+  // ---- check and repair ----
+  //
+  // Two steps, and the first one changes nothing.  Asking first is the whole
+  // point: what comes out here is config somebody wrote and meant, and a few of
+  // them are real controls.  `ssl_verify_client` disappearing without a word
+  // would be a config error quietly becoming weaker TLS.
+  //
+  // Deliberately not folded into Apply.  Apply goes to every node and its audit
+  // entry says "applied", so a directive vanishing inside it would be a change
+  // nobody sanctioned and nobody could find afterwards.
+  const repairBtn = document.getElementById("changes-repair");
+
+  function repairList(changes) {
+    let html = "<div class='help-section'><p>nginx will not load this config. "
+             + "These lines are why.  Commenting them out is what would make it "
+             + "load.  Nothing is deleted, so you can put any of them back "
+             + "somewhere they are allowed.</p></div>";
+    changes.forEach(function (c) {
+      html += '<div class="field">'
+           +  '<label>' + NFM.escapeHtml(c.site) + " <span class='faint small'>"
+           +  NFM.escapeHtml(c.where) + "</span></label>"
+           +  '<pre style="margin:0">' + NFM.escapeHtml(c.line) + "</pre>"
+           +  '<div class="hint">nginx said: ' + NFM.escapeHtml(c.reason) + "</div>"
+           +  "</div>";
+    });
+    return html;
+  }
+
+  async function runRepair(confirm) {
+    return await NFM.api("/repair", { method: "POST", body: { confirm: !!confirm } });
+  }
+
+  if (repairBtn) {
+    repairBtn.addEventListener("click", async function () {
+      repairBtn.disabled = true;
+      const original = repairBtn.textContent;
+      repairBtn.textContent = "Checking...";
+      try {
+        const r = await runRepair(false);
+
+        if (r.already_loads) {
+          NFM.toast("nginx already takes this config, so there is nothing to repair", "ok");
+          return;
+        }
+        if (!r.changes.length) {
+          NFM.openModal(
+            "This one needs a person",
+            "",
+            "<div class='help-section'><p>nginx will not load this config, and "
+            + "taking a line out is not what would fix it.</p></div>"
+            + '<pre style="white-space:pre-wrap">'
+            + NFM.escapeHtml(r.could_not_repair || r.nginx_said) + "</pre>");
+          return;
+        }
+
+        let body = repairList(r.changes);
+        if (!r.would_load_after) {
+          // Worth saying plainly rather than letting somebody agree to a repair
+          // and then find the apply still fails.
+          body += "<div class='notice bad'><div>Taking these out is not enough "
+               +  "on its own, so the config still will not load afterwards.  "
+               +  "What is left:</div><pre style='white-space:pre-wrap'>"
+               +  NFM.escapeHtml(r.nginx_said) + "</pre></div>";
+        }
+        body += '<div class="mt"><button class="btn primary" id="repair-go">'
+             +  "Comment these out</button> "
+             +  '<button class="btn" id="repair-cancel">Leave it alone</button></div>';
+
+        NFM.openModal("Repair this config", "", body, true);
+
+        document.getElementById("repair-cancel").addEventListener("click", NFM.closeModal);
+        document.getElementById("repair-go").addEventListener("click", async function () {
+          const go = document.getElementById("repair-go");
+          go.disabled = true;
+          go.textContent = "Working...";
+          try {
+            const done = await runRepair(true);
+            NFM.closeModal();
+            NFM.toast(done.changes.length + " line"
+                      + (done.changes.length === 1 ? "" : "s")
+                      + " commented out.  Look at the diff, then apply.", "ok");
+            setTimeout(function () { window.location.reload(); }, 1200);
+          } catch (err) {
+            NFM.toast(err.message, "bad");
+            go.disabled = false;
+            go.textContent = "Comment these out";
+          }
+        });
+      } catch (err) {
+        NFM.toast(err.message, "bad");
+      } finally {
+        repairBtn.disabled = false;
+        repairBtn.textContent = original;
+      }
+    });
+  }
+
+  const applyBtn = document.getElementById("changes-apply");
+  if (applyBtn) {
+    applyBtn.addEventListener("click", async function () {
+      applyBtn.disabled = true;
+      const original = applyBtn.textContent;
+      applyBtn.textContent = "Applying...";
+      try {
+        const result = await NFM.api("/apply", {
+          method: "POST",
+          body: { summary: "applied from the changes page" }
+        });
+        if (result.unchanged) {
+          NFM.toast("Nothing had changed, so nothing was reloaded");
+          loadPending();
+        } else {
+          NFM.toast("Applied version " + result.version + " to " +
+                    result.applied_to.join(", "), "ok");
+          setTimeout(function () { window.location.reload(); }, 1200);
+        }
+      } catch (err) {
+        NFM.toast(err.message, "bad");
+        // The moment somebody actually needs the repair is the moment an apply
+        // has just failed, and that is exactly when they are least likely to go
+        // looking for a button.  Say it here instead.
+        const said = String(err.message || "");
+        if (repairBtn && /not allowed here|is duplicate|unknown directive|duplicate location|shared memory zone/.test(said)) {
+          setTimeout(function () {
+            NFM.toast("Check and repair can work out what to take out", "warn");
+          }, 1600);
+        }
+      } finally {
+        applyBtn.disabled = false;
+        applyBtn.textContent = original;
+      }
+    });
+  }
+
+  document.body.addEventListener("click", async function (e) {
+    const btn = e.target.closest("[data-version-diff]");
+    if (!btn) return;
+    const version = btn.getAttribute("data-version-diff");
+    btn.disabled = true;
+    try {
+      const r = await NFM.api("/versions/" + version + "/diff");
+      let html = "";
+      if (!r.changed_files) {
+        html = '<div class="help-section"><p>This version wrote the same files as the '
+             + 'one before it.</p></div>';
+      } else {
+        html = '<div class="help-section"><p>' + r.changed_files + ' file' +
+               (r.changed_files === 1 ? "" : "s") + " changed" +
+               (r.compared_to ? " from version " + r.compared_to : "") + ".</p></div>";
+        r.changes.forEach(function (c) {
+          html += '<div class="help-section"><h4>' + NFM.escapeHtml(c.path) +
+                  ' <span class="faint">' + c.kind + "</span></h4><pre>" +
+                  NFM.escapeHtml(c.diff.join("\n")) +
+                  (c.truncated ? "\n... trimmed" : "") + "</pre></div>";
+        });
+      }
+      NFM.openModal("Version " + version, "", html, true);
+    } catch (err) {
+      NFM.toast(err.message, "bad");
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+});
+</script>
+{% endblock %}

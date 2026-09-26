@@ -1,0 +1,495 @@
+{% extends "base.html" %}
+{% block title %}Zones and Access &middot; Failover LB{% endblock %}
+
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <h1>Zones and access lists</h1>
+    <div class="sub">
+      The shared pieces your sites point at.  Make one here, then pick it on a
+      site.
+    </div>
+  </div>
+  <div class="page-actions">
+    {% if can('apply_config') %}
+      <button class="btn primary" id="apply-config">Apply config</button>
+    {% endif %}
+  </div>
+</div>
+
+<div class="notice info">
+  <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 3a.9.9 0 1 1 0 1.8A.9.9 0 0 1 8 4zm1.2 8H6.8v-.9h.7V7.9h-.7V7h2.1v4.1h.3V12z"/></svg>
+  <div>
+    nginx wants these declared once near the top of the config and then used
+    further down.  That is why they live here rather than on a site: several
+    sites can share one, which is usually what you want for something like a
+    login limit.
+  </div>
+</div>
+
+<div class="tabs" role="tablist">
+  <button class="tab active" data-tab="rate" role="tab">Rate limits</button>
+  <button class="tab" data-tab="conn" role="tab">Connection limits</button>
+  <button class="tab" data-tab="cache" role="tab">Caches</button>
+  <button class="tab" data-tab="acl" role="tab">Access lists</button>
+</div>
+
+{# ---------------------------------------------------------------- rate #}
+<div class="tab-panel" data-panel="rate">
+  <div class="card">
+    <div class="card-head">
+      <h2>Rate limit zones</h2>
+      <div class="flex">
+        <button class="help-btn" data-help-static="h-rate"
+                data-help-title="Rate limiting" data-help-wide aria-label="Help">?</button>
+        {% if can('edit_sites') %}<button class="btn sm" data-new="rate">New</button>{% endif %}
+      </div>
+    </div>
+    <div class="card-body tight"><div id="list-rate"></div></div>
+  </div>
+</div>
+
+{# ---------------------------------------------------------------- conn #}
+<div class="tab-panel" data-panel="conn" hidden>
+  <div class="card">
+    <div class="card-head">
+      <h2>Connection limit zones</h2>
+      <div class="flex">
+        <button class="help-btn" data-help-static="h-conn"
+                data-help-title="Connection limits" data-help-wide aria-label="Help">?</button>
+        {% if can('edit_sites') %}<button class="btn sm" data-new="conn">New</button>{% endif %}
+      </div>
+    </div>
+    <div class="card-body tight"><div id="list-conn"></div></div>
+  </div>
+</div>
+
+{# --------------------------------------------------------------- cache #}
+<div class="tab-panel" data-panel="cache" hidden>
+  <div class="card">
+    <div class="card-head">
+      <h2>Cache zones</h2>
+      <div class="flex">
+        <button class="help-btn" data-help-static="h-cache"
+                data-help-title="Caching" data-help-wide aria-label="Help">?</button>
+        {% if can('edit_sites') %}<button class="btn sm" data-new="cache">New</button>{% endif %}
+      </div>
+    </div>
+    <div class="card-body tight"><div id="list-cache"></div></div>
+  </div>
+</div>
+
+{# ----------------------------------------------------------------- acl #}
+<div class="tab-panel" data-panel="acl" hidden>
+  <div class="card">
+    <div class="card-head">
+      <h2>Access lists</h2>
+      <div class="flex">
+        <button class="help-btn" data-help-static="h-acl"
+                data-help-title="Access lists" data-help-wide aria-label="Help">?</button>
+        {% if can('edit_access_lists') %}<button class="btn sm" data-new="acl">New</button>{% endif %}
+      </div>
+    </div>
+    <div class="card-body tight"><div id="list-acl"></div></div>
+  </div>
+</div>
+
+{# ------------------------------------------------------------------ help #}
+
+<div hidden id="h-rate">
+  <div class="help-section">
+    <p>Slows down a client asking for too much, too fast.</p>
+  </div>
+  <div class="help-section">
+    <h4>The two pieces</h4>
+    <p>A zone says what to count and how fast is allowed.  It is shared, so
+       several sites can draw on the same bucket.  Then a site or a path points
+       at it, and that is where you set the burst.
+
+Almost always you count per client address, using $binary_remote_addr.  It is
+the packed form, which takes a quarter of the memory of $remote_addr, and that
+matters when the zone is holding a million of them.  10m of zone holds roughly
+160,000 addresses.</p>
+  </div>
+  <div class="help-section">
+    <h4>Reading the rate</h4>
+    <p>10r/s does not mean ten in any given second.  nginx uses a leaky bucket,
+       so it means one every 100ms.  Two requests back to back and the second is
+       already over, even though you are nowhere near ten that second.
+
+Real browsers fire a dozen requests at once for one page.  That is why the
+burst on the site matters: without it, a completely normal page load gets a
+503.</p>
+  </div>
+  <div class="help-section">
+    <h4>Sensible values</h4>
+    <ul>
+      <li><strong>5r/m</strong> on a login endpoint.  Nobody logs in twelve
+          times a minute honestly, and it makes password guessing pointless.</li>
+      <li><strong>10r/s to 30r/s</strong> for a general site or API.</li>
+      <li>Give each a separate zone so a burst of API traffic cannot use up the
+          allowance that was protecting your login page.</li>
+    </ul>
+  </div>
+</div>
+
+<div hidden id="h-conn">
+  <div class="help-section">
+    <p>Caps how many connections one client can hold open at the same time.</p>
+  </div>
+  <div class="help-section">
+    <h4>Different from rate limiting</h4>
+    <p>Rate limiting counts requests over time.  This counts connections right
+       now.
+
+It is the right tool for downloads.  Somebody pointing a download manager at
+your files opens thirty connections and eats your uplink without breaking any
+request rate limit at all, because they are not making many requests, just very
+long ones.</p>
+  </div>
+  <div class="help-section">
+    <h4>Do not set it too low</h4>
+    <p>Browsers routinely open six connections to one host.  Anything behind an
+       office NAT or a mobile carrier has many real people on one address.  Set
+       it to 2 and you will break an entire office and never hear a useful bug
+       report about it.
+
+10 to 20 is sensible for a normal site.  Save the low numbers for a downloads
+path.</p>
+  </div>
+</div>
+
+<div hidden id="h-cache">
+  <div class="help-section">
+    <p>Keeps copies of backend responses so the backend is not asked twice.</p>
+  </div>
+  <div class="help-section">
+    <h4>Usually the biggest speed win available</h4>
+    <p>A page that takes the backend 400ms comes back in about a millisecond
+       from cache, and the backend never sees the request.  It is free and it is
+       often the difference between needing more backends and not.</p>
+  </div>
+  <div class="help-section">
+    <h4>The two sizes are different things</h4>
+    <p><strong>Keys zone</strong> is memory for the index, not the content.  1m
+       holds roughly 8,000 entries.  <strong>Max size</strong> is disk for the
+       cached responses themselves.
+
+Run out of keys zone and nginx starts evicting even with disk to spare, so if
+you cache a lot of small files, that number is the one to raise.</p>
+  </div>
+  <div class="help-section">
+    <h4>Before you turn it on</h4>
+    <p>Caching a page meant for one logged in user and handing it to somebody
+       else is a real data leak, and it is easy to set up by accident.  On the
+       site, set both "skip the cache when" and "never store when" to your
+       session cookie.  Doing only the first means the logged in user gets a
+       fresh page and their copy still lands in the cache for the next visitor.
+
+The tool refuses to save that particular combination for exactly this reason.</p>
+  </div>
+</div>
+
+<div hidden id="h-acl">
+  <div class="help-section">
+    <p>A named set of allow and deny rules you can reuse across sites.</p>
+  </div>
+  <div class="help-section">
+    <h4>Include the cluster nodes</h4>
+    <p>Leave that on unless you have a reason.  It adds an allow line for every
+       node in the fleet, generated from the roster rather than typed in, so a
+       node you add next year lands in every list on its own.
+
+That is the bit people forget by hand, and it is how health checks end up
+blocked by a rule somebody wrote months earlier.</p>
+  </div>
+  <div class="help-section">
+    <h4>Trusting a forwarded address</h4>
+    <p>Only turn that on when something you control is genuinely in front, and
+       list those proxies.  Anybody can send an X-Forwarded-For header claiming
+       to be any address they like.  Trusting it without naming the proxies
+       means your allow list can be walked straight past by setting a header.</p>
+  </div>
+  <div class="help-section">
+    <h4>Basic auth</h4>
+    <p>Useful on top of the address rules for a staging site or an internal
+       tool.  Be clear eyed about it: the password format nginx reads is APR1,
+       which is a weak hash, and the password itself travels on every single
+       request.  Over https that is acceptable for keeping casual visitors out.
+       It is not a login system and it should not be guarding anything that
+       matters on its own.</p>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script nonce="{{ csp_nonce }}">
+document.addEventListener("DOMContentLoaded", function () {
+  const canEdit = {{ 'true' if can('edit_sites') else 'false' }};
+  let data = null;
+
+  document.querySelectorAll(".tab").forEach(function (t) {
+    t.addEventListener("click", function () {
+      document.querySelectorAll(".tab").forEach(x => x.classList.remove("active"));
+      t.classList.add("active");
+      const want = t.getAttribute("data-tab");
+      document.querySelectorAll(".tab-panel").forEach(function (p) {
+        p.hidden = p.getAttribute("data-panel") !== want;
+      });
+    });
+  });
+
+  function usedBy(list) {
+    if (!list || !list.length) return '<span class="faint">not used yet</span>';
+    return NFM.escapeHtml(list.join(", "));
+  }
+
+  function actions(kind, id, name) {
+    if (!canEdit) return "";
+    return '<button class="btn sm" data-edit="' + kind + '" data-id="' + id + '">Edit</button> ' +
+           '<button class="btn sm danger" data-del="' + kind + '" data-id="' + id +
+           '" data-name="' + NFM.escapeHtml(name) + '">Delete</button>';
+  }
+
+  function empty(what) {
+    return '<div class="empty"><strong>No ' + what + ' yet</strong></div>';
+  }
+
+  async function load() {
+    data = await NFM.api("/zones");
+
+    document.getElementById("list-rate").innerHTML = data.rate.length
+      ? '<div class="table-scroll"><table><thead><tr><th>Name</th><th>Counts by</th>' +
+        "<th>Rate</th><th>Memory</th><th>Used by</th><th></th></tr></thead><tbody>" +
+        data.rate.map(z =>
+          "<tr><td><strong>" + NFM.escapeHtml(z.name) + "</strong>" +
+          (z.description ? "<div class='small faint'>" + NFM.escapeHtml(z.description) + "</div>" : "") +
+          "</td><td class='mono small'>" + NFM.escapeHtml(z.key) + "</td>" +
+          "<td class='mono'>" + NFM.escapeHtml(z.rate) + "</td>" +
+          "<td class='mono small'>" + NFM.escapeHtml(z.zone_size) + "</td>" +
+          "<td class='small'>" + usedBy(z.used_by) + "</td>" +
+          "<td class='right nowrap'>" + actions("rate", z.id, z.name) + "</td></tr>").join("") +
+        "</tbody></table></div>"
+      : empty("rate limit zones");
+
+    document.getElementById("list-conn").innerHTML = data.conn.length
+      ? '<div class="table-scroll"><table><thead><tr><th>Name</th><th>Counts by</th>' +
+        "<th>Memory</th><th>Used by</th><th></th></tr></thead><tbody>" +
+        data.conn.map(z =>
+          "<tr><td><strong>" + NFM.escapeHtml(z.name) + "</strong></td>" +
+          "<td class='mono small'>" + NFM.escapeHtml(z.key) + "</td>" +
+          "<td class='mono small'>" + NFM.escapeHtml(z.zone_size) + "</td>" +
+          "<td class='small'>" + usedBy(z.used_by) + "</td>" +
+          "<td class='right nowrap'>" + actions("conn", z.id, z.name) + "</td></tr>").join("") +
+        "</tbody></table></div>"
+      : empty("connection limit zones");
+
+    document.getElementById("list-cache").innerHTML = data.cache.length
+      ? '<div class="table-scroll"><table><thead><tr><th>Name</th><th>Path</th>' +
+        "<th>Keys</th><th>Max disk</th><th>Idle for</th><th>Used by</th><th></th></tr></thead><tbody>" +
+        data.cache.map(z =>
+          "<tr><td><strong>" + NFM.escapeHtml(z.name) + "</strong></td>" +
+          "<td class='mono small'>" + NFM.escapeHtml(z.path) + "</td>" +
+          "<td class='mono small'>" + NFM.escapeHtml(z.keys_zone_size) + "</td>" +
+          "<td class='mono small'>" + NFM.escapeHtml(z.max_size) + "</td>" +
+          "<td class='mono small'>" + NFM.escapeHtml(z.inactive) + "</td>" +
+          "<td class='small'>" + usedBy(z.used_by) + "</td>" +
+          "<td class='right nowrap'>" + actions("cache", z.id, z.name) + "</td></tr>").join("") +
+        "</tbody></table></div>"
+      : empty("cache zones");
+
+    document.getElementById("list-acl").innerHTML = data.access_lists.length
+      ? '<div class="table-scroll"><table><thead><tr><th>Name</th><th>Allow</th>' +
+        "<th>Deny</th><th>Default</th><th>Extras</th><th>Used by</th><th></th></tr></thead><tbody>" +
+        data.access_lists.map(a =>
+          "<tr><td><strong>" + NFM.escapeHtml(a.name) + "</strong></td>" +
+          "<td class='mono small'>" + NFM.escapeHtml((a.allow || []).join(", ") || "-") + "</td>" +
+          "<td class='mono small'>" + NFM.escapeHtml((a.deny || []).join(", ") || "-") + "</td>" +
+          "<td>" + (a.default_action === "deny"
+            ? '<span class="badge bad">deny</span>' : '<span class="badge ok">allow</span>') + "</td>" +
+          "<td class='small'>" +
+            (a.include_management ? '<span class="badge neutral">cluster nodes</span> ' : "") +
+            (a.basic_auth_enabled ? '<span class="badge info">basic auth (' +
+              (a.basic_auth_users || []).length + ")</span> " : "") +
+            (a.use_real_ip ? '<span class="badge neutral">real ip</span>' : "") +
+          "</td>" +
+          "<td class='small'>" + usedBy(a.used_by) + "</td>" +
+          "<td class='right nowrap'>" + actions("acl", a.id, a.name) + "</td></tr>").join("") +
+        "</tbody></table></div>"
+      : empty("access lists");
+  }
+
+  // ---- forms ----
+  function zoneForm(kind, z) {
+    z = z || {};
+    if (kind === "rate") return `
+      <div class="field"><label for="z-name">Name</label>
+        <input type="text" id="z-name" value="${NFM.escapeHtml(z.name || "")}" placeholder="login_limit"></div>
+      <div class="field"><label for="z-desc">Description</label>
+        <input type="text" id="z-desc" value="${NFM.escapeHtml(z.description || "")}"
+               placeholder="protects the login form"></div>
+      <div class="field"><label for="z-key">Count by</label>
+        <input type="text" id="z-key" value="${NFM.escapeHtml(z.key || "$binary_remote_addr")}">
+        <div class="hint">$binary_remote_addr is per client address and is what you want nearly always.</div></div>
+      <div class="field"><label for="z-rate">Rate</label>
+        <input type="text" id="z-rate" value="${NFM.escapeHtml(z.rate || "10r/s")}" placeholder="5r/m">
+        <div class="hint">Requests per second (r/s) or per minute (r/m).</div></div>
+      <div class="field"><label for="z-size">Memory</label>
+        <input type="text" id="z-size" value="${NFM.escapeHtml(z.zone_size || "10m")}">
+        <div class="hint">10m tracks roughly 160,000 addresses.</div></div>`;
+
+    if (kind === "conn") return `
+      <div class="field"><label for="z-name">Name</label>
+        <input type="text" id="z-name" value="${NFM.escapeHtml(z.name || "")}" placeholder="perip"></div>
+      <div class="field"><label for="z-desc">Description</label>
+        <input type="text" id="z-desc" value="${NFM.escapeHtml(z.description || "")}"></div>
+      <div class="field"><label for="z-key">Count by</label>
+        <input type="text" id="z-key" value="${NFM.escapeHtml(z.key || "$binary_remote_addr")}"></div>
+      <div class="field"><label for="z-size">Memory</label>
+        <input type="text" id="z-size" value="${NFM.escapeHtml(z.zone_size || "10m")}"></div>`;
+
+    return `
+      <div class="field"><label for="z-name">Name</label>
+        <input type="text" id="z-name" value="${NFM.escapeHtml(z.name || "")}" placeholder="site_cache"></div>
+      <div class="field"><label for="z-desc">Description</label>
+        <input type="text" id="z-desc" value="${NFM.escapeHtml(z.description || "")}"></div>
+      <div class="field"><label for="z-path">Where on disk</label>
+        <input type="text" id="z-path" value="${NFM.escapeHtml(z.path || "/var/cache/nginx/proxy")}">
+        <div class="hint">Has to be under /var/cache, /srv or /data.</div></div>
+      <div class="field"><label for="z-keys">Keys zone</label>
+        <input type="text" id="z-keys" value="${NFM.escapeHtml(z.keys_zone_size || "10m")}">
+        <div class="hint">Memory for the index.  1m holds about 8,000 entries.</div></div>
+      <div class="field"><label for="z-max">Max disk</label>
+        <input type="text" id="z-max" value="${NFM.escapeHtml(z.max_size || "1g")}"></div>
+      <div class="field"><label for="z-inactive">Throw out after idle</label>
+        <input type="text" id="z-inactive" value="${NFM.escapeHtml(z.inactive || "60m")}"></div>`;
+  }
+
+  function collectZone(kind) {
+    const v = id => (document.getElementById(id) || {}).value;
+    const body = { name: v("z-name"), description: v("z-desc") };
+    if (kind === "rate") Object.assign(body, { key: v("z-key"), rate: v("z-rate"), zone_size: v("z-size") });
+    if (kind === "conn") Object.assign(body, { key: v("z-key"), zone_size: v("z-size") });
+    if (kind === "cache") Object.assign(body, {
+      path: v("z-path"), keys_zone_size: v("z-keys"),
+      max_size: v("z-max"), inactive: v("z-inactive")
+    });
+    return body;
+  }
+
+  function aclForm(a) {
+    a = a || {};
+    return `
+      <div class="field"><label for="a-name">Name</label>
+        <input type="text" id="a-name" value="${NFM.escapeHtml(a.name || "")}" placeholder="office_only"></div>
+      <div class="field"><label for="a-desc">Description</label>
+        <input type="text" id="a-desc" value="${NFM.escapeHtml(a.description || "")}"></div>
+      <div class="field"><label for="a-allow">Allow these</label>
+        <textarea id="a-allow" rows="3" placeholder="10.20.30.0/24">${NFM.escapeHtml((a.allow || []).join("\n"))}</textarea>
+        <div class="hint">One address or network per line.</div></div>
+      <div class="field"><label for="a-deny">Deny these</label>
+        <textarea id="a-deny" rows="2">${NFM.escapeHtml((a.deny || []).join("\n"))}</textarea></div>
+      <div class="field"><label for="a-default">Anything not listed</label>
+        <select id="a-default">
+          <option value="deny" ${a.default_action !== "allow" ? "selected" : ""}>Deny</option>
+          <option value="allow" ${a.default_action === "allow" ? "selected" : ""}>Allow</option>
+        </select></div>
+      <div class="checkline">
+        <input type="checkbox" id="a-mgmt" ${a.include_management !== false ? "checked" : ""}>
+        <label for="a-mgmt">Always allow the cluster nodes and management networks</label></div>
+      <div class="checkline">
+        <input type="checkbox" id="a-realip" ${a.use_real_ip ? "checked" : ""}>
+        <label for="a-realip">Trust a forwarded client address</label></div>
+      <div class="field"><label for="a-proxies">Trusted proxies</label>
+        <textarea id="a-proxies" rows="2">${NFM.escapeHtml((a.real_ip_from || []).join("\n"))}</textarea>
+        <div class="hint">Required if you trust a forwarded address.  Without it anybody can claim any address.</div></div>
+      <div class="checkline">
+        <input type="checkbox" id="a-basic" ${a.basic_auth_enabled ? "checked" : ""}>
+        <label for="a-basic">Also ask for a username and password</label></div>
+      ${a.id ? `<div class="field"><label>Basic auth users</label>
+        <div class="small faint">${NFM.escapeHtml((a.basic_auth_users || []).join(", ") || "none yet")}</div>
+        <div class="form-grid mt">
+          <input type="text" id="a-user" placeholder="username">
+          <input type="password" id="a-pass" placeholder="password, 8 or more">
+        </div>
+        <div class="hint">Filling these in adds or replaces that user when you save.</div></div>` : ""}`;
+  }
+
+  function collectAcl() {
+    const v = id => (document.getElementById(id) || {}).value || "";
+    const c = id => (document.getElementById(id) || {}).checked;
+    const body = {
+      name: v("a-name"), description: v("a-desc"),
+      allow: v("a-allow"), deny: v("a-deny"),
+      default_action: v("a-default"),
+      include_management: c("a-mgmt"),
+      use_real_ip: c("a-realip"),
+      real_ip_from: v("a-proxies"),
+      basic_auth_enabled: c("a-basic")
+    };
+    if (v("a-user") && v("a-pass")) {
+      body.add_user = { username: v("a-user"), password: v("a-pass") };
+    }
+    return body;
+  }
+
+  const titles = { rate: "rate limit zone", conn: "connection limit zone",
+                   cache: "cache zone", acl: "access list" };
+
+  function openEditor(kind, existing) {
+    const isAcl = kind === "acl";
+    const body = isAcl ? aclForm(existing) : zoneForm(kind, existing);
+    NFM.openModal((existing ? "Edit " : "New ") + titles[kind], "",
+      body + '<div class="mt"><button class="btn primary" id="z-save">Save</button></div>');
+
+    document.getElementById("z-save").addEventListener("click", async function () {
+      try {
+        const payload = isAcl ? collectAcl() : collectZone(kind);
+        if (existing) {
+          await NFM.api(isAcl ? "/access-lists/" + existing.id : "/zones/" + kind + "/" + existing.id,
+                        { method: "PUT", body: payload });
+        } else {
+          await NFM.api(isAcl ? "/access-lists" : "/zones/" + kind,
+                        { method: "POST", body: payload });
+        }
+        NFM.closeModal();
+        NFM.toast("Saved.  Apply the config to send it live.", "ok");
+        load();
+      } catch (err) {
+        NFM.toast(err.message, "bad");
+      }
+    });
+  }
+
+  document.body.addEventListener("click", function (e) {
+    const nw = e.target.closest("[data-new]");
+    if (nw) { openEditor(nw.getAttribute("data-new"), null); return; }
+
+    const ed = e.target.closest("[data-edit]");
+    if (ed) {
+      const kind = ed.getAttribute("data-edit");
+      const id = parseInt(ed.getAttribute("data-id"), 10);
+      const bucket = kind === "acl" ? data.access_lists : data[kind];
+      openEditor(kind, bucket.find(x => x.id === id));
+      return;
+    }
+
+    const del = e.target.closest("[data-del]");
+    if (del) {
+      const kind = del.getAttribute("data-del");
+      const id = del.getAttribute("data-id");
+      NFM.confirmThen("Delete " + del.getAttribute("data-name") + "?", async function () {
+        await NFM.api(kind === "acl" ? "/access-lists/" + id : "/zones/" + kind + "/" + id,
+                      { method: "DELETE" });
+        NFM.toast("Deleted", "ok");
+        load();
+      });
+    }
+  });
+
+  load().catch(err => NFM.toast(err.message, "bad"));
+});
+</script>
+{% endblock %}

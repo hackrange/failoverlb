@@ -1,0 +1,187 @@
+{% extends "base.html" %}
+{% block title %}Import config &middot; Failover LB{% endblock %}
+
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <h1>Import an existing config</h1>
+    <div class="sub">
+      Paste an nginx config and see what it would become here.  Nothing is
+      created until you say so, and nothing is switched on even then.
+    </div>
+  </div>
+</div>
+
+<div class="notice info">
+  <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 3a.9.9 0 1 1 0 1.8A.9.9 0 0 1 8 4zm1.2 8H6.8v-.9h.7V7.9h-.7V7h2.1v4.1h.3V12z"/></svg>
+  <div>
+    Paste the file the sites are actually in.  A top level
+    <code>nginx.conf</code> is usually just a list of includes, so if you paste
+    that you will see very little.  <code>sites-enabled</code> or
+    <code>conf.d</code> is normally the right place to look.
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head">
+    <h2>The config</h2>
+    <div class="flex">
+      <button class="btn" id="pick-file">Load a file</button>
+      <button class="btn primary" id="preview">See what it would make</button>
+    </div>
+  </div>
+  <div class="card-body">
+    <input type="file" id="file" accept=".conf,.txt,text/plain" hidden>
+    <textarea id="config" rows="14" spellcheck="false"
+              placeholder="server {&#10;    listen 80;&#10;    server_name example.com;&#10;    location / { proxy_pass http://backend; }&#10;}"></textarea>
+  </div>
+</div>
+
+<div id="result" hidden>
+  <div class="card mt">
+    <div class="card-head">
+      <h2>What this would make</h2>
+      {% if can('edit_sites') %}
+        <button class="btn primary" id="do-import">Import the ticked ones</button>
+      {% endif %}
+    </div>
+    <div class="card-body tight">
+      <div id="summary"></div>
+    </div>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script nonce="{{ csp_nonce }}">
+(function () {
+  const BASE = document.querySelector('meta[name=nfm-base]').content;
+  const box = document.getElementById("config");
+  const result = document.getElementById("result");
+  const summary = document.getElementById("summary");
+
+  document.getElementById("pick-file").addEventListener("click", () =>
+    document.getElementById("file").click());
+
+  document.getElementById("file").addEventListener("change", ev => {
+    const f = ev.target.files[0];
+    if (!f) return;
+    const reader = new FileReader();
+    reader.onload = () => { box.value = reader.result; };
+    reader.readAsText(f);
+  });
+
+  function line(cls, text) {
+    return `<div class="${cls}">${NFM.escapeHtml(text)}</div>`;
+  }
+
+  function render(plan) {
+    if (!plan.ok) {
+      summary.innerHTML = `<div class="notice error"><div>${NFM.escapeHtml(plan.error)}</div></div>`;
+      result.hidden = false;
+      return;
+    }
+
+    let html = "";
+
+    if (plan.warnings && plan.warnings.length) {
+      html += `<div class="notice warn"><div>` +
+        plan.warnings.map(w => NFM.escapeHtml(w)).join("<br>") + `</div></div>`;
+    }
+
+    if (plan.pools.length) {
+      html += `<h3>Pools</h3>`;
+      plan.pools.forEach(p => {
+        const members = p.members.map(m =>
+          m.address + ":" + m.port + (m.weight > 1 ? " weight " + m.weight : "") +
+          (m.backup ? " backup" : "")).join(", ");
+        html += `<label class="checkline">
+          <input type="checkbox" class="pick-pool" value="${NFM.escapeHtml(p.name)}" checked>
+          <span><strong>${NFM.escapeHtml(p.name)}</strong>
+          <span class="small faint">${NFM.escapeHtml(members || "no backends")}</span></span></label>`;
+        (p.notes || []).forEach(n => { html += line("small faint indent", n); });
+      });
+    }
+
+    if (plan.sites.length) {
+      html += `<h3 class="mt">Sites</h3>`;
+      plan.sites.forEach(s => {
+        const bits = [s.mode];
+        if (s.listen_https) bits.push("https");
+        if (s.force_https) bits.push("forces https");
+        if (s.pool) bits.push("to " + s.pool);
+        html += `<label class="checkline">
+          <input type="checkbox" class="pick-site" value="${NFM.escapeHtml(s.name)}" checked>
+          <span><strong>${NFM.escapeHtml(s.name)}</strong>
+          <span class="small faint">${NFM.escapeHtml((s.server_names || []).join(", "))}
+          &middot; ${NFM.escapeHtml(bits.join(", "))}</span></span></label>`;
+        (s.notes || []).forEach(n => { html += line("small faint indent", n); });
+        (s.skipped || []).forEach(k => {
+          html += `<div class="small indent" style="color:var(--warn,#b26b00)">not brought over: ${NFM.escapeHtml(k)}</div>`;
+        });
+      });
+    }
+
+    if (plan.skipped && plan.skipped.length) {
+      html += `<h3 class="mt">Left alone</h3>`;
+      plan.skipped.forEach(k => {
+        html += line("small faint", k.what + ": " + k.why);
+      });
+    }
+
+    if (!plan.pools.length && !plan.sites.length) {
+      html += `<div class="small faint">Nothing here mapped to a site or a pool.</div>`;
+    } else {
+      html += `<div class="notice info mt"><div>
+        Everything imported arrives switched off and not applied, so you can look
+        it over first.  Certificates are never taken from the file, because those
+        paths point at a box this fleet does not manage.</div></div>`;
+    }
+
+    summary.innerHTML = html;
+    result.hidden = false;
+  }
+
+  document.getElementById("preview").addEventListener("click", async () => {
+    if (!box.value.trim()) { NFM.toast("Paste a config first"); return; }
+    try {
+      render(await NFM.api("/import/preview",
+        { method: "POST", body: { config: box.value } }));
+    } catch (e) {
+      NFM.toast(e.message || "could not read that config");
+    }
+  });
+
+  const importBtn = document.getElementById("do-import");
+  if (importBtn) {
+    importBtn.addEventListener("click", async () => {
+      const sites = [...document.querySelectorAll(".pick-site:checked")].map(i => i.value);
+      const pools = [...document.querySelectorAll(".pick-pool:checked")].map(i => i.value);
+      if (!sites.length && !pools.length) { NFM.toast("Nothing ticked"); return; }
+
+      importBtn.disabled = true;
+      try {
+        const r = await NFM.api("/import", {
+          method: "POST",
+          body: { config: box.value, sites: sites, pools: pools }
+        });
+        let msg = `Imported ${r.sites.length} site(s) and ${r.pools.length} pool(s).`;
+        if (r.already_there && r.already_there.length) {
+          msg += `  Left alone because they already exist: ${r.already_there.join(", ")}.`;
+        }
+        NFM.toast(msg);
+        summary.innerHTML = `<div class="notice ok"><div>${NFM.escapeHtml(msg)}
+          <br>They are switched off.  Open them from
+          <a href="${BASE}/sites">Sites</a> and turn on the ones you want.</div></div>`;
+      } catch (e) {
+        NFM.toast(e.message || "the import failed");
+      } finally {
+        importBtn.disabled = false;
+      }
+    });
+  }
+})();
+</script>
+{% endblock %}

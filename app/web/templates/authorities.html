@@ -1,0 +1,242 @@
+{% extends "base.html" %}
+{% block title %}Paid Certificate Authorities &middot; Failover LB{% endblock %}
+
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <h1>Paid Certificate Authorities</h1>
+    <div class="sub">
+      Authorities you buy certificates from.  Set one up here and it appears as
+      a choice on the Certificates page.
+    </div>
+  </div>
+  <div class="page-actions">
+    {% if can('edit_certs') %}
+      <button class="btn primary" id="new-ca">Add an authority</button>
+    {% endif %}
+  </div>
+</div>
+
+<div class="notice info">
+  <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 3a.9.9 0 1 1 0 1.8A.9.9 0 0 1 8 4zm1.2 8H6.8v-.9h.7V7.9h-.7V7h2.1v4.1h.3V12z"/></svg>
+  <div>
+    You do not need anything here to use Lets Encrypt, which is free and needs
+    no account.  This is for certificates you pay for.  Nearly every authority
+    now speaks the same protocol, so setting one up is a matter of pasting the
+    address and the two credentials they give you.
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head"><h2>Authorities</h2></div>
+  <div class="card-body no-pad">
+    <div id="ca-list"><div class="pad faint">Loading...</div></div>
+  </div>
+</div>
+
+<style>
+  .pad { padding: 1rem; }
+  .ca-row { border-bottom: 1px solid var(--line); padding: 1rem; }
+  .ca-row:last-child { border-bottom: 0; }
+  .ca-head { display: flex; justify-content: space-between;
+             align-items: flex-start; gap: 1rem; }
+  .ca-meta { margin-top: .4rem; }
+  .dot { width: .55rem; height: .55rem; border-radius: 50%;
+         display: inline-block; margin-right: .35rem; }
+  .dot.ok { background: var(--ok, #2e9e4f); }
+  .dot.bad { background: var(--bad, #c23b3b); }
+  .dot.unknown { background: var(--muted, #999); }
+</style>
+
+<script nonce="{{ csp_nonce }}">
+document.addEventListener("DOMContentLoaded", function () {
+  const CAN_EDIT = {{ 'true' if can('edit_certs') else 'false' }};
+
+  function el(id) { return document.getElementById(id); }
+  function val(id) { const e = el(id); return e ? e.value.trim() : ""; }
+  function esc(s) { return NFM.escapeHtml(s == null ? "" : String(s)); }
+
+  async function load() {
+    let data;
+    try {
+      data = await NFM.api("/authorities");
+    } catch (err) {
+      el("ca-list").className = "pad faint";
+      el("ca-list").textContent = "Could not load: " + (err.message || err);
+      return;
+    }
+    draw(data.authorities || []);
+  }
+
+  // What the last test said, because credentials that were never tried are a
+  // different thing from credentials known to work, and both are different
+  // from ones known to be wrong.
+  function tested(a) {
+    if (a.last_tested_at === null || a.last_test_ok === null) {
+      return '<span class="dot unknown"></span><span class="faint small">' +
+             "never tried</span>";
+    }
+    if (a.last_test_ok) {
+      return '<span class="dot ok"></span><span class="small">credentials work</span>';
+    }
+    return '<span class="dot bad"></span><span class="small">last try failed: ' +
+           esc((a.last_test_error || "").split("\n")[0]).slice(0, 120) + "</span>";
+  }
+
+  function draw(rows) {
+    if (!rows.length) {
+      el("ca-list").innerHTML = '<div class="pad faint">' +
+        "Nothing here yet.  Add one when you have bought a certificate and " +
+        "your authority has given you an address and a pair of credentials." +
+        "</div>";
+      return;
+    }
+    el("ca-list").innerHTML = rows.map(function (a) {
+      return '<div class="ca-row"><div class="ca-head"><div>' +
+        "<strong>" + esc(a.name) + "</strong>" +
+        (a.enabled ? "" : ' <span class="badge warn">turned off</span>') +
+        (a.eab_hmac_key_set ? "" : ' <span class="badge warn">no credentials</span>') +
+        (a.description ? "<div class='small faint'>" + esc(a.description) + "</div>" : "") +
+        "<div class='mono small faint ca-meta'>" + esc(a.directory_url) + "</div>" +
+        "<div class='ca-meta'>" + tested(a) + "</div>" +
+        (a.in_use_by.length
+          ? "<div class='small faint ca-meta'>used by " +
+            esc(a.in_use_by.join(", ")) + "</div>"
+          : "<div class='small faint ca-meta'>no certificates from it yet</div>") +
+        "</div><div>" +
+        (CAN_EDIT
+          ? '<button class="btn small" data-test="' + a.id + '">Test</button> ' +
+            '<button class="btn small" data-edit="' + a.id + '">Edit</button> ' +
+            '<button class="btn small danger" data-del="' + a.id +
+            '" data-name="' + esc(a.name) + '">Delete</button>'
+          : "") +
+        "</div></div></div>";
+    }).join("");
+  }
+
+  function form(a) {
+    a = a || { enabled: true };
+    return `
+      <div class="field">
+        <label for="ca-name">Name</label>
+        <input type="text" id="ca-name" value="${esc(a.name || "")}"
+               placeholder="DigiCert OV">
+        <div class="hint">Whatever you will recognise on the Certificates page.
+          Several authorities publish a different address for each kind of
+          certificate, so naming the kind as well is usually worth it.</div>
+      </div>
+
+      <div class="field">
+        <label for="ca-url">Directory address</label>
+        <input type="text" id="ca-url" class="mono"
+               value="${esc(a.directory_url || "")}"
+               placeholder="https://acme.example-ca.com/v2/DV">
+        <div class="hint">The ACME directory address your authority gives you.
+          It starts with https.</div>
+      </div>
+
+      <div class="field">
+        <label for="ca-kid">Account key id</label>
+        <input type="text" id="ca-kid" class="mono" value="${esc(a.eab_kid || "")}">
+        <div class="hint">Given to you with the key below when you buy.  A paid
+          authority will not let this software register an account without
+          them, because the account has to be tied to what was paid for.</div>
+      </div>
+
+      <div class="field">
+        <label for="ca-hmac">Account key</label>
+        <input type="password" id="ca-hmac" class="mono" autocomplete="new-password"
+               placeholder="${a.eab_hmac_key_set ? 'saved, leave blank to keep it' : ''}">
+        <div class="hint">Stored encrypted and never shown again.</div>
+      </div>
+
+      <div class="field">
+        <label for="ca-chain">Chain to ask for</label>
+        <input type="text" id="ca-chain" value="${esc(a.preferred_chain || "")}"
+               placeholder="leave empty unless your authority says otherwise">
+        <div class="hint">Almost nobody needs this.  Fill it in only if your
+          authority tells you which chain to request by name.</div>
+      </div>
+
+      <div class="checkline">
+        <input type="checkbox" id="ca-enabled" ${a.enabled ? "checked" : ""}>
+        <label for="ca-enabled">Offer this authority when getting a certificate</label>
+      </div>
+
+      <div class="mt"><button class="btn primary" id="ca-save">Save</button></div>`;
+  }
+
+  function open(existing) {
+    NFM.openModal(existing ? "Edit " + existing.name : "Add an authority", "",
+                  form(existing), true);
+    el("ca-save").addEventListener("click", async function () {
+      const body = {
+        name: val("ca-name"),
+        directory_url: val("ca-url"),
+        eab_kid: val("ca-kid"),
+        eab_hmac_key: val("ca-hmac"),
+        preferred_chain: val("ca-chain"),
+        enabled: el("ca-enabled").checked
+      };
+      if (!body.name) { NFM.toast("Give it a name", "bad"); return; }
+      if (!body.directory_url) { NFM.toast("It needs a directory address", "bad"); return; }
+      try {
+        if (existing) {
+          await NFM.api("/authorities/" + existing.id, { method: "PUT", body: body });
+        } else {
+          await NFM.api("/authorities", { method: "POST", body: body });
+        }
+      } catch (err) { NFM.toast(err.message, "bad"); return; }
+      NFM.closeModal();
+      NFM.toast("Saved.  Press Test to check the credentials work.", "ok");
+      load();
+    });
+  }
+
+  el("ca-list").addEventListener("click", async function (ev) {
+    const test = ev.target.closest("[data-test]");
+    if (test) {
+      test.disabled = true;
+      test.textContent = "Testing...";
+      try {
+        const a = await NFM.api("/authorities/" + test.dataset.test + "/test",
+                                { method: "POST" });
+        NFM.toast(a.last_test_ok
+          ? "The credentials work."
+          : "Refused: " + (a.last_test_error || "").split("\n")[0],
+          a.last_test_ok ? "ok" : "bad");
+      } catch (err) { NFM.toast(err.message, "bad"); }
+      load();
+      return;
+    }
+    const edit = ev.target.closest("[data-edit]");
+    if (edit) {
+      try {
+        const all = await NFM.api("/authorities");
+        const one = (all.authorities || []).find(function (a) {
+          return String(a.id) === String(edit.dataset.edit);
+        });
+        if (one) { open(one); } else { NFM.toast("Could not find it", "bad"); }
+      } catch (err) { NFM.toast(err.message, "bad"); }
+      return;
+    }
+    const del = ev.target.closest("[data-del]");
+    if (del) {
+      if (!confirm("Remove " + del.dataset.name + "?")) { return; }
+      try {
+        await NFM.api("/authorities/" + del.dataset.del, { method: "DELETE" });
+      } catch (err) { NFM.toast(err.message, "bad"); return; }
+      NFM.toast("Removed", "ok");
+      load();
+    }
+  });
+
+  const add = el("new-ca");
+  if (add) { add.addEventListener("click", function () { open(null); }); }
+
+  load();
+});
+</script>
+
+{% endblock %}

@@ -1,0 +1,307 @@
+{% extends "base.html" %}
+{% block title %}Users &middot; Failover LB{% endblock %}
+
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <h1>Users</h1>
+    <div class="sub">
+      Who can get in, and what they are allowed to do.
+    </div>
+  </div>
+  <div class="page-actions">
+    <button class="btn" id="new-user">New user</button>
+  </div>
+</div>
+
+{% if error %}
+  <div class="notice bad">
+    <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.5 15 14H1L8 1.5zm0 4a.7.7 0 0 0-.7.8l.25 3.2a.45.45 0 0 0 .9 0l.25-3.2A.7.7 0 0 0 8 5.5zm0 5.4a.8.8 0 1 0 0 1.6.8.8 0 0 0 0-1.6z"/></svg>
+    <div>{{ error }}</div>
+  </div>
+{% endif %}
+{% if ok %}
+  <div class="notice ok">
+    <svg viewBox="0 0 16 16" fill="currentColor"><path d="M13.5 4.5 6 12 2.5 8.5l1-1L6 10l6.5-6.5 1 1z"/></svg>
+    <div>{{ ok }}</div>
+  </div>
+{% endif %}
+
+<div class="card">
+  <div class="card-head">
+    <h2>Accounts</h2>
+    <button class="help-btn" data-help-static="help-roles-users"
+            data-help-title="Roles, and resetting an authenticator" data-help-wide
+            aria-label="Help">?</button>
+  </div>
+  <div class="card-body tight">
+    <div class="table-scroll">
+    <table>
+      <thead>
+        <tr>
+          <th>User</th><th>Role</th><th>Sign in</th><th>Authenticator</th>
+          <th>State</th><th>Last seen</th><th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for u in users %}
+          <tr>
+            <td>
+              <strong>{{ u.username }}</strong>
+              {% if u.id == user.id %}<span class="badge neutral">you</span>{% endif %}
+              {% if u.full_name %}<div class="small faint">{{ u.full_name }}</div>{% endif %}
+            </td>
+            <td>
+              {# Your own role is shown and not offered.  Changing it is the
+                 one thing on this page that can take away the permission you
+                 are using, and the route refuses it, so there is no reason to
+                 put a control here that cannot work. #}
+              {% if u.id == user.id %}
+                <span class="badge neutral">{{ u.role.value }}</span>
+                <div class="small faint">your own</div>
+              {% else %}
+                <form method="post" action="{{ base }}/users/{{ u.id }}/role"
+                      style="margin:0" data-role-form
+                      data-username="{{ u.username }}">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                  {# No inline onchange.  The page sends a Content Security
+                     Policy with a nonce and no unsafe-inline, so an attribute
+                     handler is never run and the dropdown silently did
+                     nothing.  It is bound in the script at the bottom. #}
+                  <select name="role" data-was="{{ u.role.value }}"
+                          style="padding:3px 6px; font-size:0.8rem; width:auto">
+                    <option value="viewer"   {{ 'selected' if u.role.value == 'viewer' }}>viewer</option>
+                    <option value="operator" {{ 'selected' if u.role.value == 'operator' }}>operator</option>
+                    <option value="admin"    {{ 'selected' if u.role.value == 'admin' }}>admin</option>
+                  </select>
+                </form>
+              {% endif %}
+            </td>
+            <td class="small faint">{{ 'local' if u.source.value == 'local' else 'single sign on' }}</td>
+            <td>
+              {% if u.source.value != 'local' %}
+                <span class="faint small">handled by SSO</span>
+              {% elif u.totp_enrolled %}
+                <span class="badge ok">set up</span>
+              {% else %}
+                <span class="badge warn">not set up</span>
+              {% endif %}
+            </td>
+            <td>
+              {% if not u.enabled %}
+                <span class="badge bad">disabled</span>
+              {% elif u.is_locked %}
+                <span class="badge warn">locked out</span>
+              {% else %}
+                <span class="badge ok">active</span>
+              {% endif %}
+              {% if u.failed_attempts %}
+                <div class="small faint">{{ u.failed_attempts }} failed tries</div>
+              {% endif %}
+            </td>
+            <td class="small faint">
+              {{ u.last_login_at.strftime('%Y-%m-%d %H:%M') if u.last_login_at else 'never' }}
+            </td>
+            <td class="right nowrap">
+              {% if u.source.value == 'local' and u.totp_enrolled %}
+                <form method="post" action="{{ base }}/users/{{ u.id }}/reset-totp"
+                      style="display:inline" data-confirm="Clear {{ u.username }}'s authenticator?
+
+They will scan a fresh code the next time they sign in, and every session they have open will be signed out.
+
+Only do this when you are sure who you are talking to.">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                  <button type="submit" class="btn sm">Reset authenticator</button>
+                </form>
+              {% endif %}
+              {% if u.is_locked or u.failed_attempts %}
+                <form method="post" action="{{ base }}/users/{{ u.id }}/unlock" style="display:inline">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                  <button type="submit" class="btn sm">Unlock</button>
+                </form>
+              {% endif %}
+              {% if u.id != user.id %}
+                <form method="post" action="{{ base }}/users/{{ u.id }}/enabled" style="display:inline">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                  <input type="hidden" name="enabled" value="{{ 'false' if u.enabled else 'true' }}">
+                  <button type="submit" class="btn sm">{{ 'Disable' if u.enabled else 'Enable' }}</button>
+                </form>
+                {# Not on your own row.  Deleting the account you are signed in
+                   as is refused by the route, and offering it is an invitation
+                   to find that out the hard way. #}
+                <form method="post" action="{{ base }}/users/{{ u.id }}/delete"
+                      style="display:inline" data-confirm="Delete {{ u.username }}?
+
+The account goes, and every session it has open stops working at once.  It cannot be undone: a new account with the same name is a different account.
+
+What they did stays in the audit log under their username, so the record of it is not lost.
+
+If they are only going away for a while, Disable does that and can be undone.">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                  <button type="submit" class="btn sm danger">Delete</button>
+                </form>
+              {% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    </div>
+  </div>
+</div>
+
+<div class="notice info">
+  <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 3a.9.9 0 1 1 0 1.8A.9.9 0 0 1 8 4zm1.2 8H6.8v-.9h.7V7.9h-.7V7h2.1v4.1h.3V12z"/></svg>
+  <div>
+    <strong>If nobody can get in at all</strong>, there is a way back from the
+    command line on the box:
+    <code>docker exec nginx-fleet-manager python -m app.reset_admin admin --reset-totp</code>
+  </div>
+</div>
+
+<div hidden id="help-roles-users">
+  <div class="help-section">
+    <h4>What each role can do</h4>
+    <ul>
+      <li><strong>viewer</strong> can look at everything and change nothing.
+          Good for people who need to see what is going on during an incident.</li>
+      <li><strong>operator</strong> can change sites, pools and certificates and
+          apply config.  Cannot touch users or cluster trust.  This is the right
+          role for most of the people doing day to day work.</li>
+      <li><strong>admin</strong> can do all of that plus manage users, join
+          nodes, fail over, and upgrade nginx.</li>
+    </ul>
+    <p>Changing somebody's role signs them out, so the new permissions apply
+       straight away rather than the next time they happen to sign out.</p>
+  </div>
+  <div class="help-section">
+    <h4>Resetting an authenticator</h4>
+    <p>Use this when somebody has lost their phone and has no recovery codes
+       left.  It takes the old authenticator off the account.  It does not set a
+       new one up, so the next time they sign in with their password they get
+       the setup page and scan a fresh code.
+
+Their sessions all get signed out at the same time.</p>
+  </div>
+  <div class="help-section">
+    <h4>Be careful with it</h4>
+    <p>Taking the second factor off an account is exactly what somebody would do
+       to get into it.  Make sure you actually know who is asking, over
+       something other than email or chat, before you click it.
+
+Every reset is written to the audit log with your name on it.</p>
+  </div>
+  <div class="help-section">
+    <h4>Disable or delete</h4>
+    <p>Disable is the usual answer.  The account cannot sign in, everything it
+       did stays where it is, and turning it back on is one click.  That is what
+       somebody on leave or between jobs needs.</p>
+    <p>Delete is for an account that should never have existed.  It goes for
+       good, along with every session it has open, and a new account with the
+       same name is a different account.  What they did stays in the audit log
+       under their username, so the record of it survives them.</p>
+  </div>
+  <div class="help-section">
+    <h4>Your own account</h4>
+    <p>You cannot change your own role or delete yourself, and the page does not
+       offer either.  Both are ways to lock yourself out of this page while
+       standing on it.  Ask another admin.</p>
+    <p>Resetting your own authenticator is allowed, because that one you can do
+       for yourself and nobody else should have to.</p>
+  </div>
+  <div class="help-section">
+    <h4>The last admin</h4>
+    <p>The tool will not let you disable, delete or demote the only remaining
+       enabled admin.  An empty admin list means nobody can fix anything and the
+       way back involves a shell on the box.</p>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script nonce="{{ csp_nonce }}">
+document.addEventListener("DOMContentLoaded", function () {
+
+  // Forms carrying a data-confirm ask before they submit.  Used for the ones
+  // that sign somebody out or take away their second factor.
+  document.body.addEventListener("submit", function (e) {
+    const form = e.target.closest("form[data-confirm]");
+    if (!form) return;
+    if (!window.confirm(form.getAttribute("data-confirm"))) {
+      e.preventDefault();
+    }
+  });
+
+  // Changing a role.
+  //
+  // Bound here rather than written on the tag.  This page is served with a
+  // Content Security Policy that allows scripts from this origin and a nonce,
+  // which means an inline onchange attribute is never run: the dropdown moved,
+  // nothing was sent, and the account kept the role it had.
+  //
+  // It asks first, because it is not an ordinary edit.  A role change signs
+  // that account out of every session it has open, and a dropdown that acts
+  // the instant it moves is one stray scroll away from doing that to somebody
+  // mid change.  Saying no puts the dropdown back where it was.
+  document.body.addEventListener("change", function (e) {
+    const select = e.target.closest("form[data-role-form] select[name=role]");
+    if (!select) return;
+
+    const form = select.closest("form");
+    const who = form.getAttribute("data-username");
+    const was = select.getAttribute("data-was");
+    const now = select.value;
+    if (now === was) return;
+
+    const message = "Make " + who + " " + (now === "admin" ? "an " : "a ") + now +
+      "?\n\nThey are signed out of every session, so the new permissions " +
+      "apply straight away rather than whenever they next sign in.";
+    if (!window.confirm(message)) {
+      select.value = was;
+      return;
+    }
+    form.submit();
+  });
+
+  document.getElementById("new-user").addEventListener("click", function () {
+    NFM.openModal("New user", "local account", `
+      <form method="post" action="${document.querySelector('meta[name=nfm-base]').content}/users/create">
+        <input type="hidden" name="csrf_token" value="${NFM.escapeHtml(NFM.csrfToken())}">
+        <div class="field">
+          <label for="u-name">Username</label>
+          <input type="text" id="u-name" name="username" required autofocus>
+        </div>
+        <div class="field">
+          <label for="u-full">Full name</label>
+          <input type="text" id="u-full" name="full_name">
+        </div>
+        <div class="field">
+          <label for="u-email">Email</label>
+          <input type="email" id="u-email" name="email">
+        </div>
+        <div class="field">
+          <label for="u-role">Role</label>
+          <select id="u-role" name="role">
+            <option value="viewer">viewer, read only</option>
+            <option value="operator">operator, can change config</option>
+            <option value="admin">admin, everything</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="u-pw">Starting password</label>
+          <input type="password" id="u-pw" name="password" required>
+          <div class="hint">
+            At least 12 characters.  They have to change it and set up an
+            authenticator the first time they sign in, so this one is only ever
+            used once.
+          </div>
+        </div>
+        <button type="submit" class="btn primary">Create</button>
+      </form>
+    `);
+  });
+});
+</script>
+{% endblock %}

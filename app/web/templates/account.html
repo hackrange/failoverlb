@@ -1,0 +1,218 @@
+{% extends "base.html" %}
+{% block title %}My Account &middot; Failover LB{% endblock %}
+
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <h1>My account</h1>
+    <div class="sub">{{ user.username }} &middot; {{ user.role.value }} &middot;
+      signed in with {{ 'a local account' if user.source.value == 'local' else 'single sign on' }}</div>
+  </div>
+</div>
+
+{% if error %}
+  <div class="notice bad">
+    <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.5 15 14H1L8 1.5zm0 4a.7.7 0 0 0-.7.8l.25 3.2a.45.45 0 0 0 .9 0l.25-3.2A.7.7 0 0 0 8 5.5zm0 5.4a.8.8 0 1 0 0 1.6.8.8 0 0 0 0-1.6z"/></svg>
+    <div>{{ error }}</div>
+  </div>
+{% endif %}
+{% if ok %}
+  <div class="notice ok">
+    <svg viewBox="0 0 16 16" fill="currentColor"><path d="M13.5 4.5 6 12 2.5 8.5l1-1L6 10l6.5-6.5 1 1z"/></svg>
+    <div>{{ ok }}</div>
+  </div>
+{% endif %}
+
+{% if user.source.value == 'local' %}
+
+<div class="card">
+  <div class="card-head">
+    <h2>Authenticator app</h2>
+    <button class="help-btn" data-help-static="help-totp"
+            data-help-title="Changing your authenticator" data-help-wide
+            aria-label="Help">?</button>
+  </div>
+  <div class="card-body">
+
+    {% if user.totp_enrolled %}
+      <p style="margin-top:0">
+        Set up.  You have <strong>{{ recovery_left }}</strong> recovery
+        code{{ 's' if recovery_left != 1 }} left.
+        {% if recovery_left <= 2 %}
+          <span class="badge warn">running low</span>
+        {% endif %}
+      </p>
+
+      <p class="small muted">
+        Moving to a new phone?  Do this <em>before</em> you wipe the old one, or
+        you will need a recovery code to get through.
+      </p>
+
+      <form method="post" action="{{ base }}/account/totp/start" class="mt">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div class="form-grid">
+          <div class="field">
+            <label for="t-pw">Your password</label>
+            <input type="password" id="t-pw" name="current_password"
+                   autocomplete="current-password" required>
+          </div>
+          <div class="field">
+            <label for="t-code">A code from your current app</label>
+            <input type="text" id="t-code" name="current_code" inputmode="numeric"
+                   maxlength="9" autocomplete="one-time-code" required
+                   placeholder="000000">
+            <div class="hint">Or a recovery code, if the old phone has gone.</div>
+          </div>
+        </div>
+        <button type="submit" class="btn">Set up a new authenticator</button>
+      </form>
+
+      <hr style="border:none; border-top:1px solid var(--border); margin:20px 0">
+
+      <h3 style="font-size:0.92rem; margin:0 0 4px">Fresh recovery codes</h3>
+      <p class="small muted" style="margin-top:0">
+        Makes a new set of ten and stops the old ones working.  Worth doing if
+        you have used a few, or if the paper they were on has gone astray.
+      </p>
+      <form method="post" action="{{ base }}/account/recovery-codes">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div class="form-grid">
+          <div class="field">
+            <label for="r-pw">Your password</label>
+            <input type="password" id="r-pw" name="current_password"
+                   autocomplete="current-password" required>
+          </div>
+          <div class="field">
+            <label for="r-code">A code from your app</label>
+            <input type="text" id="r-code" name="current_code" inputmode="numeric"
+                   maxlength="9" autocomplete="one-time-code" required
+                   placeholder="000000">
+          </div>
+        </div>
+        <button type="submit" class="btn">Make new recovery codes</button>
+      </form>
+
+    {% else %}
+      <div class="notice warn">
+        <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.5 15 14H1L8 1.5zm0 4a.7.7 0 0 0-.7.8l.25 3.2a.45.45 0 0 0 .9 0l.25-3.2A.7.7 0 0 0 8 5.5zm0 5.4a.8.8 0 1 0 0 1.6.8.8 0 0 0 0-1.6z"/></svg>
+        <div>You have no authenticator set up.  You will be asked to add one at
+             your next sign in.</div>
+      </div>
+    {% endif %}
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head"><h2>Password</h2></div>
+  <div class="card-body">
+    <form method="post" action="{{ base }}/account/password">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div class="field" style="max-width:340px">
+        <label for="p-cur">Current password</label>
+        <input type="password" id="p-cur" name="current_password"
+               autocomplete="current-password" required>
+      </div>
+      <div class="form-grid" style="max-width:700px">
+        <div class="field">
+          <label for="p-new">New password</label>
+          <input type="password" id="p-new" name="new_password"
+                 autocomplete="new-password" required>
+          <div class="hint">At least 12 characters.  Length beats cleverness.</div>
+        </div>
+        <div class="field">
+          <label for="p-conf">Again</label>
+          <input type="password" id="p-conf" name="confirm_password"
+                 autocomplete="new-password" required>
+        </div>
+      </div>
+      <button type="submit" class="btn">Change password</button>
+    </form>
+  </div>
+</div>
+
+{% else %}
+  <div class="notice info">
+    <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 3a.9.9 0 1 1 0 1.8A.9.9 0 0 1 8 4zm1.2 8H6.8v-.9h.7V7.9h-.7V7h2.1v4.1h.3V12z"/></svg>
+    <div>
+      Your password and second factor are handled by your company's single sign
+      on, so they are changed there rather than here.
+    </div>
+  </div>
+{% endif %}
+
+<div class="card">
+  <div class="card-head">
+    <h2>Where you are signed in</h2>
+    {% if sessions|length > 1 %}
+      <form method="post" action="{{ base }}/account/sessions/revoke" style="margin:0">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit" class="btn sm">Sign out everywhere else</button>
+      </form>
+    {% endif %}
+  </div>
+  <div class="card-body tight">
+    <div class="table-scroll">
+    <table>
+      <thead>
+        <tr><th>From</th><th>Browser</th><th>Started</th><th>Last used</th><th></th></tr>
+      </thead>
+      <tbody>
+        {% for s in sessions %}
+          <tr>
+            <td class="mono">{{ s.ip_address or 'unknown' }}</td>
+            <td class="small faint">{{ (s.user_agent or '')[:60] }}</td>
+            <td class="small faint">{{ s.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
+            <td class="small faint">{{ s.last_seen_at.strftime('%H:%M:%S') }}</td>
+            <td class="right">
+              {% if s.token_hash == current_session_hash %}
+                <span class="badge ok">this one</span>
+              {% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    </div>
+  </div>
+</div>
+
+<div hidden id="help-totp">
+  <div class="help-section">
+    <p>How to move your two factor codes to a different phone, and what to do
+       when the old one has gone.</p>
+  </div>
+  <div class="help-section">
+    <h4>Getting a new phone</h4>
+    <p>Do this while you still have the old one.  Put in your password and a
+       code from the current app, scan the new QR with the new phone, then type
+       a code from it to confirm.
+
+Nothing changes until that last step.  If you scan the code and then get
+distracted, your old app keeps working, which is the right way round.</p>
+  </div>
+  <div class="help-section">
+    <h4>The old phone is already gone</h4>
+    <p>Use a recovery code where it asks for a code from your app.  That is what
+       they are for.  Each one works once.
+
+No recovery codes left either?  Any admin can clear your authenticator from the
+Users page, and you set up a fresh one the next time you sign in.</p>
+  </div>
+  <div class="help-section">
+    <h4>Why it asks for your password again</h4>
+    <p>Because a signed in browser on its own is not proof it is still you.
+       Without asking, anybody who got hold of your session could swap the
+       second factor for one they hold, and you would be locked out of your own
+       account with nothing looking wrong.</p>
+  </div>
+  <div class="help-section">
+    <h4>What happens to your other sessions</h4>
+    <p>Changing your authenticator signs you out everywhere else.  People
+       usually do this either because they have a new phone or because they are
+       worried somebody else is in the account, and in the second case leaving
+       the other session alive would defeat the point.</p>
+  </div>
+</div>
+
+{% endblock %}

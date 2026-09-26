@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% block title %}Set up your authenticator &middot; Failover LB{% endblock %}
+
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <h1>Set up your authenticator app</h1>
+    <div class="sub">
+      Local accounts have to have this on.  They are the way in when single sign
+      on is broken, so a password on its own is not enough.
+    </div>
+  </div>
+</div>
+
+<div class="card" style="max-width:560px">
+  <div class="card-body">
+
+    <div class="help-section">
+      <h4>1. Scan this</h4>
+      <p class="small muted">
+        Use whichever authenticator app you already have.  The code is drawn on
+        this box, so nothing about your account is sent anywhere to make it.
+      </p>
+      <img src="{{ qr }}" alt="QR code for setting up two factor authentication"
+           style="border:1px solid var(--border); border-radius:var(--radius); background:#fff; padding:8px">
+    </div>
+
+    <div class="help-section">
+      <h4>Cannot scan it?</h4>
+      <p class="small muted">Type this into the app by hand:</p>
+      <pre>{{ secret }}</pre>
+    </div>
+
+    <div class="help-section">
+      <h4>2. Save these recovery codes</h4>
+      <p class="small muted">
+        Each one works once, instead of a code from the app.  This is how you
+        get in when your phone is lost, broken or in another building.  Put them
+        somewhere that is not your phone.
+      </p>
+      <pre>{% for code in recovery_codes %}{{ code }}
+{% endfor %}</pre>
+      <div class="notice warn">
+        <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.5 15 14H1L8 1.5zm0 4a.7.7 0 0 0-.7.8l.25 3.2a.45.45 0 0 0 .9 0l.25-3.2A.7.7 0 0 0 8 5.5zm0 5.4a.8.8 0 1 0 0 1.6.8.8 0 0 0 0-1.6z"/></svg>
+        <div>These are shown once and never again.  Copy them now.</div>
+      </div>
+    </div>
+
+    <div class="help-section">
+      <h4>3. Prove it works</h4>
+      <form method="post" action="{{ base }}/enroll" id="enroll-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div class="field">
+          <label for="code">Code from the app</label>
+          <input type="text" id="code" name="code" inputmode="numeric"
+                 pattern="[0-9]*" maxlength="6" required placeholder="000000"
+                 autocomplete="one-time-code">
+        </div>
+        <button type="submit" class="btn primary">Finish setup</button>
+      </form>
+    </div>
+
+  </div>
+</div>
+
+{% endblock %}
+
+

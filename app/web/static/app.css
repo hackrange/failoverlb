@@ -1,0 +1,862 @@
+/* =============================================================================
+   Failover LB styles
+
+   Neutral on purpose.  Black, white and grey, with colour saved for the one
+   thing colour is actually good at here: telling you at a glance whether
+   something is broken.  If everything is coloured then nothing stands out, and
+   on a page full of load balancer status that is the whole job.
+
+   Layout follows the same shape as the other tools here.  Dark bar across the
+   top, fixed sidebar down the left, content fills the rest.
+   ============================================================================= */
+
+:root {
+    /* Greys, light to dark.  Everything structural comes from these. */
+    --bg: #ffffff;
+    --bg-soft: #f6f6f6;
+    --bg-sunk: #efefef;
+    --border: #e0e0e0;
+    --border-strong: #c8c8c8;
+
+    --text: #141414;
+    --text-soft: #5c5c5c;
+    --text-faint: #8a8a8a;
+    --text-invert: #ffffff;
+
+    --header: #141414;
+    --sidebar: #fafafa;
+
+    /* State colours.  Only for status, never for decoration. */
+    --ok: #1a7f37;
+    --ok-bg: #eaf4ec;
+    --warn: #9a6700;
+    --warn-bg: #fdf6e3;
+    --bad: #b42318;
+    --bad-bg: #fdeceb;
+    --info: #1f4f82;
+    --info-bg: #eaf1f8;
+
+    --radius: 6px;
+    --nav-width: 232px;
+    --topbar-height: 56px;
+
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+            "Liberation Mono", monospace;
+}
+
+/* Dark mode follows the operating system.  Nobody wants a white screen at 3am
+   when the pager went off, and this costs us one block of variables. */
+@media (prefers-color-scheme: dark) {
+    :root {
+        --bg: #161616;
+        --bg-soft: #1e1e1e;
+        --bg-sunk: #242424;
+        --border: #333333;
+        --border-strong: #454545;
+
+        --text: #ededed;
+        --text-soft: #a8a8a8;
+        --text-faint: #7a7a7a;
+
+        --header: #0d0d0d;
+        --sidebar: #1a1a1a;
+
+        --ok: #4ac26b;
+        --ok-bg: #16261a;
+        --warn: #d4a72c;
+        --warn-bg: #2a2413;
+        --bad: #f28b82;
+        --bad-bg: #2d1a19;
+        --info: #6ea8de;
+        --info-bg: #16212e;
+    }
+}
+
+* { box-sizing: border-box; }
+
+html, body { margin: 0; padding: 0; height: 100%; }
+
+body {
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 14px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+}
+
+a { color: var(--text); text-decoration: underline; text-underline-offset: 2px; }
+a:hover { color: var(--text-soft); }
+
+code, pre, .mono { font-family: var(--mono); font-size: 0.9em; }
+
+pre {
+    background: var(--bg-sunk);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 12px 14px;
+    overflow-x: auto;
+    margin: 8px 0;
+}
+
+/* --------------------------------------------------------------- app shell */
+.app { display: flex; flex-direction: column; min-height: 100vh; }
+
+.topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: var(--header);
+    color: var(--text-invert);
+    height: var(--topbar-height);
+    padding: 0 18px;
+    flex: 0 0 auto;
+}
+.topbar a { color: var(--text-invert); text-decoration: none; }
+.topbar .brand {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    font-weight: 600;
+    font-size: 0.98rem;
+    letter-spacing: 0.01em;
+}
+.topbar .brand svg { width: 20px; height: 20px; }
+.topbar .right { display: flex; align-items: center; gap: 16px; font-size: 0.86rem; }
+.topbar .node-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 9px;
+    border: 1px solid rgba(255,255,255,0.28);
+    border-radius: 999px;
+    font-size: 0.78rem;
+}
+
+.layout { display: flex; flex: 1 1 auto; min-height: 0; }
+
+/* ------------------------------------------------------------------ sidebar */
+.sidebar {
+    width: var(--nav-width);
+    flex: 0 0 var(--nav-width);
+    background: var(--sidebar);
+    border-right: 1px solid var(--border);
+    padding: 14px 0;
+    overflow-y: auto;
+}
+.sidebar .group-label {
+    padding: 14px 18px 5px;
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: var(--text-faint);
+    font-weight: 600;
+
+    /* It is a button now, so it has to be told to stop looking like one.
+       Everything below undoes a default rather than adding a style: the
+       heading should read exactly as it did when it was a div, and only
+       behave differently. */
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    background: none;
+    border: 0;
+    font-family: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+.sidebar .group-label:hover { color: var(--text); }
+.sidebar .group-label:focus-visible {
+    outline: 2px solid var(--accent, #3b82f6);
+    outline-offset: -2px;
+}
+.sidebar .group-icon {
+    width: 13px;
+    height: 13px;
+    flex: none;
+    opacity: 0.75;
+}
+/* Pushed to the right hand end, so all four line up whatever the word. */
+.sidebar .group-label .chev {
+    width: 12px;
+    height: 12px;
+    flex: none;
+    margin-left: auto;
+    transition: transform 0.15s ease;
+}
+.sidebar .group-label[aria-expanded="false"] .chev { transform: rotate(-90deg); }
+
+/* Collapsed is hidden outright rather than animated to zero height.  A height
+   animation on a list whose length is not known needs a measured pixel value
+   to animate to, and getting that wrong leaves a sliver of a link showing or
+   clips the last one. */
+.sidebar .group-links[hidden] { display: none; }
+
+/* The sections carry the separation now, so the first heading does not need
+   the extra space it had when it was following a link. */
+.sidebar .nav-group + .nav-group .group-label { padding-top: 10px; }
+.sidebar a {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 18px;
+    color: var(--text-soft);
+    text-decoration: none;
+    border-left: 3px solid transparent;
+}
+.sidebar a:hover { background: var(--bg-sunk); color: var(--text); }
+.sidebar a.active {
+    background: var(--bg-sunk);
+    color: var(--text);
+    border-left-color: var(--text);
+    font-weight: 600;
+}
+.sidebar a svg { width: 16px; height: 16px; flex: 0 0 16px; }
+.sidebar .count {
+    margin-left: auto;
+    font-size: 0.74rem;
+    color: var(--text-faint);
+    font-variant-numeric: tabular-nums;
+}
+
+.content { flex: 1 1 auto; min-width: 0; padding: 22px 26px 60px; }
+
+/* -------------------------------------------------------------- page header */
+.page-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 18px;
+    flex-wrap: wrap;
+}
+.page-head h1 { font-size: 1.28rem; margin: 0 0 3px; font-weight: 600; }
+.page-head .sub { color: var(--text-soft); font-size: 0.87rem; }
+.page-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+
+/* -------------------------------------------------------------------- cards */
+.card {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    margin-bottom: 16px;
+}
+.card-head {
+    padding: 11px 15px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+.card-head h2 { font-size: 0.92rem; margin: 0; font-weight: 600; }
+.card-body { padding: 15px; }
+.card-body.tight { padding: 0; }
+
+/* --------------------------------------------------------------- stat tiles */
+.stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 12px;
+    margin-bottom: 18px;
+}
+.stat {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 13px 15px;
+    background: var(--bg);
+}
+.stat .label {
+    font-size: 0.73rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-faint);
+    font-weight: 600;
+}
+.stat .value {
+    font-size: 1.55rem;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    margin-top: 3px;
+    line-height: 1.15;
+}
+.stat .note { font-size: 0.79rem; color: var(--text-soft); margin-top: 2px; }
+.stat.is-bad  { border-color: var(--bad);  background: var(--bad-bg); }
+.stat.is-bad .value { color: var(--bad); }
+.stat.is-warn { border-color: var(--warn); background: var(--warn-bg); }
+.stat.is-warn .value { color: var(--warn); }
+
+/* ------------------------------------------------------------------- tables */
+table { width: 100%; border-collapse: collapse; font-size: 0.87rem; }
+thead th {
+    text-align: left;
+    padding: 9px 15px;
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-faint);
+    font-weight: 600;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+}
+tbody td { padding: 10px 15px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+tbody tr:last-child td { border-bottom: none; }
+tbody tr:hover { background: var(--bg-soft); }
+td.num { text-align: right; font-variant-numeric: tabular-nums; }
+
+/* Wide tables scroll inside their own box rather than pushing the page sideways. */
+.table-scroll { overflow-x: auto; }
+
+/* ------------------------------------------------------------------ badges */
+.badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    border: 1px solid transparent;
+    white-space: nowrap;
+}
+.badge.ok      { background: var(--ok-bg);   color: var(--ok);   border-color: var(--ok); }
+.badge.warn    { background: var(--warn-bg); color: var(--warn); border-color: var(--warn); }
+.badge.bad     { background: var(--bad-bg);  color: var(--bad);  border-color: var(--bad); }
+.badge.info    { background: var(--info-bg); color: var(--info); border-color: var(--info); }
+.badge.neutral { background: var(--bg-sunk); color: var(--text-soft); border-color: var(--border-strong); }
+
+/* A dot for status where a full badge would be too much, like next to a
+   backend address in a long list. */
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+.dot.ok { background: var(--ok); }
+.dot.warn { background: var(--warn); }
+.dot.bad { background: var(--bad); }
+.dot.neutral { background: var(--text-faint); }
+
+/* ------------------------------------------------------------------ buttons */
+.btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 13px;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius);
+    background: var(--bg);
+    color: var(--text);
+    font-size: 0.86rem;
+    font-weight: 500;
+    cursor: pointer;
+    text-decoration: none;
+    font-family: inherit;
+}
+.btn:hover { background: var(--bg-sunk); color: var(--text); }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn svg { width: 14px; height: 14px; }
+.btn.primary { background: var(--text); color: var(--bg); border-color: var(--text); }
+.btn.primary:hover { background: var(--text-soft); border-color: var(--text-soft); }
+.btn.danger { border-color: var(--bad); color: var(--bad); }
+.btn.danger:hover { background: var(--bad-bg); }
+.btn.sm { padding: 3px 9px; font-size: 0.78rem; }
+
+/* ------------------------------------------------------------------- forms */
+.field { margin-bottom: 14px; }
+.field label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-weight: 600;
+    font-size: 0.83rem;
+    margin-bottom: 4px;
+}
+.field .hint { font-size: 0.79rem; color: var(--text-soft); margin-top: 3px; }
+
+/* Every text entry field, listed by type.
+ *
+ * Listing types is a trap and this rule has been caught by it twice: a type
+ * that is not named here gets no styling at all and falls back to whatever the
+ * browser draws, which is a differently shaped box sitting next to the others.
+ * It happened to the six search boxes, which had no border and no padding, and
+ * to two url fields on the settings page.
+ *
+ * So `search` and `url` are named now, and `appearance: none` goes with them.
+ * WebKit draws a search field with its own rounded shape and will keep doing
+ * that through a border and a radius set here unless it is told not to.
+ *
+ * If you add a field of a type that is not on this list, add the type. */
+input[type=text], input[type=password], input[type=number], input[type=email],
+input[type=search], input[type=url], input[type=tel], input[type=date],
+select, textarea {
+    width: 100%;
+    padding: 7px 10px;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius);
+    background: var(--bg);
+    color: var(--text);
+    font-family: inherit;
+    font-size: 0.88rem;
+}
+
+/* Only the inputs, never the select.  A select needs to keep its native
+ * appearance or the dropdown arrow goes with it, and then it looks like a text
+ * box that mysteriously will not accept typing. */
+input[type=text], input[type=password], input[type=number], input[type=email],
+input[type=search], input[type=url], input[type=tel], input[type=date],
+textarea {
+    appearance: none;
+    -webkit-appearance: none;
+}
+
+/* The little clear cross WebKit puts inside a search field.  Kept, because it
+ * is useful and people expect it, but recoloured: its default is a mid grey
+ * that disappears against the dark background. */
+input[type=search]::-webkit-search-cancel-button {
+    -webkit-appearance: none;
+    appearance: none;
+    height: 12px;
+    width: 12px;
+    cursor: pointer;
+    background: var(--text-faint);
+    mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4 4l8 8M12 4l-8 8' stroke='black' stroke-width='2'/%3E%3C/svg%3E") center/contain no-repeat;
+    -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4 4l8 8M12 4l-8 8' stroke='black' stroke-width='2'/%3E%3C/svg%3E") center/contain no-repeat;
+}
+input:focus, select:focus, textarea:focus {
+    outline: 2px solid var(--text);
+    outline-offset: -1px;
+    border-color: var(--text);
+}
+textarea { font-family: var(--mono); font-size: 0.84rem; line-height: 1.5; resize: vertical; }
+input:disabled, select:disabled { background: var(--bg-sunk); color: var(--text-faint); }
+
+.checkline { display: flex; align-items: center; gap: 8px; margin-bottom: 9px; }
+.checkline input[type=checkbox] { width: 15px; height: 15px; margin: 0; accent-color: var(--text); }
+.checkline label { margin: 0; font-weight: 400; }
+
+.form-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 0 18px;
+}
+
+/* ------------------------------------------------------- the help ? button */
+/* Every setting gets one of these.  Small, quiet, always in the same place, so
+   it becomes something you stop noticing until you need it. */
+.help-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 15px;
+    height: 15px;
+    border-radius: 50%;
+    border: 1px solid var(--border-strong);
+    background: var(--bg-soft);
+    color: var(--text-soft);
+    font-size: 10px;
+    font-weight: 700;
+    cursor: pointer;
+    padding: 0;
+    line-height: 1;
+    flex: 0 0 15px;
+}
+.help-btn:hover { background: var(--text); color: var(--bg); border-color: var(--text); }
+
+/* -------------------------------------------------------------------- modal */
+.modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.45);
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    padding: 5vh 16px;
+    z-index: 900;
+    overflow-y: auto;
+}
+.modal-backdrop[hidden] { display: none; }
+.modal {
+    background: var(--bg);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius);
+    width: 100%;
+    max-width: 640px;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.28);
+}
+.modal.wide { max-width: 900px; }
+.modal-head {
+    padding: 14px 18px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 12px;
+}
+.modal-head h3 { margin: 0; font-size: 1rem; font-weight: 600; }
+.modal-head .directive {
+    font-family: var(--mono);
+    font-size: 0.76rem;
+    color: var(--text-faint);
+    margin-top: 2px;
+}
+.modal-body { padding: 18px; }
+.modal-foot {
+    padding: 12px 18px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+}
+.modal-close {
+    background: none;
+    border: none;
+    font-size: 20px;
+    line-height: 1;
+    cursor: pointer;
+    color: var(--text-faint);
+    padding: 0 2px;
+}
+.modal-close:hover { color: var(--text); }
+
+.help-section { margin-bottom: 16px; }
+.help-section:last-child { margin-bottom: 0; }
+.help-section h4 {
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-faint);
+    margin: 0 0 6px;
+    font-weight: 600;
+}
+.help-section p { margin: 0 0 8px; white-space: pre-wrap; }
+.help-section ul { margin: 0; padding-left: 20px; }
+.help-section li { margin-bottom: 4px; }
+
+/* ------------------------------------------------------------------ notices */
+/* Make the hidden attribute actually hide things.
+ *
+ * The browser's own rule is [hidden] { display: none }, and any author rule
+ * with a display on it beats that, because author styles win over the user
+ * agent stylesheet.  .notice sets display: flex, so every notice marked hidden
+ * was on screen the whole time regardless of what the code thought.
+ *
+ * That is how the "saved but not live" banner ended up permanently visible
+ * while the page it sat above correctly said there was nothing waiting, and
+ * the same was true of both "unsaved changes" notices.  There was already a
+ * .modal-backdrop[hidden] rule further down, which is somebody meeting this
+ * once and fixing it where they found it.  This does it for everything. */
+[hidden] { display: none !important; }
+
+.notice {
+    padding: 10px 14px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border-strong);
+    background: var(--bg-soft);
+    margin-bottom: 14px;
+    font-size: 0.87rem;
+    display: flex;
+    gap: 10px;
+    align-items: flex-start;
+}
+.notice svg { width: 16px; height: 16px; flex: 0 0 16px; margin-top: 1px; }
+.notice.warn { background: var(--warn-bg); border-color: var(--warn); color: var(--warn); }
+.notice.bad  { background: var(--bad-bg);  border-color: var(--bad);  color: var(--bad); }
+.notice.ok   { background: var(--ok-bg);   border-color: var(--ok);   color: var(--ok); }
+.notice.info { background: var(--info-bg); border-color: var(--info); color: var(--info); }
+.notice strong { font-weight: 600; }
+
+/* ---------------------------------------------------------------- login page */
+.login-wrap {
+    min-height: 100vh;
+    display: flex;
+    /* Column so the trademark line sits under the box rather than beside it.
+       With the direction turned, align-items is now the horizontal centre and
+       justify-content the vertical one, which is why both are still here. */
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    background: var(--bg-soft);
+    padding: 20px;
+}
+.login-box {
+    width: 100%;
+    max-width: 380px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 28px;
+}
+.login-box .brand {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    font-weight: 600;
+    font-size: 1.05rem;
+    margin-bottom: 3px;
+}
+.login-box .brand svg { width: 22px; height: 22px; }
+.login-box .node { color: var(--text-faint); font-size: 0.8rem; margin-bottom: 22px; }
+.login-box .btn { width: 100%; justify-content: center; }
+.login-divider {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 18px 0;
+    color: var(--text-faint);
+    font-size: 0.78rem;
+}
+.login-divider::before, .login-divider::after {
+    content: "";
+    flex: 1;
+    height: 1px;
+    background: var(--border);
+}
+
+/* ------------------------------------------------------ trademark footer */
+/* Quiet on purpose.  It has to be legible and on every page, and it is not
+   something anybody came here to read. */
+.legal {
+    margin-top: 28px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+    color: var(--text-faint);
+    font-size: 0.75rem;
+    line-height: 1.5;
+    max-width: 70ch;
+}
+.login-wrap .legal {
+    border-top: none;
+    margin-top: 18px;
+    max-width: 380px;
+    text-align: center;
+}
+
+/* --------------------------------------------------------------- utilities */
+.muted { color: var(--text-soft); }
+.faint { color: var(--text-faint); }
+.small { font-size: 0.8rem; }
+.right { text-align: right; }
+.nowrap { white-space: nowrap; }
+.mt { margin-top: 14px; }
+.mb { margin-bottom: 14px; }
+.flex { display: flex; gap: 10px; align-items: center; }
+.flex-between { display: flex; gap: 10px; align-items: center; justify-content: space-between; }
+.wrap { flex-wrap: wrap; }
+.empty { padding: 30px 16px; text-align: center; color: var(--text-faint); }
+.empty p { margin: 6px 0 0; }
+
+.kv { display: grid; grid-template-columns: auto 1fr; gap: 5px 14px; font-size: 0.86rem; }
+.kv dt { color: var(--text-faint); }
+.kv dd { margin: 0; }
+
+/* ------------------------------------------------------------------ toasts */
+#toasts {
+    position: fixed;
+    bottom: 18px;
+    right: 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    z-index: 1000;
+    max-width: 420px;
+}
+.toast {
+    padding: 11px 15px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border-strong);
+    background: var(--bg);
+    box-shadow: 0 6px 20px rgba(0,0,0,0.2);
+    font-size: 0.86rem;
+}
+.toast.ok  { border-color: var(--ok);  background: var(--ok-bg);  color: var(--ok); }
+.toast.bad { border-color: var(--bad); background: var(--bad-bg); color: var(--bad); }
+
+/* ------------------------------------------------------------- narrow screens */
+@media (max-width: 820px) {
+    .sidebar {
+        position: fixed;
+        left: 0;
+        top: var(--topbar-height);
+        bottom: 0;
+        z-index: 100;
+        transform: translateX(-100%);
+        transition: transform 0.15s ease;
+    }
+    .sidebar.open { transform: translateX(0); }
+    .content { padding: 16px; }
+    .topbar .node-chip { display: none; }
+}
+@media (min-width: 821px) {
+    .menu-toggle { display: none; }
+}
+
+/* ------------------------------------------------------------------- tabs */
+/* Used on the site editor.  Plain buttons rather than links so the page does
+   not reload when you flip between them and lose what you were typing. */
+.tabs {
+    display: flex;
+    gap: 2px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 16px;
+}
+.tab {
+    padding: 8px 16px;
+    border: none;
+    background: none;
+    color: var(--text-soft);
+    font-family: inherit;
+    font-size: 0.88rem;
+    font-weight: 500;
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+}
+.tab:hover { color: var(--text); }
+.tab.active { color: var(--text); border-bottom-color: var(--text); font-weight: 600; }
+
+/* The country picker.
+ *
+ * Two hundred and fifty tick boxes in one column is a page nobody scrolls to
+ * the end of.  Columns are sized rather than counted, so it lands on three on a
+ * laptop and five on a wide screen without a breakpoint per width. */
+.geo-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  gap: 2px 18px;
+  /* Steady height while a search narrows it, so the buttons underneath stay
+     where they were and the page does not jump about as somebody types. */
+  min-height: 40vh;
+  align-content: start;
+  max-height: 60vh;
+  overflow-y: auto;
+  padding: 10px 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.geo-grid label {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 3px 2px;
+  font-size: 0.86rem;
+  cursor: pointer;
+}
+.geo-grid label:hover { background: var(--hover, rgba(0,0,0,0.03)); }
+.geo-grid input { margin: 0; }
+.geo-grid .code { color: var(--muted); font-size: 0.78rem; }
+.geo-grid label.blocked { color: var(--bad); }
+
+/* Stars on the feature comparison.
+ *
+ * A filled star and an empty one, rather than only drawing the filled ones,
+ * so three out of five reads as three out of five at a glance instead of
+ * needing to be counted.  The number is on the title and the aria-label as
+ * well, because colour and shape alone are no good to a screen reader and not
+ * much better to somebody who cannot tell the two greys apart. */
+.stars { white-space: nowrap; letter-spacing: 1px; }
+.stars .star { color: var(--line, #d0d0d0); }
+.stars .star.on { color: var(--warn, #d9a406); }
+
+/* The comparison table.  The reasoning column is the widest on purpose: it is
+ * the part worth reading, and a table of bare scores would be an assertion.
+ * With four products the score columns are narrow and the last column is the
+ * one that has to breathe, so it is targeted from the end rather than by
+ * counting from the front. */
+table.cmp td { vertical-align: top; }
+table.cmp td:last-child { min-width: 24rem; }
+table.cmp th.us, table.cmp td.us { background: var(--row-alt, #fafafa); }
+
+/* The best score in a row gets a quiet backing rather than a badge.  Four
+ * badges per row would be noise, and the point is only to let the eye find
+ * the winner without comparing five stars against five stars four times. */
+table.cmp td.lead { background: rgba(217, 164, 6, .10); }
+
+/* The second paragraph in the reasoning column, covering the two appliances.
+ * Ruled off from the first so it is clear which argument is about which
+ * products. */
+.cmp-others {
+  margin-top: .55rem; padding-top: .55rem;
+  border-top: 1px dashed var(--line, #d0d0d0);
+}
+
+/* Star totals and pricing, both a row of cards that wrap on a narrow screen.
+ * Our own card is marked so nobody has to work out which one we are, and it
+ * sits wherever the number puts it rather than being pinned to the front. */
+.score-grid, .price-grid {
+  display: grid; gap: .9rem; margin-bottom: 1rem;
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+}
+.score-card, .price-card {
+  border: 1px solid var(--line, #d0d0d0); border-radius: 6px; padding: .8rem;
+}
+.score-card.us, .price-card.us { border-color: var(--ok, #2e7d32); border-width: 2px; }
+.score-rank { font-size: .8rem; color: var(--muted, #666); }
+.score-name, .price-name { font-weight: 600; margin-bottom: .3rem; }
+.score-total { font-size: 1.8rem; font-weight: 700; line-height: 1.1; }
+.score-of { font-size: .9rem; font-weight: 400; color: var(--muted, #666); }
+.score-bar {
+  height: 6px; border-radius: 3px; margin: .45rem 0 .5rem;
+  background: var(--line, #d0d0d0); overflow: hidden;
+}
+.score-bar span { display: block; height: 100%; background: var(--warn, #d9a406); }
+.price-headline { font-size: 1.5rem; font-weight: 700; line-height: 1.2; }
+.price-unit { margin-bottom: .5rem; }
+
+/* One row in the WAF hits list.  The tick box and the detail side by side, so
+ * the rule, the path and the addresses that produced it are all readable
+ * without opening anything: deciding whether a hit is a false positive is
+ * exactly the question of who sent it. */
+label.wafhit {
+    display: flex; gap: 10px; align-items: flex-start;
+    padding: 8px 10px; border-bottom: 1px solid var(--line);
+    cursor: pointer;
+}
+label.wafhit:hover { background: var(--hover, rgba(0,0,0,0.03)); }
+label.wafhit input { margin-top: 3px; }
+label.wafhit input:disabled { cursor: not-allowed; }
+
+/* The band drawn while dragging a time range on a chart.
+ *
+ * Positioned against the document rather than the chart, because the charts are
+ * replaced wholesale on every refresh and anything parented to one would go
+ * with them mid drag. */
+#zoom-marker {
+    position: absolute;
+    display: none;
+    pointer-events: none;
+    background: var(--accent, #3b82f6);
+    opacity: 0.18;
+    border-left: 1px solid var(--accent, #3b82f6);
+    border-right: 1px solid var(--accent, #3b82f6);
+    z-index: 40;
+}
+
+/* Three fields side by side, wrapping on a narrow screen.  Used for the three
+ * OIDC group names, which only make sense read together: they are one decision
+ * about who gets which role, not three unrelated settings. */
+.grid-3 {
+  display: grid; gap: .8rem;
+  grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+}
+
+/* The bar that says this page is older than the server.
+ *
+ * Pinned to the bottom rather than the top, because the top is where the
+ * "saved but not applied" banner already lives and two stacked warnings push
+ * the actual page off the screen.  It stays until somebody reloads: a toast
+ * would fade, and the whole problem is that people carry on for ten minutes
+ * wondering why a feature is missing. */
+.stale-bar {
+    position: fixed;
+    left: 0; right: 0; bottom: 0;
+    z-index: 60;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    padding: 10px 16px;
+    background: var(--warn-bg);
+    color: var(--text);
+    border-top: 2px solid var(--warn);
+    font-size: 0.86rem;
+    box-shadow: 0 -2px 10px rgba(0, 0, 0, .12);
+}
+.stale-bar button { flex: 0 0 auto; }

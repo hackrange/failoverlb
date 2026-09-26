@@ -1,0 +1,82 @@
+# Failover LB, the python packages we need.
+#
+# Every version is pinned on purpose.  This runs on production load balancers,
+# so a surprise version bump from a rebuild six months from now is not a thing
+# we want to chase down at 3am.  Bump these when you mean to, then rebuild and
+# run the smoke tests.
+#
+# Pinning without a review date is how a fleet ends up years behind on the
+# libraries that parse untrusted input, so the date is here and it is part of
+# the deal:
+#
+#     Last reviewed: 16 August 2026, with trivy against a live CVE feed
+#                    rather than by eye.  It found twelve HIGH advisories in
+#                    what was pinned here, which a reading of the file could
+#                    never have found, and two were on the authentication
+#                    path: a PyJWT token forgery bypass and a path traversal
+#                    in python-multipart, which parses every form this GUI
+#                    posts.  Those two were bumped immediately; the rest
+#                    (starlette, fastapi, cryptography, SQLAlchemy) are a
+#                    major version move and are being done as their own piece
+#                    of work with its own testing.
+#     Review again:  quarterly, and immediately for an advisory in any of the
+#                    six below that touch untrusted input
+#
+# Those six, and why they are the ones to watch rather than the whole list:
+#
+#     starlette      every request goes through it
+#     fastapi        the same, one layer up
+#     Jinja2         renders every page, and the nginx config
+#     PyJWT          parses tokens an identity provider sends us
+#     cryptography   the cluster CA and every peer certificate
+#     SQLAlchemy     every query
+#
+# The bill of materials work in the plan will list these versions anyway, so
+# that is the natural place to hang the check.
+
+# Web framework and the server that runs it
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+starlette==0.41.3
+python-multipart==0.0.30      # 0.0.20 had a path traversal arbitrary file write
+itsdangerous==2.2.0
+
+# Templates.  Used for both the web pages and the nginx config we write out.
+Jinja2==3.1.5
+MarkupSafe==3.0.2
+
+# Database
+SQLAlchemy==2.0.36
+alembic==1.14.0
+
+# Settings and input checking
+pydantic==2.10.4
+pydantic-settings==2.7.0
+
+# Login stuff
+argon2-cffi==23.1.0          # password hashing with argon2id
+pyotp==2.9.0                 # the 6 digit codes for local break glass accounts
+PyJWT[crypto]==2.13.0        # checks the id_token that comes back from OIDC
+qrcode[pil]==8.0             # we draw the TOTP QR code ourselves, no outside CDN
+
+# Certificates.  The cluster CA, the peer certs, and reading cert files.
+cryptography==44.0.0
+
+# Talking to peers, running health checks, and finding our public IP
+httpx[http2]==0.28.1
+dnspython==2.7.0
+
+# Background jobs: health checks, renewals, heartbeats
+APScheduler==3.11.0
+
+# Metrics for Prometheus
+prometheus-client==0.21.1
+
+# Backups.  A zip that any tool can open, encrypted with AES-256.
+#
+# Not the zip format's own encryption, which is ZipCrypto and is broken by a
+# known plaintext attack.  A backup here is full of PEM files, which is more
+# known plaintext than anybody needs.  The standard library can read an
+# encrypted zip and cannot write one, hence a package.
+pyzipper==0.3.6
+pycryptodomex==3.21.0        # the AES underneath pyzipper, pinned with it

@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}Recovery codes &middot; Failover LB{% endblock %}
+
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <h1>Your new recovery codes</h1>
+    <div class="sub">The old set stopped working the moment these were made.</div>
+  </div>
+</div>
+
+<div class="card" style="max-width:520px">
+  <div class="card-body">
+
+    <pre>{% for code in codes %}{{ code }}
+{% endfor %}</pre>
+
+    <div class="notice warn">
+      <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.5 15 14H1L8 1.5zm0 4a.7.7 0 0 0-.7.8l.25 3.2a.45.45 0 0 0 .9 0l.25-3.2A.7.7 0 0 0 8 5.5zm0 5.4a.8.8 0 1 0 0 1.6.8.8 0 0 0 0-1.6z"/></svg>
+      <div>
+        <strong>Shown once.</strong>  Copy them now.  We only keep hashes, so
+        there is no way to show them to you again later.
+      </div>
+    </div>
+
+    <div class="help-section mt">
+      <h4>What these are for</h4>
+      <p class="small muted">
+        Each one works once, instead of a code from your app.  They are how you
+        get in when your phone is lost, broken, flat, or in another building.
+
+        Keep them somewhere that is not the phone.  A note in your password
+        manager, or printed and put wherever your team keeps that sort of thing.
+        Storing them on the phone that generates the codes defeats the point.
+      </p>
+    </div>
+
+    <a href="{{ base }}/account" class="btn primary mt">Done, I have saved them</a>
+
+  </div>
+</div>
+
+{% endblock %}

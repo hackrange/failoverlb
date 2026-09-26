@@ -1,0 +1,336 @@
+{% extends "base.html" %}
+{% block title %}Feature Comparison &middot; Failover LB{% endblock %}
+
+{% macro stars(n) -%}
+  <span class="stars" title="{{ n }} out of 5" aria-label="{{ n }} out of 5">
+    {%- for i in range(1, 6) -%}
+      <span class="star {{ 'on' if i <= n }}" aria-hidden="true">&#9733;</span>
+    {%- endfor -%}
+  </span>
+{%- endmacro %}
+
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <h1>Feature comparison</h1>
+    <div class="sub">
+      Failover LB against NGINX&reg; Plus, Kemp LoadMaster and HAProxy ALOHA,
+      capability by capability, including what the paid products do not do.
+    </div>
+  </div>
+</div>
+
+{#
+  The warning goes first and is not softened.  We are rating our own product
+  against three other people's, and a comparison table that does not say so is
+  marketing wearing a lab coat.
+#}
+<div class="notice warn">
+  <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.5 15 14H1L8 1.5zm0 4a.7.7 0 0 0-.7.8l.25 3.2a.45.45 0 0 0 .9 0l.25-3.2A.7.7 0 0 0 8 5.5zm0 5.4a.8.8 0 1 0 0 1.6.8.8 0 0 0 0-1.6z"/></svg>
+  <div>
+    <strong>We are scoring ourselves against three competitors.</strong>  Treat
+    every number here as our opinion, not a measurement.  What we can offer is
+    the reasoning: each row says why it scored what it did, so you can disagree
+    with the argument rather than the star.  Where another product wins, the
+    row says so plainly.  {{ totals.behind }} of {{ totals.total }} rows go
+    that way, and we do not come first on the totals below.
+  </div>
+</div>
+
+{#
+  The totals were asked for, so they are here, sorted honestly.  The paragraph
+  underneath is not an excuse for the ranking; it is the same caveat we would
+  print if we were top.
+#}
+<div class="card">
+  <div class="card-head">
+    <h2>Star totals</h2>
+    <span class="small faint">{{ totals.total }} rows, {{ scores[0].ceiling }} stars available</span>
+  </div>
+  <div class="card-body">
+    <div class="score-grid">
+      {% for p in scores %}
+        <div class="score-card {{ 'us' if p.us }}">
+          <div class="score-rank">#{{ p.rank }}</div>
+          <div class="score-name">{{ p.label }}{% if p.us %} <span class="badge ok">this product</span>{% endif %}</div>
+          <div class="score-total">{{ p.total }}<span class="score-of"> / {{ p.ceiling }}</span></div>
+          <div class="score-bar"><span style="width:{{ (100 * p.total / p.ceiling)|round(1) }}%"></span></div>
+          <div class="small muted">{{ p.short }}</div>
+        </div>
+      {% endfor %}
+    </div>
+    <p class="small muted">
+      Adding up stars is the crudest reading of this table there is.  It says a
+      request queue and a support contract weigh the same, and they do not.  It
+      says packaged video streaming is worth exactly one row, when for the
+      people who need it that row decides the whole question on its own.  The
+      total is published because it was asked for, in the order the numbers
+      actually fall.  A comparison that only prints its totals when they
+      flatter the author is not a comparison.
+    </p>
+    <p class="small muted">
+      One thing worth knowing about how this total can be moved.  Backup and
+      restore used to be a single row and is now three, because taking a copy,
+      what is in the copy and what you can do with it later are genuinely
+      different jobs.  That change alone moved us up seven stars and moved
+      Kemp up six.  <strong>Splitting a category is the oldest way to tilt a
+      table like this</strong>, and the person doing the splitting was us, so
+      it is said here rather than left for somebody to notice.  It could as
+      easily have been six rows.  It is three because backing up should not
+      outweigh load balancing on a page about load balancers.
+    </p>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head"><h2>How to read the stars</h2></div>
+  <div class="card-body">
+    <dl class="kv">
+      <dt>{{ stars(0) }}</dt><dd>Not offered at all.</dd>
+      <dt>{{ stars(1) }}</dt><dd>Possible, but you are building it yourself.</dd>
+      <dt>{{ stars(2) }}</dt><dd>There, and you will feel the gap.</dd>
+      <dt>{{ stars(3) }}</dt><dd>Does the job.</dd>
+      <dt>{{ stars(4) }}</dt><dd>Does the job well.</dd>
+      <dt>{{ stars(5) }}</dt><dd>As good as this gets.</dd>
+    </dl>
+    <p class="small muted">
+      Rows where everybody scores five are usually work the free engine does,
+      and saying so is more useful than leaving them out to flatter the table.
+      Instance Manager, NGINX One, App Protect, LoadMaster 360 and HAProxy
+      Fusion are separate products with separate prices, so they are named in
+      the notes rather than counted as part of the product they sit beside.
+      Against the whole field the tally is
+      <strong>{{ totals.ahead }} ahead, {{ totals.behind }} behind,
+      {{ totals.level }} level</strong>, where ahead means we beat all three
+      and behind means at least one of them beats us.
+    </p>
+    <p class="small muted">
+      The two appliance columns were scored on {{ totals.pulled }} from vendor
+      documentation, release notes and datasheets.  Both products move, so
+      those scores are a reading of what was published that day and nothing
+      stronger.  Where we could not confirm something either way, the score is
+      one star and the note says we could not confirm it.  A one that admits we
+      do not know is more use than a zero that pretends we do.
+    </p>
+  </div>
+</div>
+
+{% for name, rows in groups %}
+<div class="card">
+  <div class="card-head"><h2>{{ name }}</h2></div>
+  <div class="card-body no-pad">
+    <div class="table-scroll">
+      <table class="cmp">
+        <thead>
+          <tr>
+            <th>Capability</th>
+            {% for p in scores %}
+              <th class="nowrap {{ 'us' if p.us }}">
+                {{ p.label }}
+                <span class="small faint">{{ p.total }} stars</span>
+              </th>
+            {% endfor %}
+            <th>Why</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for c in rows %}
+          <tr id="cmp-{{ c.key }}">
+            <td><strong>{{ c.label }}</strong></td>
+            {% for p in scores %}
+              <td class="nowrap {{ 'lead' if c[p.key] == c.row_best and c.row_best > 0 }}">
+                {{ stars(c[p.key]) }}
+                {% if p.us %}
+                  {% if c.lb > c.rivals_best %}<span class="badge ok">ahead</span>
+                  {% elif c.lb < c.rivals_best %}<span class="badge neutral">behind</span>{% endif %}
+                {% endif %}
+              </td>
+            {% endfor %}
+            <td class="small muted">
+              {{ c.note }}
+              <div class="cmp-others">{{ c.others }}</div>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{% endfor %}
+
+<div class="card">
+  <div class="card-head">
+    <h2>Only here</h2>
+    <span class="small faint">{{ only_here|length }} capabilities</span>
+  </div>
+  <div class="card-body">
+    <p style="margin-top:0" class="small muted">
+      Rows where all three of the others score nothing at all.  Kept to those,
+      rather than everywhere we happen to score higher: "we do it better" is an
+      argument, "nobody else has it" is a fact, and only the second belongs on
+      a list with this title.
+    </p>
+    <p class="small muted">
+      This list used to be much longer, because it used to be measured against
+      NGINX&reg; Plus alone.  Adding two appliances cut it to
+      {{ only_here|length }}.  Several things that read as ours alone turned
+      out to be what an appliance has done for years: fleet backup and restore,
+      admin accounts with an audit trail, DNS failover between sites.  That is
+      what widening a comparison is supposed to do to it.
+    </p>
+    <ul class="small">
+      {% for c in only_here %}
+        <li><a href="#cmp-{{ c.key }}"><strong>{{ c.label }}</strong></a>
+            {{ stars(c.lb) }} - {{ c.note }}</li>
+      {% endfor %}
+    </ul>
+  </div>
+</div>
+
+{#
+  Pricing carries a date because it has to.  Two of the four vendors publish
+  nothing, the other two publish ranges, and a cost table with no date on it
+  looks current forever.
+#}
+<div class="card">
+  <div class="card-head">
+    <h2>What each one costs</h2>
+    <span class="small faint">pulled {{ totals.pulled }}</span>
+  </div>
+  <div class="card-body">
+    <div class="notice warn">
+      <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.5 15 14H1L8 1.5zm0 4a.7.7 0 0 0-.7.8l.25 3.2a.45.45 0 0 0 .9 0l.25-3.2A.7.7 0 0 0 8 5.5zm0 5.4a.8.8 0 1 0 0 1.6.8.8 0 0 0 0-1.6z"/></svg>
+      <div>
+        <strong>These are not quotes.</strong>  Every vendor on this page sells
+        through sales.  None of the three publish a rate card you can just
+        read, so the numbers below come from reseller listings and price
+        trackers, gathered on <strong>{{ totals.pulled }}</strong>.  Treat them
+        as the right order of magnitude and nothing finer.  What you actually
+        pay depends on throughput, term, support tier and how well you
+        negotiate, and it will not be this.
+      </div>
+    </div>
+    <div class="price-grid">
+      {% for p in pricing %}
+        <div class="price-card {{ 'us' if p.key == 'lb' }}">
+          <div class="price-name">{{ p.label }}
+            <span class="small faint">{{ p.vendor }}</span></div>
+          <div class="price-headline">{{ p.headline }}</div>
+          <div class="small muted price-unit">{{ p.unit }}</div>
+          <div class="small"><strong>How it is sold.</strong> {{ p.model }}</div>
+          <div class="small muted mt">{{ p.detail }}</div>
+          <div class="small faint mt"><strong>Where this came from:</strong>
+            {{ p.sources }}</div>
+        </div>
+      {% endfor %}
+    </div>
+    <p class="small muted">
+      The free column needs the same honesty as the star totals.  Zero is the
+      licence, not the cost.  Somebody builds nginx on each node, somebody
+      watches the upgrades, and when it breaks at three in the morning there is
+      no number to ring.  Set that against a support contract and the gap
+      closes a long way, which is exactly what the support row at the top of
+      the table is saying.
+    </p>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head"><h2>The paid settings, and what we do instead</h2></div>
+  <div class="card-body">
+    <p style="margin-top:0" class="small muted">
+      The detail behind the load balancing rows above.  These boxes are not
+      licensed, so none of these are offered in the forms.  Each one is
+      something somebody will go looking for in the nginx docs, and finding out
+      an hour later that it needs a subscription is a bad afternoon.
+    </p>
+  </div>
+</div>
+
+{% for f in features %}
+  <div class="card">
+    <div class="card-head">
+      <h2>{{ f.label }}</h2>
+      <span class="badge neutral">paid only</span>
+    </div>
+    <div class="card-body">
+      <p style="margin-top:0">{{ f.help.summary }}</p>
+
+      {% if f.help.detail %}
+        <div class="small muted" style="white-space:pre-wrap">{{ f.help.detail }}</div>
+      {% endif %}
+
+      {% if f.oss_alternative %}
+        <div class="notice ok mt">
+          <svg viewBox="0 0 16 16" fill="currentColor"><path d="M13.5 4.5 6 12 2.5 8.5l1-1L6 10l6.5-6.5 1 1z"/></svg>
+          <div><strong>What we do instead:</strong> {{ f.oss_alternative }}</div>
+        </div>
+      {% endif %}
+
+      {% if f.help.example_config %}
+        <pre>{{ f.help.example_config }}</pre>
+      {% endif %}
+    </div>
+  </div>
+{% endfor %}
+
+<div class="card">
+  <div class="card-head">
+    <h2>What we could not rebuild</h2>
+  </div>
+  <div class="card-body">
+    <p style="margin-top:0" class="muted">
+      Being straight about the gaps matters more than a tidy list.
+    </p>
+    <ul class="small">
+      <li><strong>HLS, DASH and f4f streaming.</strong> These are compiled into
+          the nginx binary and there is no way to add them from out here.  If
+          you need packaged video streaming that is a real reason to buy the
+          paid version.</li>
+      <li><strong>NTLM connection pinning.</strong> It keeps a connection pinned
+          through a Windows authentication handshake, and that cannot be faked
+          from outside the process.  If you proxy to something needing NTLM,
+          this one will actually bite you.</li>
+      <li><strong>MQTT preread and filter.</strong> Stream level MQTT parsing.
+          No way around it.</li>
+      <li><strong>The App Protect WAF.</strong> A separate paid product, and
+          this line used to say we were not going to pretend a few regular
+          expressions were a web application firewall.  That is no longer where
+          we are: the installer builds ModSecurity, the OWASP rules are
+          installed and kept current across the fleet, and a site can be put in
+          front of them from its own tab.  App Protect is still the better
+          product.  The part that makes a WAF survivable, learning what your own
+          application does and turning that into exclusions, is now built.  See the WAF row above.</li>
+      <li><strong>In flight request counts on the dashboard.</strong> Our
+          numbers come from the access log, and a request that has not finished
+          has not been logged yet.</li>
+    </ul>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head">
+    <h2>A note on reloads</h2>
+  </div>
+  <div class="card-body">
+    <p style="margin-top:0" class="small muted">
+      Most of what is above works by rewriting config and reloading, so it is
+      worth being comfortable with what that does.
+
+      On reload, the nginx master reads the new config and starts new workers
+      with it.  The old workers stop taking new connections but keep serving the
+      requests they already have until those finish, then they exit.  No
+      connection gets cut and nobody sees an error.
+
+      Two things to know.  A reload costs a little CPU and briefly runs two sets
+      of workers, so memory goes up for a moment.  And if you have very long
+      lived connections like WebSockets, the old workers stick around until
+      those close.  The manager already debounces reloads, so twenty backends
+      flapping at once turns into one reload rather than twenty.
+    </p>
+  </div>
+</div>
+
+{% endblock %}

@@ -1,0 +1,296 @@
+{% extends "base.html" %}
+{% block title %}Backup &middot; Failover LB{% endblock %}
+
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <h1>Backup</h1>
+    <div class="sub">
+      Take the whole configuration off this fleet as one encrypted file, and
+      put it back on this fleet or on a new one.
+    </div>
+  </div>
+</div>
+
+<div class="notice info">
+  <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 3a.9.9 0 1 1 0 1.8A.9.9 0 0 1 8 4zm1.2 8H6.8v-.9h.7V7.9h-.7V7h2.1v4.1h.3V12z"/></svg>
+  <div>
+    A backup holds every private key this fleet has, which is enough on its own
+    to serve every site it serves.  It is encrypted with AES-256 and the
+    password is your own, so keep it somewhere you would keep the keys.
+    <br><br>
+    What travels is the configuration: sites, pools, zones, TCP and UDP, error
+    pages, certificates, paid authorities, settings and accounts.  What stays
+    behind is anything about these particular machines, because that belongs to
+    them and not to the configuration.
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head"><h2>Take a backup</h2></div>
+  <div class="card-body">
+    <div class="field" style="max-width:320px">
+      <label for="e-pass">Your password</label>
+      <input type="password" id="e-pass" autocomplete="current-password">
+      <div class="hint">This encrypts the file, and it is the password you
+        will need to open it again.  Only a hash of it is kept here, so it
+        cannot be filled in for you.</div>
+    </div>
+    <div class="mt"><button class="btn primary" id="e-go">Download a backup</button></div>
+    <div id="e-out" class="mt"></div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head"><h2>Restore a backup</h2></div>
+  <div class="card-body">
+    <div class="notice warn">
+      <div>Restoring replaces the configuration on <strong>every node in this
+      fleet</strong>, and pushes the result out to all of them.  Take a backup
+      of what is here first if you might want it back.</div>
+    </div>
+
+    <div class="field" style="max-width:420px">
+      <label for="i-file">The backup file</label>
+      <input type="file" id="i-file" accept=".zip">
+    </div>
+    <div class="field" style="max-width:320px">
+      <label for="i-pass">The password it was made with</label>
+      <input type="password" id="i-pass" autocomplete="off">
+    </div>
+    <div class="mt"><button class="btn" id="i-look">See what is in it</button></div>
+    <div id="i-out" class="mt"></div>
+  </div>
+</div>
+
+<style>
+  .kv { display: flex; gap: .5rem; flex-wrap: wrap; margin-top: .5rem; }
+  .kv span { background: var(--code-bg, #f6f7f9); border-radius: 3px;
+             padding: .15rem .5rem; font-size: .8rem; }
+  .addr-row { margin-top: .3rem; font-size: .85rem; }
+</style>
+
+<script nonce="{{ csp_nonce }}">
+document.addEventListener("DOMContentLoaded", function () {
+  function el(id) { return document.getElementById(id); }
+  function esc(s) { return NFM.escapeHtml(s == null ? "" : String(s)); }
+
+  // These three calls use fetch rather than NFM.api, because one sends a file
+  // and another gets one back, and NFM.api speaks json both ways.  What that
+  // skips is the CSRF header NFM.api adds for you, and without it the change
+  // making calls are rejected before they reach the route.  The rejection is
+  // an HTML error page, so the only symptom was the json parser complaining
+  // about a doctype, which says nothing about what actually happened.
+  function csrfToken() {
+    const match = document.cookie.match(/(?:^|;\s*)nfm_csrf=([^;]+)/);
+    return match ? decodeURIComponent(match[1]) : "";
+  }
+
+  // Anything that is not json here is a page, and a page means the request
+  // never got where it was going.  Saying so beats handing back a parser error
+  // about a character somebody never typed.
+  async function asJson(res) {
+    const text = await res.text();
+    try {
+      return JSON.parse(text);
+    } catch (e) {
+      if (res.status === 403) {
+        throw new Error("that was refused.  Reload the page and try again, " +
+                        "your session may have expired.");
+      }
+      throw new Error("the server answered with a page rather than an answer (" +
+                      res.status + " " + res.statusText + ")");
+    }
+  }
+
+  function counts(obj) {
+    return '<div class="kv">' + Object.keys(obj || {}).sort().map(function (k) {
+      return "<span><strong>" + esc(obj[k]) + "</strong> " + esc(k) + "</span>";
+    }).join("") + "</div>";
+  }
+
+  // ---- taking one --------------------------------------------------------
+  el("e-go").addEventListener("click", async function () {
+    const password = el("e-pass").value;
+    if (!password) { NFM.toast("Your password encrypts the file", "bad"); return; }
+
+    el("e-go").disabled = true;
+    el("e-out").innerHTML = '<div class="faint">Collecting...</div>';
+    try {
+      // Not NFM.api, because the answer is a file rather than json, and the
+      // download has to be handed to the browser rather than parsed.
+      const res = await fetch("{{ base }}/api/backup/export", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-CSRF-Token": csrfToken()
+        },
+        body: JSON.stringify({ password: password })
+      });
+      if (!res.ok) {
+        const err = await asJson(res);
+        throw new Error(err.detail || "could not take a backup");
+      }
+
+      const blob = await res.blob();
+      const name = (res.headers.get("Content-Disposition") || "")
+        .replace(/.*filename="?([^"]+)"?.*/, "$1") || "backup.zip";
+
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = name;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+
+      el("e-out").innerHTML = '<div class="notice ok"><div>Downloaded <strong>' +
+        esc(name) + "</strong>.  Keep it where you would keep a private key, " +
+        "and remember it opens with the password you just typed.</div></div>";
+      el("e-pass").value = "";
+    } catch (err) {
+      el("e-out").innerHTML = "";
+      NFM.toast(err.message, "bad");
+    }
+    el("e-go").disabled = false;
+  });
+
+  // ---- looking at one, then putting it back ------------------------------
+  function body() {
+    const f = el("i-file").files[0];
+    if (!f) { NFM.toast("Choose the backup file", "bad"); return null; }
+    if (!el("i-pass").value) { NFM.toast("Give the password it was made with", "bad"); return null; }
+    const fd = new FormData();
+    fd.append("file", f);
+    fd.append("password", el("i-pass").value);
+    return fd;
+  }
+
+  el("i-look").addEventListener("click", async function () {
+    const fd = body();
+    if (!fd) { return; }
+    el("i-look").disabled = true;
+    el("i-out").innerHTML = '<div class="faint">Opening...</div>';
+
+    let info;
+    try {
+      const res = await fetch("{{ base }}/api/backup/inspect", {
+        method: "POST", body: fd, headers: { "X-CSRF-Token": csrfToken() }
+      });
+      info = await asJson(res);
+      if (!res.ok) { throw new Error(info.detail || "could not open it"); }
+    } catch (err) {
+      el("i-out").innerHTML = "";
+      NFM.toast(err.message, "bad");
+      el("i-look").disabled = false;
+      return;
+    }
+
+    let html = '<div class="notice info"><div>Taken <strong>' +
+      esc(info.taken_at || "at an unknown time") + "</strong>" +
+      (info.taken_from ? " on <strong>" + esc(info.taken_from) + "</strong>" : "") +
+      "</div></div>" + counts(info.counts);
+
+    // The addresses are the part worth reading before pressing the button.
+    if ((info.nodes_seen || []).length) {
+      html += '<div class="mt"><strong class="small">The fleet it came from:' +
+        "</strong>";
+      info.nodes_seen.forEach(function (n) {
+        html += '<div class="addr-row faint"><span class="mono">' + esc(n.name) +
+          "</span> " + esc(n.public_ip || n.address || "no address recorded") +
+          "</div>";
+      });
+      html += '<div class="hint">Any DNS answer tied to one of these names is ' +
+        "repointed at the node of that name here.  An answer whose node does " +
+        "not exist here is left alone and reported, because guessing which " +
+        "machine replaces which is not something to do quietly with a DNS " +
+        "record.</div></div>";
+    }
+
+    if ((info.certificates_without_files || []).length) {
+      html += '<div class="notice warn mt"><div>These certificates had no ' +
+        "files on the node that took the backup, so they are configuration " +
+        "only and will need issuing again: <span class='mono'>" +
+        esc(info.certificates_without_files.join(", ")) + "</span></div></div>";
+    }
+
+    html += '<div class="field mt" style="max-width:320px">' +
+      '<label for="i-confirm">Type <span class="mono">restore</span> to confirm</label>' +
+      '<input type="text" id="i-confirm" autocomplete="off"></div>' +
+      '<div class="mt"><button class="btn danger" id="i-go">' +
+      "Restore this onto the whole fleet</button></div>";
+
+    el("i-out").innerHTML = html;
+    el("i-look").disabled = false;
+
+    el("i-go").addEventListener("click", async function () {
+      const fd2 = body();
+      if (!fd2) { return; }
+      fd2.append("confirm", el("i-confirm").value);
+
+      el("i-go").disabled = true;
+      const out = el("i-out");
+      const note = document.createElement("div");
+      note.className = "mt faint";
+      note.textContent = "Restoring, and pushing it to every node...";
+      out.appendChild(note);
+
+      let result;
+      try {
+        const res = await fetch("{{ base }}/api/backup/import", {
+          method: "POST", body: fd2, headers: { "X-CSRF-Token": csrfToken() }
+        });
+        result = await asJson(res);
+        if (!res.ok) { throw new Error(result.detail || "the restore failed"); }
+      } catch (err) {
+        note.remove();
+        NFM.toast(err.message, "bad");
+        el("i-go").disabled = false;
+        return;
+      }
+
+      note.remove();
+      let done = '<div class="notice ok mt"><div>Restored.</div></div>';
+
+      const dns = result.dns || {};
+      if ((dns.changed || []).length) {
+        done += '<div class="mt"><strong class="small">DNS answers repointed:' +
+          "</strong>";
+        dns.changed.forEach(function (c) {
+          done += '<div class="addr-row"><span class="mono">' + esc(c.node) +
+            '</span> <span class="faint">' + esc(c.was) + " &rarr; </span>" +
+            "<strong>" + esc(c.now) + "</strong></div>";
+        });
+        done += "</div>";
+      }
+      if ((dns.unmatched || []).length) {
+        done += '<div class="notice warn mt"><div>These DNS answers were left ' +
+          "as they were, and still name the old fleet:<br>";
+        dns.unmatched.forEach(function (u) {
+          done += '<span class="mono">' + esc(u.answer) + "</span> (" +
+            esc(u.why) + ")<br>";
+        });
+        done += "</div></div>";
+      }
+      if ((result.certificates || {}).failed && result.certificates.failed.length) {
+        done += '<div class="notice warn mt"><div>Some certificate files did ' +
+          "not land: " + esc(JSON.stringify(result.certificates.failed)) +
+          "</div></div>";
+      }
+      const applied = result.applied || {};
+      done += '<div class="notice ' + (applied.ok === false ? "warn" : "ok") +
+        ' mt"><div>Pushing the config to the fleet: ' +
+        esc(applied.ok === false ? (applied.error || "failed") : "done") +
+        "</div></div>";
+      done += '<div class="hint mt">Sign in again if your own account came ' +
+        "from the backup, since the accounts here were replaced too.</div>";
+
+      out.insertAdjacentHTML("beforeend", done);
+    });
+  });
+});
+</script>
+
+{% endblock %}

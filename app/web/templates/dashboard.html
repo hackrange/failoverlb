@@ -1,0 +1,341 @@
+{% extends "base.html" %}
+{% block title %}Dashboard &middot; Failover LB{% endblock %}
+
+{% block scripts %}
+<script nonce="{{ csp_nonce }}">
+// Waits for app.js, which the layout loads after this block.
+document.addEventListener("DOMContentLoaded", function () {
+  function cell(v) {
+    // A rate we do not have yet is different from a rate of zero, and showing
+    // 0 for "no second sample" makes a busy box look idle.
+    return v === null || v === undefined ? '<span class="faint">-</span>' : v;
+  }
+
+  async function load() {
+    let data;
+    try {
+      data = await NFM.api("/metrics");
+    } catch (err) {
+      const c = document.createElement("td");
+      c.colSpan = 8;
+      c.className = "faint";
+      c.textContent = "Could not load: " + (err && err.message ? err.message : err);
+      const r = document.createElement("tr");
+      r.appendChild(c);
+      document.getElementById("metrics-rows").replaceChildren(r);
+      return;
+    }
+
+    const names = Object.keys(data.nodes || {}).sort();
+    if (!names.length) {
+      document.getElementById("metrics-rows").innerHTML =
+        '<tr><td colspan="8" class="faint">Nothing collected yet.</td></tr>';
+      return;
+    }
+
+    let newest = 0;
+    document.getElementById("metrics-rows").innerHTML = names.map(function (n) {
+      const d = data.nodes[n] || {};
+      const l = d.latest || {};
+      const r = d.rates || {};
+      if (l.at && l.at > newest) { newest = l.at; }
+      if (d.error) {
+        return "<tr><td><strong>" + NFM.escapeHtml(n) + "</strong></td>" +
+               '<td colspan="7" class="small" style="color:var(--warn)">' +
+               NFM.escapeHtml(d.error) + "</td></tr>";
+      }
+      return "<tr><td><strong>" + NFM.escapeHtml(n) + "</strong></td>" +
+        '<td class="right mono">' + cell(l.active_connections) + "</td>" +
+        '<td class="right mono">' + cell(r.requests_per_sec) + "</td>" +
+        '<td class="right mono">' + cell(r.accepts_per_sec) + "</td>" +
+        '<td class="right mono">' + cell(r.dropped_per_sec) + "</td>" +
+        '<td class="right mono">' + cell(l.reading) + "</td>" +
+        '<td class="right mono">' + cell(l.writing) + "</td>" +
+        '<td class="right mono">' + cell(l.waiting) + "</td></tr>";
+    }).join("");
+
+    const age = document.getElementById("metrics-age");
+    if (newest) {
+      const secs = Math.max(0, Math.round(Date.now() / 1000 - newest));
+      age.textContent = secs < 60 ? secs + "s ago"
+                                  : Math.round(secs / 60) + "m ago";
+    }
+  }
+
+  load();
+  setInterval(load, 15000);
+});
+</script>
+
+{% endblock %}
+
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <h1>Dashboard</h1>
+    <div class="sub">
+      {{ node_name }} &middot;
+      {% if me and me.role.value == 'active' %}
+        taking changes
+      {% else %}
+        standby, changes are made on the active node
+      {% endif %}
+      &middot; config version {{ latest_version }}
+    </div>
+  </div>
+  <div class="page-actions">
+    {% if can('apply_config') %}
+      <button class="btn primary" id="apply-config">Apply config</button>
+    {% endif %}
+  </div>
+</div>
+
+{# The things that need attention go at the very top, before the numbers.
+   A pool with nothing healthy in it is the only thing that matters when it is
+   happening, and it should not be three scrolls down. #}
+
+{% if not allowlist_set %}
+  <div class="notice warn">
+    <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.5 15 14H1L8 1.5zm0 4a.7.7 0 0 0-.7.8l.25 3.2a.45.45 0 0 0 .9 0l.25-3.2A.7.7 0 0 0 8 5.5zm0 5.4a.8.8 0 1 0 0 1.6.8.8 0 0 0 0-1.6z"/></svg>
+    <div>
+      <strong>No management allow list is set.</strong>
+      Anybody who can reach port 7443 gets the login page.  Set
+      <code>NFM_ADMIN_ALLOWLIST</code> in <code>.env</code> to the networks your
+      admins come from, then restart the container.
+    </div>
+  </div>
+{% endif %}
+
+{% for pool in degraded_pools %}
+  <div class="notice {{ 'bad' if pool.status_summary == 'down' else 'warn' }}">
+    <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.5 15 14H1L8 1.5zm0 4a.7.7 0 0 0-.7.8l.25 3.2a.45.45 0 0 0 .9 0l.25-3.2A.7.7 0 0 0 8 5.5zm0 5.4a.8.8 0 1 0 0 1.6.8.8 0 0 0 0-1.6z"/></svg>
+    <div>
+      {% if pool.status_summary == 'down' %}
+        <strong>Pool {{ pool.name }} has no healthy backends.</strong>
+        Everything pointed at it is serving errors right now.
+      {% else %}
+        <strong>Pool {{ pool.name }} is down to {{ pool.healthy_count }} of
+        {{ pool.total_count }} backends.</strong>
+      {% endif %}
+      <a href="{{ base }}/pools">Look at it</a>
+    </div>
+  </div>
+{% endfor %}
+
+{% for cert in expiring_certs %}
+  <div class="notice {{ 'bad' if cert.status in ('expired', 'critical') else 'warn' }}">
+    <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.5 15 14H1L8 1.5zm0 4a.7.7 0 0 0-.7.8l.25 3.2a.45.45 0 0 0 .9 0l.25-3.2A.7.7 0 0 0 8 5.5zm0 5.4a.8.8 0 1 0 0 1.6.8.8 0 0 0 0-1.6z"/></svg>
+    <div>
+      {% if cert.status == 'expired' %}
+        <strong>{{ cert.name }} expired {{ -cert.days_left }} days ago.</strong>
+        Browsers are refusing this site.
+      {% else %}
+        <strong>{{ cert.name }} expires in {{ cert.days_left }} days.</strong>
+      {% endif %}
+      {% if cert.last_renewal_error %}
+        The last renewal failed.
+      {% endif %}
+      <a href="{{ base }}/certificates">Renew it</a>
+    </div>
+  </div>
+{% endfor %}
+
+{% if pending %}
+  <div class="notice warn">
+    <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.5 15 14H1L8 1.5zm0 4a.7.7 0 0 0-.7.8l.25 3.2a.45.45 0 0 0 .9 0l.25-3.2A.7.7 0 0 0 8 5.5zm0 5.4a.8.8 0 1 0 0 1.6.8.8 0 0 0 0-1.6z"/></svg>
+    <div>
+      <strong>{{ pending|length }}
+      node{{ 's' if pending|length != 1 }} behind on config.</strong>
+      The changes are queued and will go out when they come back.
+      <a href="{{ base }}/cluster">Cluster page</a>
+    </div>
+  </div>
+{% endif %}
+
+<div class="stats">
+  <div class="stat">
+    <div class="label">Sites</div>
+    <div class="value">{{ hosts|length }}</div>
+    <div class="note">{{ hosts|selectattr('enabled')|list|length }} enabled</div>
+  </div>
+
+  <div class="stat {{ 'is-bad' if degraded_pools|selectattr('status_summary', 'equalto', 'down')|list }}">
+    <div class="label">Backend pools</div>
+    <div class="value">{{ pools|length }}</div>
+    <div class="note">
+      {% set healthy = pools|selectattr('status_summary', 'equalto', 'healthy')|list|length %}
+      {{ healthy }} fully healthy
+    </div>
+  </div>
+
+  <div class="stat {{ 'is-warn' if expiring_certs }}">
+    <div class="label">Certificates</div>
+    <div class="value">{{ certs|length }}</div>
+    <div class="note">
+      {% if expiring_certs %}{{ expiring_certs|length }} need attention
+      {% else %}all current{% endif %}
+    </div>
+  </div>
+
+  <div class="stat {{ 'is-warn' if pending }}">
+    <div class="label">Fleet</div>
+    <div class="value">{{ nodes|length }}</div>
+    <div class="note">
+      {{ nodes|selectattr('is_healthy')|list|length }} online
+    </div>
+  </div>
+</div>
+
+{# What nginx is actually doing right now, per node.
+
+   Free nginx gives seven numbers for the whole server and nothing per site, so
+   this is deliberately modest: connections and the rates behind the counters.
+   The per site and per backend picture needs the access log parsed, which is
+   written up in docs/plus-parity.md as a plan and is not built.  Saying that
+   plainly here beats a page that looks like it should have more on it. #}
+<div class="card">
+  <div class="card-head">
+    <h2>What nginx is doing</h2>
+    <span class="small faint" id="metrics-age"></span>
+  </div>
+  <div class="card-body tight">
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>Node</th>
+            <th class="right">Active</th>
+            <th class="right">Requests/s</th>
+            <th class="right">Connections/s</th>
+            <th class="right">Dropped/s</th>
+            <th class="right">Reading</th>
+            <th class="right">Writing</th>
+            <th class="right">Waiting</th>
+          </tr>
+        </thead>
+        <tbody id="metrics-rows">
+          <tr><td colspan="8" class="faint">Loading...</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="small faint" style="padding:.5rem .75rem 0">
+      From <code>stub_status</code>, sampled every fifteen seconds.  The rates
+      are worked out between two samples, so they take half a minute to appear
+      after a restart.  Dropped is connections nginx accepted and could not
+      handle, which is nearly always zero and is worth looking at when it is not.
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head">
+    <h2>Backend pools</h2>
+    <a href="{{ base }}/pools" class="small">Manage</a>
+  </div>
+  <div class="card-body tight">
+    {% if pools %}
+      <div class="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>Pool</th>
+            <th>Method</th>
+            <th>Backends</th>
+            <th>Status</th>
+            <th>Used by</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for pool in pools %}
+            <tr>
+              <td><strong>{{ pool.name }}</strong></td>
+              <td class="faint mono">{{ pool.lb_method }}</td>
+              <td class="num">{{ pool.healthy_count }} / {{ pool.total_count }}</td>
+              <td>
+                {% if pool.status_summary == 'healthy' %}
+                  <span class="badge ok">healthy</span>
+                {% elif pool.status_summary == 'degraded' %}
+                  <span class="badge warn">degraded</span>
+                {% elif pool.status_summary == 'down' %}
+                  <span class="badge bad">all down</span>
+                {% else %}
+                  <span class="badge neutral">empty</span>
+                {% endif %}
+              </td>
+              <td class="faint">
+                {{ pool.hosts|map(attribute='name')|join(', ') or '-'|safe }}
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      </div>
+    {% else %}
+      <div class="empty">
+        <strong>No backend pools yet</strong>
+        <p>A pool is a group of servers nginx sends traffic to.
+           <a href="{{ base }}/pools">Make one</a> to get started.</p>
+      </div>
+    {% endif %}
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head">
+    <h2>This box</h2>
+    <button class="help-btn" data-help-static="help-build"
+            data-help-title="What nginx was built with"
+            aria-label="Help">?</button>
+  </div>
+  <div class="card-body">
+    <dl class="kv">
+      <dt>nginx</dt>
+      <dd>{{ caps.nginx_version or 'not detected' }}</dd>
+
+      <dt>OpenSSL</dt>
+      <dd>
+        {{ caps.openssl_version or 'not detected' }}
+        {% if caps.supports_post_quantum() %}
+          <span class="badge ok">post quantum ready</span>
+        {% endif %}
+      </dd>
+
+      <dt>Modules</dt>
+      <dd>{{ caps.modules|length }} compiled in,
+          {{ caps.third_party|length }} of them third party</dd>
+
+      <dt>Stream</dt>
+      <dd>{{ 'yes, TCP and UDP proxying works' if caps.has_stream else 'not built in' }}</dd>
+
+      <dt>Config version</dt>
+      <dd>{{ latest_version }}</dd>
+    </dl>
+  </div>
+</div>
+
+{# Help content that is not a nginx directive, so it lives in the page rather
+   than in the catalog.  Hidden until the ? is clicked. #}
+<div hidden id="help-build">
+  <div class="help-section">
+    <p>The manager reads <code>nginx -V</code> off this box and works out which
+       modules were compiled in.</p>
+  </div>
+  <div class="help-section">
+    <h4>Why it matters</h4>
+    <p>Settings for a module you do not have are simply not shown.  That way you
+       cannot save a config that nginx will refuse to load.
+
+If you want a module that is not here, add it to the module list at the top of
+nginx-installer.sh and run the install again.  The new settings show up on their
+own once the build is done.</p>
+  </div>
+  <div class="help-section">
+    <h4>Post quantum</h4>
+    <p>This needs OpenSSL 3.5 or newer, which the installer builds against.  It
+       adds a key exchange that holds up even against a future quantum computer,
+       so traffic somebody records today cannot be decrypted years from now.</p>
+  </div>
+</div>
+
+{% endblock %}

@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+#
+# Refuse to commit things that must never leave this machine.
+#
+# A content check alone is not enough.  Grepping a diff catches a secret typed
+# into a file.  It does not catch a whole folder that should never have been
+# tracked, because once it is tracked it looks like part of the repository and
+# every add-all carries it along.  So this checks paths as well as content, and
+# it checks what is staged rather than what is on disk.
+#
+# The names that must not ship are read from .githooks/forbidden.txt, which is
+# itself never committed.  That file holds customer names and any other private
+# identifier.  Putting them in this script instead would mean writing them into
+# the repository in the course of trying to keep them out of it, which is a
+# mistake this hook exists to prevent and which was made once already.
+set -euo pipefail
+
+fail=0
+staged="$(git diff --cached --name-only --diff-filter=ACMR)"
+[[ -z "$staged" ]] && exit 0
+
+# ---------------------------------------------------------------- paths
+FORBIDDEN_PATHS='^(\.githooks/forbidden\.txt$|tools/|checks/|\.env$|.*/\.env$)'
+# Working notes for any assistant that helps here.
+FORBIDDEN_PATHS+='|^\.[a-z]+/(PLAN|PROJECT|settings\.local)\.'
+
+while IFS= read -r path; do
+    [[ -z "$path" ]] && continue
+    if [[ "$path" =~ $FORBIDDEN_PATHS ]]; then
+        echo "  refused: $path" >&2
+        fail=1
+    fi
+done <<< "$staged"
+
+if [[ $fail -eq 1 ]]; then
+    cat >&2 <<'MSG'
+
+These paths are never committed.  They are working files, local settings, or
+build machinery, and they belong on this machine only.
+
+If one is genuinely part of the software now, take it out of FORBIDDEN_PATHS in
+.githooks/pre-commit in its own commit, so the change is visible rather than
+buried in something else.
+
+MSG
+    exit 1
+fi
+
+# -------------------------------------------------------------- content
+added="$(git diff --cached -U0 | grep '^+' || true)"
+
+LIST=".githooks/forbidden.txt"
+if [[ -f "$LIST" ]]; then
+    while IFS= read -r pattern; do
+        [[ -z "$pattern" || "$pattern" == \#* ]] && continue
+        if grep -qiE -- "$pattern" <<< "$added"; then
+            echo "  refused: a name that must not ship appears in the staged changes" >&2
+            echo "  (it matches a pattern in $LIST, which is not printed here)" >&2
+            exit 1
+        fi
+    done < "$LIST"
+else
+    echo "  note: $LIST is missing, so only paths were checked" >&2
+    echo "  put one private name or pattern per line in it" >&2
+fi
+
+# Private keys, easy to paste in by accident while testing.
+if grep -qE 'BEGIN (RSA |EC |OPENSSH |)PRIVATE KEY' <<< "$added"; then
+    echo "  refused: that looks like a private key" >&2
+    exit 1
+fi
+
+exit 0

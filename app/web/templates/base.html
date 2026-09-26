@@ -1,0 +1,346 @@
+{# The shell every page sits inside.  Top bar, sidebar, content. #}
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}Failover LB{% endblock %}</title>
+{# The prefix we are served under, so the JavaScript builds API URLs that land
+   in the right place when something proxies us at a sub path. #}
+<meta name="nfm-base" content="{{ base }}">
+{# What this page was rendered from.  Compared against the same stamp on every
+   API answer, so a tab left open across an upgrade notices rather than quietly
+   running yesterday's script. #}
+<meta name="nfm-build" content="{{ asset_version }}">
+<link rel="stylesheet" href="{{ base }}/static/app.css?v={{ asset_version }}">
+{# The favicon is drawn inline as an SVG so there is no image file to fetch.
+   Keeps the content security policy tight and works with no network. #}
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' rx='3' fill='%23141414'/><path d='M4.6 1.8 7.4 5H5.3v9.2H3.9V5H1.8l2.8-3.2zm6.8 12.4L8.6 11h2.1V1.8h1.4V11h2.1l-2.8 3.2z' fill='white'/></svg>">
+</head>
+<body>
+
+<div class="app">
+
+  <div class="topbar">
+    <div class="flex">
+      <button class="btn sm menu-toggle" aria-label="Menu">&#9776;</button>
+      <a href="{{ base }}/" class="brand">
+        {# Hand drawn mark.  Two arrows passing each other in a rounded square:
+           traffic moving one way and failing over the other.  Nothing fetched.
+           It was an N until the rename, which is a letter we no longer have
+           any business drawing. #}
+        <svg viewBox="0 0 16 16" aria-hidden="true">
+          <rect width="16" height="16" rx="3" fill="currentColor" opacity="0.18"/>
+          <path d="M4.6 1.8 7.4 5H5.3v9.2H3.9V5H1.8l2.8-3.2zm6.8 12.4L8.6 11h2.1V1.8h1.4V11h2.1l-2.8 3.2z" fill="currentColor"/>
+        </svg>
+        Failover LB
+      </a>
+    </div>
+
+    <div class="right">
+      <span class="node-chip">
+        {# node_role comes from the shared context, so this is right on every
+           page rather than on the two that happened to pass a node object. #}
+        {% if node_role == 'active' %}
+          <span class="dot ok"></span>{{ node_name }} &middot; active
+        {% elif node_role == 'standby' %}
+          <span class="dot neutral"></span>{{ node_name }} &middot; standby
+        {% else %}
+          {# Not known is its own answer.  Calling it standby would be a guess,
+             and it is the guess that gets somebody to make a change on the box
+             they thought was the spare. #}
+          <span class="dot warn"></span>{{ node_name }} &middot; role unknown
+        {% endif %}
+      </span>
+      <a href="{{ base }}/account">{{ user.username }}
+        <span class="faint">({{ user.role.value }})</span></a>
+      <a href="{{ base }}/logout">Sign out</a>
+    </div>
+  </div>
+
+  <div class="layout">
+
+    <nav class="sidebar">
+      <div class="nav-group" data-group="traffic">
+        <button type="button" class="group-label" aria-expanded="true"
+                aria-controls="nav-traffic">
+          <svg class="group-icon" viewBox="0 0 16 16" fill="currentColor"
+               aria-hidden="true"><path d="M4.6 1.8 7.4 5H5.3v9.2H3.9V5H1.8l2.8-3.2zm6.8 12.4L8.6 11h2.1V1.8h1.4V11h2.1l-2.8 3.2z"/></svg>
+          <span>Traffic</span>
+          <svg class="chev" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M4.8 6.1 8 9.3l3.2-3.2 1 1L8 11.3 3.8 7.1z"/></svg>
+        </button>
+        <div class="group-links" id="nav-traffic">
+
+        <a href="{{ base }}/" class="{{ 'active' if active_page == 'dashboard' }}">
+          <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M2 2h5v5H2V2zm7 0h5v3H9V2zM2 9h5v5H2V9zm7-2h5v7H9V7z"/></svg>
+          Dashboard
+        </a>
+
+        <a href="{{ base }}/sites" class="{{ 'active' if active_page == 'sites' }}">
+          <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zM6.2 2.6A9.6 9.6 0 0 0 5.3 6H2.9a5.6 5.6 0 0 1 3.3-3.4zM2.5 7.3h2.7a12 12 0 0 0 0 1.4H2.5a5.6 5.6 0 0 1 0-1.4zm.4 2.7h2.4a9.6 9.6 0 0 0 .9 3.4A5.6 5.6 0 0 1 2.9 10zm5.1 3.5A8.3 8.3 0 0 1 6.6 10h2.8a8.3 8.3 0 0 1-1.4 3.5zM9.6 8.7H6.4a10.7 10.7 0 0 1 0-1.4h3.2a10.7 10.7 0 0 1 0 1.4zM6.6 6A8.3 8.3 0 0 1 8 2.5 8.3 8.3 0 0 1 9.4 6zm3.2 7.4a9.6 9.6 0 0 0 .9-3.4h2.4a5.6 5.6 0 0 1-3.3 3.4zM10.8 8.7a12 12 0 0 0 0-1.4h2.7a5.6 5.6 0 0 1 0 1.4zm-.1-2.7a9.6 9.6 0 0 0-.9-3.4A5.6 5.6 0 0 1 13.1 6z"/></svg>
+          Sites
+          <span class="count">{{ hosts|length if hosts is defined else '' }}</span>
+        </a>
+
+        <a href="{{ base }}/pools" class="{{ 'active' if active_page == 'pools' }}">
+          <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M2 3h12v3H2V3zm0 4.5h12v3H2v-3zM2 12h12v2H2v-2z"/></svg>
+          Backend Pools
+          <span class="count">{{ pools|length if pools is defined else '' }}</span>
+        </a>
+
+        <a href="{{ base }}/import" class="{{ 'active' if active_page == 'import' }}">
+          <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 1v7.6l2.3-2.3 1 1L7.5 11 3.7 7.3l1-1L7 8.6V1h1zM2 12h12v2H2v-2z"/></svg>
+          Import
+        </a>
+
+        <a href="{{ base }}/zones" class="{{ 'active' if active_page == 'zones' }}">
+          <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M2 2h5v5H2V2zm0 7h5v5H2V9zm7-7h5v5H9V2zm0 7h5v5H9V9z"/></svg>
+          Zones &amp; Access
+        </a>
+
+        <a href="{{ base }}/utilization" class="{{ 'active' if active_page == 'utilization' }}">
+          <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M1.6 12.2 5.4 7l2.6 2.9 3-4.4 3.4 4.5-1 .8-2.4-3.2-3 4.4L5.3 9l-2.7 3.7z"/><path d="M1 13.4h14v1.2H1z"/></svg>
+          Utilization
+        </a>
+
+        <a href="{{ base }}/maps" class="{{ 'active' if active_page == 'maps' }}">
+          <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M2 3h4v1.2H2V3zm0 3.4h4v1.2H2V6.4zm0 3.4h4V11H2V9.8zM7.6 3H14v1.2H7.6V3zm0 3.4H14v1.2H7.6V6.4zm0 3.4H14V11H7.6V9.8z"/></svg>
+          Maps
+        </a>
+
+        <a href="{{ base }}/streams" class="{{ 'active' if active_page == 'streams' }}">
+          <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M2 4h5.2v1.2H3.2v5.6h4V12H2V4zm6.8 0H14v8H8.8v-1.2h4V5.2h-4V4z"/><path d="M5.4 7.4h5.2v1.2H5.4z"/></svg>
+          TCP &amp; UDP
+        </a>
+
+        <a href="{{ base }}/error-pages" class="{{ 'active' if active_page == 'error_pages' }}">
+          <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M3 1.5h6.2L13 5.3v9.2H3V1.5zm1.2 1.2v10.6h7.6V6H8.6V2.7H4.2zm5.6.5V4.8h1.6L9.8 3.2z"/><path d="M7.4 7.2h1.2v3.1H7.4V7.2zm0 3.9h1.2v1.2H7.4v-1.2z"/></svg>
+          Error Pages
+        </a>
+
+        </div>
+      </div>
+
+      <div class="nav-group" data-group="security">
+        <button type="button" class="group-label" aria-expanded="true"
+                aria-controls="nav-security">
+          <svg class="group-icon" viewBox="0 0 16 16" fill="currentColor"
+               aria-hidden="true"><path d="M8 1.4a3 3 0 0 0-3 3v1.4h-.9v8.2h7.8V5.8H11V4.4a3 3 0 0 0-3-3zm0 1.4a1.6 1.6 0 0 1 1.6 1.6v1.4H6.4V4.4A1.6 1.6 0 0 1 8 2.8zm0 6.1a1.2 1.2 0 0 1 .6 2.2v1.1H7.4v-1.1A1.2 1.2 0 0 1 8 8.9z"/></svg>
+          <span>Security</span>
+          <svg class="chev" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M4.8 6.1 8 9.3l3.2-3.2 1 1L8 11.3 3.8 7.1z"/></svg>
+        </button>
+        <div class="group-links" id="nav-security">
+
+        <a href="{{ base }}/waf-profiles" class="{{ 'active' if active_page == 'waf_profiles' }}">
+          <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 1 2.5 3.2v4.3c0 3.4 2.3 6.6 5.5 7.5 3.2-.9 5.5-4.1 5.5-7.5V3.2z"/></svg>
+          WAF Profiles
+        </a>
+
+        <a href="{{ base }}/certificates" class="{{ 'active' if active_page == 'certificates' }}">
+          <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 1 3 3v4.3c0 3 2.1 5.8 5 6.7 2.9-.9 5-3.7 5-6.7V3L8 1zm0 1.6 3.5 1.4v3.3c0 2.2-1.5 4.3-3.5 5.1-2-.8-3.5-2.9-3.5-5.1V4L8 2.6z"/><path d="M7.3 9.4 5.6 7.7l.9-.9 1 1 2.2-2.2.9.9z"/></svg>
+          Certificates
+        </a>
+
+        <a href="{{ base }}/authorities" class="{{ 'active' if active_page == 'authorities' }}">
+          <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M3 2h10a1 1 0 0 1 1 1v3.2a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1zm.8 1.8v1.6h8.4V3.8H3.8zM3 8.8h10a1 1 0 0 1 1 1V13a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V9.8a1 1 0 0 1 1-1zm.8 1.8v1.6h8.4v-1.6H3.8z"/></svg>
+          Paid Authorities
+        </a>
+
+        </div>
+      </div>
+
+      <div class="nav-group" data-group="fleet">
+        <button type="button" class="group-label" aria-expanded="true"
+                aria-controls="nav-fleet">
+          <svg class="group-icon" viewBox="0 0 16 16" fill="currentColor"
+               aria-hidden="true"><path d="M2.2 2.1h11.6v3.6H2.2V2.1zm1.5 1.3v1h1.4v-1H3.7zm-1.5 3.1h11.6v3.6H2.2V6.5zm1.5 1.3v1h1.4v-1H3.7zm-1.5 3.1h11.6v3.6H2.2v-3.6zm1.5 1.3v1h1.4v-1H3.7z"/></svg>
+          <span>Fleet</span>
+          <svg class="chev" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M4.8 6.1 8 9.3l3.2-3.2 1 1L8 11.3 3.8 7.1z"/></svg>
+        </button>
+        <div class="group-links" id="nav-fleet">
+
+        <a href="{{ base }}/cluster" class="{{ 'active' if active_page == 'cluster' }}">
+          <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 1.5a2 2 0 1 1 0 4 2 2 0 0 1 0-4zM3 10a2 2 0 1 1 0 4 2 2 0 0 1 0-4zm10 0a2 2 0 1 1 0 4 2 2 0 0 1 0-4zM7.4 6.2 4.3 9.6l-.9-.8 3.1-3.4zm1.2 0 .9-.8 3.1 3.4-.9.8z"/></svg>
+          Cluster
+        </a>
+
+        <a href="{{ base }}/gslb" class="{{ 'active' if active_page == 'gslb' }}">
+          <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 1.4A6.6 6.6 0 1 0 8 14.6 6.6 6.6 0 0 0 8 1.4zm0 1.2c1 0 2 1.6 2.4 4H5.6C6 4.2 7 2.6 8 2.6zM4.4 5.6C4.1 6.3 4 7.1 4 8s.1 1.7.3 2.4H2.8A5.4 5.4 0 0 1 2.6 8c0-.8.1-1.6.4-2.4h1.4zm1.2 0h4.8c.2.7.3 1.5.3 2.4s-.1 1.7-.3 2.4H5.6A9 9 0 0 1 5.3 8c0-.9.1-1.7.3-2.4zm6 0h1.4c.3.8.4 1.6.4 2.4s-.1 1.6-.4 2.4h-1.4c.2-.7.3-1.5.3-2.4s-.1-1.7-.3-2.4zM5.6 11.6h4.8c-.4 2.4-1.4 4-2.4 4s-2-1.6-2.4-4z"/></svg>
+          DNS Failover
+        </a>
+
+        <a href="{{ base }}/tunnel" class="{{ 'active' if active_page == 'tunnel' }}">
+          <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M2 5.4h4.2a2.6 2.6 0 0 1 0 5.2H2V9.4h4.2a1.4 1.4 0 0 0 0-2.8H2V5.4zm7.8 0H14v1.2H9.8a1.4 1.4 0 0 0 0 2.8H14v1.2H9.8a2.6 2.6 0 0 1 0-5.2z"/></svg>
+          Tunnel
+        </a>
+
+        <a href="{{ base }}/upgrade" class="{{ 'active' if active_page == 'upgrade' }}">
+          <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 1.5 12 6H9.5v4.5h-3V6H4zM3 12.5h10V14H3z"/></svg>
+          NGINX&reg; Build
+        </a>
+
+        <a href="{{ base }}/parity" class="{{ 'active' if active_page == 'parity' }}">
+          <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 1.5 9.8 5l3.7.5-2.7 2.7.7 3.8L8 10.2l-3.5 1.8.7-3.8L2.5 5.5 6.2 5z"/></svg>
+          Feature Comparison
+        </a>
+
+        </div>
+      </div>
+
+      <div class="nav-group" data-group="account">
+        <button type="button" class="group-label" aria-expanded="true"
+                aria-controls="nav-account">
+          <svg class="group-icon" viewBox="0 0 16 16" fill="currentColor"
+               aria-hidden="true"><path d="M8 1.9a2.9 2.9 0 1 0 0 5.8 2.9 2.9 0 0 0 0-5.8zm0 1.4a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3zM8 8.9c-2.9 0-5.2 1.3-5.2 3v2.2h10.4v-2.2c0-1.7-2.3-3-5.2-3z"/></svg>
+          <span>Account</span>
+          <svg class="chev" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M4.8 6.1 8 9.3l3.2-3.2 1 1L8 11.3 3.8 7.1z"/></svg>
+        </button>
+        <div class="group-links" id="nav-account">
+
+        <a href="{{ base }}/account" class="{{ 'active' if active_page == 'account' }}">
+          <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 8a3 3 0 1 0 0-6 3 3 0 0 0 0 6zm0 1.5c-2.7 0-5 1.4-5 3.1V14h10v-1.4c0-1.7-2.3-3.1-5-3.1z"/></svg>
+          My Account
+        </a>
+
+        {% if can('manage_settings') %}
+          <a href="{{ base }}/settings" class="{{ 'active' if active_page == 'settings' }}">
+            <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 5.2a2.8 2.8 0 1 0 0 5.6 2.8 2.8 0 0 0 0-5.6zm0 4.4a1.6 1.6 0 1 1 0-3.2 1.6 1.6 0 0 1 0 3.2z"/><path d="m13.9 9.2-1.2-.7a4.9 4.9 0 0 0 0-1l1.2-.7a.6.6 0 0 0 .2-.8l-1.2-2a.6.6 0 0 0-.8-.2l-1.2.7a4.9 4.9 0 0 0-.9-.5V2.6a.6.6 0 0 0-.6-.6H6.6a.6.6 0 0 0-.6.6V4c-.3.1-.6.3-.9.5l-1.2-.7a.6.6 0 0 0-.8.2l-1.2 2a.6.6 0 0 0 .2.8l1.2.7a4.9 4.9 0 0 0 0 1l-1.2.7a.6.6 0 0 0-.2.8l1.2 2a.6.6 0 0 0 .8.2l1.2-.7c.3.2.6.4.9.5v1.4a.6.6 0 0 0 .6.6h2.8a.6.6 0 0 0 .6-.6V12c.3-.1.6-.3.9-.5l1.2.7a.6.6 0 0 0 .8-.2l1.2-2a.6.6 0 0 0-.2-.8z"/></svg>
+            Settings
+          </a>
+        {% endif %}
+
+        {% if can('manage_users') %}
+          <a href="{{ base }}/users" class="{{ 'active' if active_page == 'users' }}">
+            <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M5.5 7.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5zm5.2.3a2 2 0 1 0 0-4 2 2 0 0 0 0 4zM5.5 8.8c-2.3 0-4.2 1.2-4.2 2.7V13h8.4v-1.5c0-1.5-1.9-2.7-4.2-2.7zm5.2.4c-.5 0-1 .1-1.4.2.7.6 1.1 1.3 1.1 2.1V13h4.4v-1.3c0-1.3-1.8-2.5-4.1-2.5z"/></svg>
+            Users
+          </a>
+        {% endif %}
+
+        <a href="{{ base }}/changes" class="{{ 'active' if active_page == 'changes' }}">
+          <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M3 2h7l3 3v9H3V2zm1 1v10h8V6H9V3H4zm2 4h5v1H6V7zm0 2.5h5v1H6v-1z"/></svg>
+          Changes
+        </a>
+
+        <a href="{{ base }}/backup" class="{{ 'active' if active_page == 'backup' }}">
+          <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M2.5 2h11a.5.5 0 0 1 .5.5V5H2V2.5a.5.5 0 0 1 .5-.5zM2 6.2h12v7.3a.5.5 0 0 1-.5.5h-11a.5.5 0 0 1-.5-.5V6.2zm4.3 1.9v1.2h3.4V8.1H6.3z"/></svg>
+          Backup
+        </a>
+
+      <a href="{{ base }}/audit" class="{{ 'active' if active_page == 'audit' }}">
+          <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M4 1h6l3 3v11H4V1zm5 1v3h3M6 7h5v1H6V7zm0 2.5h5v1H6v-1zm0 2.5h3v1H6v-1z"/></svg>
+          Audit Log
+        </a>
+        </div>
+      </div>
+
+    </nav>
+
+    {# Collapsing the sections.
+
+       Inline and right after the nav rather than in app.js, which loads at the
+       end of the page.  By then the sidebar has already been painted open, so
+       somebody who keeps three of the four collapsed would watch them close
+       again on every single page load.  Run here, the collapsed ones are never
+       drawn expanded.
+
+       Kept per user, because a browser is not always one person's.  Two
+       accounts on the same machine would otherwise inherit each other's
+       sidebar and have no idea why it moved. #}
+    <script nonce="{{ csp_nonce }}">
+    (function () {
+      var KEY = "nfm.nav." + {{ user.username|tojson }};
+      var nav = document.querySelector(".sidebar");
+      if (!nav) { return; }
+
+      function read() {
+        try { return JSON.parse(localStorage.getItem(KEY)) || {}; }
+        catch (e) { return {}; }     // unreadable is the same as unset
+      }
+
+      function write(state) {
+        try { localStorage.setItem(KEY, JSON.stringify(state)); }
+        catch (e) { /* private browsing, or a full quota.  Not worth a toast. */ }
+      }
+
+      var state = read();
+
+      nav.querySelectorAll(".nav-group").forEach(function (group) {
+        var name = group.getAttribute("data-group");
+        var button = group.querySelector(".group-label");
+        var links = group.querySelector(".group-links");
+        if (!button || !links) { return; }
+
+        // A section holding the page you are on always opens, whatever was
+        // saved, so you can see where you are.  The saved answer is left
+        // alone: collapse Fleet, visit Tunnel, and Fleet is open while you are
+        // there and collapsed again everywhere else.  That is remembering the
+        // preference, not overriding it.
+        var here = !!links.querySelector("a.active");
+        var collapsed = !!state[name] && !here;
+
+        function apply(shut) {
+          links.hidden = shut;
+          button.setAttribute("aria-expanded", shut ? "false" : "true");
+        }
+
+        apply(collapsed);
+
+        button.addEventListener("click", function () {
+          var shut = button.getAttribute("aria-expanded") === "true";
+          apply(shut);
+          var saved = read();
+          saved[name] = shut;
+          write(saved);
+        });
+      });
+    })();
+    </script>
+
+    <main class="content">
+      {# Saved is not the same as live, and that catches people out.  This sits
+         above every page rather than on the one you happened to edit, because
+         by the time it matters you have usually moved on to another page. #}
+      <div class="notice warn" id="pending-config" hidden
+           style="position:sticky; top:0; z-index:20; margin-bottom:14px;
+                  align-items:center; justify-content:space-between">
+        <div style="display:flex; gap:8px; align-items:flex-start">
+          <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+            <path d="M8 1L1 14h14L8 1zm0 4v5H7V5h1zm0 6.5v1H7v-1h1z"/>
+          </svg>
+          <div>
+            <strong id="pending-config-title">Saved, but not live yet</strong>
+            <div class="small" id="pending-config-detail">
+              These changes are stored.  nginx is still running the last config
+              that was applied.
+            </div>
+          </div>
+        </div>
+        <div style="flex:0 0 auto; margin-left:12px; display:flex; gap:8px">
+          <button class="btn" id="pending-config-show">See what changed</button>
+          {% if can('apply_config') %}
+            <button class="btn primary" id="pending-config-apply">Apply config</button>
+          {% endif %}
+        </div>
+      </div>
+
+      {% block content %}{% endblock %}
+
+      {# Attribution for the mark, on every page rather than tucked away on an
+         about screen, because every page has nginx somewhere on it.  We manage
+         nginx, we are not nginx, and this is where that is said out loud. #}
+      <footer class="legal">
+        NGINX&reg; is a registered trademark of F5, Inc.  NGINX Plus is a
+        trademark of F5, Inc.  Failover LB is an independent project, not
+        affiliated with, endorsed by, or sponsored by F5, Inc.
+      </footer>
+    </main>
+
+  </div>
+</div>
+
+<div id="toasts"></div>
+
+<script src="{{ base }}/static/app.js?v={{ asset_version }}" nonce="{{ csp_nonce }}"></script>
+{% block scripts %}{% endblock %}
+</body>
+</html>

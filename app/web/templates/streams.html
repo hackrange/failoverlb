@@ -1,0 +1,325 @@
+{% extends "base.html" %}
+{% block title %}TCP and UDP &middot; Failover LB{% endblock %}
+
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <h1>TCP and UDP</h1>
+    <div class="sub">
+      Proxying that has nothing to do with the web.  A database port, a mail
+      server, a syslog collector, a game server.
+    </div>
+  </div>
+  <div class="page-actions">
+    {% if can('edit_sites') %}
+      <button class="btn primary" id="new-stream">Add one</button>
+    {% endif %}
+    {% if can('apply_config') %}
+      <button class="btn" id="apply-config">Apply config</button>
+    {% endif %}
+  </div>
+</div>
+
+<div class="notice warn" id="no-stream-module" hidden>
+  <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.5 15 14H1L8 1.5zm0 3.2L3.4 12.8h9.2L8 4.7zM7.3 7h1.4v3H7.3V7zm0 3.7h1.4V12H7.3v-1.3z"/></svg>
+  <div>
+    This nginx was not built with the stream module, so none of this can be
+    applied.  <code>nginx -V</code> would show <code>--with-stream</code> if it
+    had been.  The installer that ships here builds it in.
+  </div>
+</div>
+
+<div class="notice info">
+  <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 3a.9.9 0 1 1 0 1.8A.9.9 0 0 1 8 4zm1.2 8H6.8v-.9h.7V7.9h-.7V7h2.1v4.1h.3V12z"/></svg>
+  <div>
+    These are not sites, and almost nothing from a site applies to them.  There
+    is no Host header, no path, no status code, so no redirects, no error pages
+    and no way to answer politely when something is wrong.  A connection either
+    goes through to a backend or it does not happen.
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head"><h2>Listeners</h2></div>
+  <div class="card-body no-pad">
+    <table class="table">
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Listening on</th>
+          <th>Goes to</th>
+          <th>Who can connect</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="stream-rows">
+        <tr><td colspan="5" class="faint">Loading...</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<script nonce="{{ csp_nonce }}">
+// Waits for app.js, which the layout loads after this block.  Without the wait
+// window.NFM does not exist yet and the whole page silently does nothing.
+document.addEventListener("DOMContentLoaded", function () {
+  const POOLS = {{ pools|map(attribute='id')|list|tojson }};
+  const POOL_NAMES = {{ pools|map(attribute='name')|list|tojson }};
+  const CERTS = [
+    {% for c in certs %}{"id": {{ c.id }}, "name": {{ c.name|tojson }}}{{ "," if not loop.last }}{% endfor %}
+  ];
+  const ACLS = [
+    {% for a in access_lists %}{"id": {{ a.id }}, "name": {{ a.name|tojson }}}{{ "," if not loop.last }}{% endfor %}
+  ];
+  const CAN_EDIT = {{ 'true' if can('edit_sites') else 'false' }};
+
+  function el(id) { return document.getElementById(id); }
+  function val(id) { const e = el(id); return e ? e.value.trim() : ""; }
+  function checked(id) { const e = el(id); return e ? e.checked : false; }
+
+  async function load() {
+    let data;
+    try {
+      data = await NFM.api("/streams");
+    } catch (err) {
+      const cell = document.createElement("td");
+      cell.colSpan = 5;
+      cell.className = "faint";
+      cell.textContent = "Could not load: " + (err && err.message ? err.message : err);
+      const row = document.createElement("tr");
+      row.appendChild(cell);
+      el("stream-rows").replaceChildren(row);
+      return;
+    }
+
+    el("no-stream-module").hidden = data.supported !== false;
+
+    const rows = data.streams || [];
+    if (!rows.length) {
+      el("stream-rows").innerHTML =
+        '<tr><td colspan="5" class="faint">Nothing here.  Add one to put a port ' +
+        'in front of something that is not a website.</td></tr>';
+      return;
+    }
+
+    el("stream-rows").innerHTML = rows.map(function (s) {
+      const acl = ACLS.filter(function (a) { return a.id === s.access_list_id; })[0];
+      return "<tr>" +
+        "<td><strong>" + NFM.escapeHtml(s.name) + "</strong>" +
+        (s.enabled ? "" : " <span class='badge neutral'>off</span>") +
+        (s.ssl_enabled ? " <span class='badge ok'>TLS</span>" : "") +
+        (s.proxy_protocol ? " <span class='badge neutral'>proxy protocol</span>" : "") +
+        "</td>" +
+        "<td class='mono small'>" + NFM.escapeHtml(s.listen_address + ":" + s.listen_port) +
+        " <span class='faint'>" + NFM.escapeHtml(s.protocol) + "</span></td>" +
+        "<td class='mono small'>" +
+        (s.pool_name ? NFM.escapeHtml(s.pool_name)
+                     : "<span class='faint'>nothing, so it is hand written</span>") +
+        "</td>" +
+        "<td class='small faint'>" +
+        (acl ? NFM.escapeHtml(acl.name) : "anybody who can reach the port") + "</td>" +
+        "<td class='right'>" +
+        (CAN_EDIT
+          ? '<button class="btn small" data-edit="' + s.id + '">Edit</button> ' +
+            '<button class="btn small danger" data-del="' + s.id +
+            '" data-name="' + NFM.escapeHtml(s.name) + '">Delete</button>'
+          : "") +
+        "</td></tr>";
+    }).join("");
+  }
+
+  function form(s) {
+    s = s || { protocol: "tcp", listen_address: "0.0.0.0", enabled: true,
+               settings: {} };
+    const poolOpts = POOLS.map(function (id, i) {
+      return '<option value="' + id + '"' + (s.pool_id === id ? " selected" : "") +
+             ">" + NFM.escapeHtml(POOL_NAMES[i]) + "</option>";
+    }).join("");
+    const certOpts = CERTS.map(function (c) {
+      return '<option value="' + c.id + '"' + (s.cert_id === c.id ? " selected" : "") +
+             ">" + NFM.escapeHtml(c.name) + "</option>";
+    }).join("");
+    const aclOpts = ACLS.map(function (a) {
+      return '<option value="' + a.id + '"' + (s.access_list_id === a.id ? " selected" : "") +
+             ">" + NFM.escapeHtml(a.name) + "</option>";
+    }).join("");
+    const st = s.settings || {};
+
+    return `
+      <div class="form-grid">
+        <div class="field">
+          <label for="s-name">Name</label>
+          <input type="text" id="s-name" value="${NFM.escapeHtml(s.name || "")}"
+                 placeholder="postgres">
+        </div>
+        <div class="field">
+          <label for="s-proto">Protocol</label>
+          <select id="s-proto">
+            <option value="tcp" ${s.protocol === "tcp" ? "selected" : ""}>TCP</option>
+            <option value="udp" ${s.protocol === "udp" ? "selected" : ""}>UDP</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="s-addr">Listen on</label>
+          <input type="text" id="s-addr" value="${NFM.escapeHtml(s.listen_address || "0.0.0.0")}">
+          <div class="hint">0.0.0.0 is every address on the box.</div>
+        </div>
+        <div class="field">
+          <label for="s-port">Port</label>
+          <input type="number" id="s-port" min="1" max="65535"
+                 value="${s.listen_port || ""}">
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="s-pool">Send it to</label>
+        <select id="s-pool"><option value="">nothing, I will write the config myself</option>${poolOpts}</select>
+        <div class="hint">
+          The same backend pools the sites use.  A pool used by both gets an
+          upstream in each half of the config, because nginx keeps them apart.
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="s-acl">Who can connect</label>
+        <select id="s-acl"><option value="">anybody who can reach the port</option>${aclOpts}</select>
+        <div class="hint">
+          Worth more here than on a site.  There is no login to put in front of
+          a database port, so the address list is the whole of the security.
+        </div>
+      </div>
+
+      <div class="checkline">
+        <input type="checkbox" id="s-tls" ${s.ssl_enabled ? "checked" : ""}>
+        <label for="s-tls">Terminate TLS here</label>
+      </div>
+      <div class="field" id="s-cert-wrap" style="display:none">
+        <label for="s-cert">Certificate</label>
+        <select id="s-cert"><option value="">pick one</option>${certOpts}</select>
+        <div class="hint">
+          Only for a protocol where the client expects TLS straight away, like
+          a database with TLS on. Leave it off and the bytes go through
+          untouched, which is what you want if the backend does its own TLS.
+        </div>
+      </div>
+
+      <div class="checkline">
+        <input type="checkbox" id="s-pp" ${s.proxy_protocol ? "checked" : ""}>
+        <label for="s-pp">Expect the PROXY protocol from whatever is in front</label>
+      </div>
+      <div class="hint" style="margin-bottom:.75rem">
+        Only tick this when something in front really does send it.  Tick it
+        wrongly and every connection is rejected as malformed, because nginx is
+        reading the first bytes of real traffic as a header.
+      </div>
+
+      <div class="form-grid">
+        <div class="field">
+          <label for="s-timeout">Idle timeout</label>
+          <input type="text" id="s-timeout" value="${NFM.escapeHtml(st.proxy_timeout || "")}"
+                 placeholder="10m">
+          <div class="hint">How long with nothing said before it is closed.</div>
+        </div>
+        <div class="field">
+          <label for="s-connect">Connect timeout</label>
+          <input type="text" id="s-connect" value="${NFM.escapeHtml(st.proxy_connect_timeout || "")}"
+                 placeholder="5s">
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="s-custom">Extra config for this listener</label>
+        <textarea id="s-custom" rows="3" class="mono" spellcheck="false">${NFM.escapeHtml(s.custom_config || "")}</textarea>
+        <div class="hint">
+          Goes inside the server block.  It still goes through nginx -t on every
+          node before anything is applied.
+        </div>
+      </div>
+
+      <div class="checkline">
+        <input type="checkbox" id="s-enabled" ${s.enabled !== false ? "checked" : ""}>
+        <label for="s-enabled">Enabled</label>
+      </div>
+      <div class="mt"><button class="btn primary" id="s-save">Save</button></div>`;
+  }
+
+  function collect() {
+    return {
+      name: val("s-name"),
+      protocol: val("s-proto"),
+      listen_address: val("s-addr") || "0.0.0.0",
+      listen_port: parseInt(val("s-port") || "0", 10),
+      pool_id: val("s-pool") ? parseInt(val("s-pool"), 10) : null,
+      access_list_id: val("s-acl") ? parseInt(val("s-acl"), 10) : null,
+      ssl_enabled: checked("s-tls"),
+      cert_id: val("s-cert") ? parseInt(val("s-cert"), 10) : null,
+      proxy_protocol: checked("s-pp"),
+      custom_config: val("s-custom"),
+      enabled: checked("s-enabled"),
+      settings: {
+        proxy_timeout: val("s-timeout"),
+        proxy_connect_timeout: val("s-connect")
+      }
+    };
+  }
+
+  function openDialog(existing) {
+    NFM.openModal(existing ? "Edit " + existing.name : "Add a TCP or UDP listener",
+                  "", form(existing), true);
+
+    const tls = el("s-tls");
+    function syncTls() {
+      el("s-cert-wrap").style.display = tls.checked ? "" : "none";
+    }
+    tls.addEventListener("change", syncTls);
+    syncTls();
+
+    el("s-save").addEventListener("click", async function () {
+      const body = collect();
+      if (!body.name) { NFM.toast("Give it a name", "bad"); return; }
+      if (!body.listen_port) { NFM.toast("Give it a port", "bad"); return; }
+      try {
+        if (existing) {
+          await NFM.api("/streams/" + existing.id, { method: "PUT", body: body });
+        } else {
+          await NFM.api("/streams", { method: "POST", body: body });
+        }
+      } catch (err) {
+        NFM.toast(err.message, "bad");
+        return;
+      }
+      NFM.closeModal();
+      NFM.toast("Saved.  It starts listening on the next apply.", "ok");
+      load();
+    });
+  }
+
+  el("stream-rows").addEventListener("click", async function (ev) {
+    const edit = ev.target.closest("[data-edit]");
+    if (edit) {
+      try {
+        openDialog(await NFM.api("/streams/" + edit.dataset.edit));
+      } catch (err) { NFM.toast(err.message, "bad"); }
+      return;
+    }
+    const del = ev.target.closest("[data-del]");
+    if (del) {
+      if (!confirm("Delete " + del.dataset.name + "?  The port stops listening " +
+                   "on the next apply.")) { return; }
+      try {
+        await NFM.api("/streams/" + del.dataset.del, { method: "DELETE" });
+      } catch (err) { NFM.toast(err.message, "bad"); return; }
+      NFM.toast("Deleted", "ok");
+      load();
+    }
+  });
+
+  const add = el("new-stream");
+  if (add) { add.addEventListener("click", function () { openDialog(null); }); }
+
+  load();
+});
+</script>
+
+{% endblock %}

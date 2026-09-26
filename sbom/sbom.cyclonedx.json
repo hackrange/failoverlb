@@ -1,0 +1,1037 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.5",
+  "serialNumber": "urn:uuid:a6716b3c-0a87-0eeb-800a-a6c864b91dd0",
+  "version": 1,
+  "metadata": {
+    "timestamp": "1970-01-01T00:00:00Z",
+    "tools": [
+      {
+        "vendor": "Failover LB",
+        "name": "tools/sbom.py"
+      }
+    ],
+    "component": {
+      "type": "application",
+      "name": "failover-lb",
+      "version": "1.0.0",
+      "description": "nginx fleet manager: two phase config apply, certificates, firewall, tunnel",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ]
+    },
+    "properties": [
+      {
+        "name": "failoverlb:commit",
+        "value": "d7ad8118de3a2c1b9ae563f6ba218210a3526254"
+      },
+      {
+        "name": "failoverlb:build",
+        "value": "d7ad811"
+      }
+    ]
+  },
+  "components": [
+    {
+      "type": "container",
+      "name": "python",
+      "version": "3.12-slim-bookworm",
+      "purl": "pkg:docker/python@3.12-slim-bookworm",
+      "description": "the image the manager runs in",
+      "properties": [
+        {
+          "name": "failoverlb:layer",
+          "value": "container"
+        },
+        {
+          "name": "failoverlb:licence-note",
+          "value": "a Debian based image whose packages carry their own licences"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "fastapi",
+      "version": "0.115.6",
+      "purl": "pkg:pypi/fastapi@0.115.6",
+      "description": "pinned in requirements.txt",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "failoverlb:layer",
+          "value": "application"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "uvicorn",
+      "version": "0.34.0",
+      "purl": "pkg:pypi/uvicorn@0.34.0",
+      "description": "pinned in requirements.txt",
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "failoverlb:layer",
+          "value": "application"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "starlette",
+      "version": "0.41.3",
+      "purl": "pkg:pypi/starlette@0.41.3",
+      "description": "pinned in requirements.txt",
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "failoverlb:layer",
+          "value": "application"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "python-multipart",
+      "version": "0.0.30",
+      "purl": "pkg:pypi/python-multipart@0.0.30",
+      "description": "pinned in requirements.txt",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "failoverlb:layer",
+          "value": "application"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "itsdangerous",
+      "version": "2.2.0",
+      "purl": "pkg:pypi/itsdangerous@2.2.0",
+      "description": "pinned in requirements.txt",
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "failoverlb:layer",
+          "value": "application"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "Jinja2",
+      "version": "3.1.5",
+      "purl": "pkg:pypi/jinja2@3.1.5",
+      "description": "pinned in requirements.txt",
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "failoverlb:layer",
+          "value": "application"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "MarkupSafe",
+      "version": "3.0.2",
+      "purl": "pkg:pypi/markupsafe@3.0.2",
+      "description": "pinned in requirements.txt",
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "failoverlb:layer",
+          "value": "application"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "SQLAlchemy",
+      "version": "2.0.36",
+      "purl": "pkg:pypi/sqlalchemy@2.0.36",
+      "description": "pinned in requirements.txt",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "failoverlb:layer",
+          "value": "application"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "alembic",
+      "version": "1.14.0",
+      "purl": "pkg:pypi/alembic@1.14.0",
+      "description": "pinned in requirements.txt",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "failoverlb:layer",
+          "value": "application"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "pydantic",
+      "version": "2.10.4",
+      "purl": "pkg:pypi/pydantic@2.10.4",
+      "description": "pinned in requirements.txt",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "failoverlb:layer",
+          "value": "application"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "pydantic-settings",
+      "version": "2.7.0",
+      "purl": "pkg:pypi/pydantic-settings@2.7.0",
+      "description": "pinned in requirements.txt",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "failoverlb:layer",
+          "value": "application"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "argon2-cffi",
+      "version": "23.1.0",
+      "purl": "pkg:pypi/argon2-cffi@23.1.0",
+      "description": "pinned in requirements.txt",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "failoverlb:layer",
+          "value": "application"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "pyotp",
+      "version": "2.9.0",
+      "purl": "pkg:pypi/pyotp@2.9.0",
+      "description": "pinned in requirements.txt",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "failoverlb:layer",
+          "value": "application"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "PyJWT",
+      "version": "2.13.0",
+      "purl": "pkg:pypi/pyjwt@2.13.0",
+      "description": "pinned in requirements.txt",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "failoverlb:layer",
+          "value": "application"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "qrcode",
+      "version": "8.0",
+      "purl": "pkg:pypi/qrcode@8.0",
+      "description": "pinned in requirements.txt",
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "failoverlb:layer",
+          "value": "application"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "cryptography",
+      "version": "44.0.0",
+      "purl": "pkg:pypi/cryptography@44.0.0",
+      "description": "pinned in requirements.txt",
+      "licenses": [
+        {
+          "expression": "Apache-2.0 OR BSD-3-Clause"
+        }
+      ],
+      "properties": [
+        {
+          "name": "failoverlb:layer",
+          "value": "application"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "httpx",
+      "version": "0.28.1",
+      "purl": "pkg:pypi/httpx@0.28.1",
+      "description": "pinned in requirements.txt",
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "failoverlb:layer",
+          "value": "application"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "dnspython",
+      "version": "2.7.0",
+      "purl": "pkg:pypi/dnspython@2.7.0",
+      "description": "pinned in requirements.txt",
+      "licenses": [
+        {
+          "license": {
+            "id": "ISC"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "failoverlb:layer",
+          "value": "application"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "APScheduler",
+      "version": "3.11.0",
+      "purl": "pkg:pypi/apscheduler@3.11.0",
+      "description": "pinned in requirements.txt",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "failoverlb:layer",
+          "value": "application"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "prometheus-client",
+      "version": "0.21.1",
+      "purl": "pkg:pypi/prometheus-client@0.21.1",
+      "description": "pinned in requirements.txt",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "failoverlb:layer",
+          "value": "application"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "pyzipper",
+      "version": "0.3.6",
+      "purl": "pkg:pypi/pyzipper@0.3.6",
+      "description": "pinned in requirements.txt",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "failoverlb:layer",
+          "value": "application"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "pycryptodomex",
+      "version": "3.21.0",
+      "purl": "pkg:pypi/pycryptodomex@3.21.0",
+      "description": "pinned in requirements.txt",
+      "licenses": [
+        {
+          "expression": "BSD-2-Clause AND LicenseRef-public-domain"
+        }
+      ],
+      "properties": [
+        {
+          "name": "failoverlb:layer",
+          "value": "application"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "nginx",
+      "version": "1.30.4",
+      "purl": "pkg:generic/nginx@1.30.4",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://nginx.org/download/nginx-1.30.4.tar.gz"
+        }
+      ],
+      "description": "built from source so the module set can be chosen",
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-2-Clause"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "failoverlb:layer",
+          "value": "nginx"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "openssl",
+      "version": "3.5.7",
+      "purl": "pkg:generic/openssl@3.5.7",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://github.com/openssl/openssl/releases/download/openssl-3.5.7/openssl-3.5.7.tar.gz"
+        }
+      ],
+      "description": "pinned at 3.5 or later for the QUIC API and ML-KEM, which is what makes the post quantum key exchange possible",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "failoverlb:layer",
+          "value": "nginx"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "modsecurity",
+      "version": "3.0.16",
+      "purl": "pkg:generic/modsecurity@3.0.16",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://github.com/owasp-modsecurity/ModSecurity"
+        }
+      ],
+      "description": "the web application firewall engine, built only when asked for",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "failoverlb:layer",
+          "value": "nginx"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "ngx_devel_kit",
+      "version": "master",
+      "purl": "pkg:github/vision5/ngx_devel_kit@master",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://github.com/vision5/ngx_devel_kit"
+        }
+      ],
+      "description": "compiled into the nginx binary.  Tracks a branch rather than a tag, so two builds on different days are not the same build",
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "failoverlb:layer",
+          "value": "nginx"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "lua-nginx-module",
+      "version": "v0.10.28",
+      "purl": "pkg:github/openresty/lua-nginx-module@v0.10.28",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://github.com/openresty/lua-nginx-module"
+        }
+      ],
+      "description": "compiled into the nginx binary",
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-2-Clause"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "failoverlb:layer",
+          "value": "nginx"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "echo-nginx-module",
+      "version": "v0.63",
+      "purl": "pkg:github/openresty/echo-nginx-module@v0.63",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://github.com/openresty/echo-nginx-module"
+        }
+      ],
+      "description": "compiled into the nginx binary",
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-2-Clause"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "failoverlb:layer",
+          "value": "nginx"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "headers-more-nginx-module",
+      "version": "v0.40",
+      "purl": "pkg:github/openresty/headers-more-nginx-module@v0.40",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://github.com/openresty/headers-more-nginx-module"
+        }
+      ],
+      "description": "compiled into the nginx binary",
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-2-Clause"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "failoverlb:layer",
+          "value": "nginx"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "ngx-fancyindex",
+      "version": "v0.5.2",
+      "purl": "pkg:github/aperezdc/ngx-fancyindex@v0.5.2",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://github.com/aperezdc/ngx-fancyindex"
+        }
+      ],
+      "description": "compiled into the nginx binary",
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-2-Clause"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "failoverlb:layer",
+          "value": "nginx"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "ngx_cache_purge",
+      "version": "master",
+      "purl": "pkg:github/nginx-modules/ngx_cache_purge@master",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://github.com/nginx-modules/ngx_cache_purge"
+        }
+      ],
+      "description": "compiled into the nginx binary.  Tracks a branch rather than a tag, so two builds on different days are not the same build",
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-2-Clause"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "failoverlb:layer",
+          "value": "nginx"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "nginx-dav-ext-module",
+      "version": "v3.0.0",
+      "purl": "pkg:github/arut/nginx-dav-ext-module@v3.0.0",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://github.com/arut/nginx-dav-ext-module"
+        }
+      ],
+      "description": "compiled into the nginx binary",
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-2-Clause"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "failoverlb:layer",
+          "value": "nginx"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "subs-filter",
+      "version": "master",
+      "purl": "pkg:github/yaoweibin/ngx_http_substitutions_filter_module@master",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://github.com/yaoweibin/ngx_http_substitutions_filter_module"
+        }
+      ],
+      "description": "compiled into the nginx binary.  Tracks a branch rather than a tag, so two builds on different days are not the same build",
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-2-Clause"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "failoverlb:layer",
+          "value": "nginx"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "upload-progress",
+      "version": "master",
+      "purl": "pkg:github/masterzen/nginx-upload-progress-module@master",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://github.com/masterzen/nginx-upload-progress-module"
+        }
+      ],
+      "description": "compiled into the nginx binary.  Tracks a branch rather than a tag, so two builds on different days are not the same build",
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-2-Clause"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "failoverlb:layer",
+          "value": "nginx"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "auth-pam",
+      "version": "master",
+      "purl": "pkg:github/sto/ngx_http_auth_pam_module@master",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://github.com/sto/ngx_http_auth_pam_module"
+        }
+      ],
+      "description": "compiled into the nginx binary.  Tracks a branch rather than a tag, so two builds on different days are not the same build",
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-2-Clause"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "failoverlb:layer",
+          "value": "nginx"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "geoip2",
+      "version": "master",
+      "purl": "pkg:github/leev/ngx_http_geoip2_module@master",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://github.com/leev/ngx_http_geoip2_module"
+        }
+      ],
+      "description": "compiled into the nginx binary.  Tracks a branch rather than a tag, so two builds on different days are not the same build",
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-2-Clause"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "failoverlb:layer",
+          "value": "nginx"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "upstream-fair",
+      "version": "master",
+      "purl": "pkg:github/itoffshore/nginx-upstream-fair@master",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://github.com/itoffshore/nginx-upstream-fair"
+        }
+      ],
+      "description": "compiled into the nginx binary.  Tracks a branch rather than a tag, so two builds on different days are not the same build",
+      "properties": [
+        {
+          "name": "failoverlb:layer",
+          "value": "nginx"
+        },
+        {
+          "name": "failoverlb:licence-note",
+          "value": "the source ships no licence, only a copyright notice"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "modsecurity-nginx",
+      "version": "v1.0.4",
+      "purl": "pkg:github/owasp-modsecurity/ModSecurity-nginx@v1.0.4",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://github.com/owasp-modsecurity/ModSecurity-nginx"
+        }
+      ],
+      "description": "built as a loadable module, present only when the firewall was asked for",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "failoverlb:layer",
+          "value": "nginx"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "luajit2",
+      "version": "master",
+      "purl": "pkg:github/openresty/luajit2@master",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://github.com/openresty/luajit2"
+        }
+      ],
+      "description": "the lua runtime the lua module needs",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "failoverlb:layer",
+          "value": "nginx"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "lua-resty-core",
+      "version": "v0.1.31",
+      "purl": "pkg:github/openresty/lua-resty-core@v0.1.31",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://github.com/openresty/lua-resty-core"
+        }
+      ],
+      "description": "the lua runtime the lua module needs",
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-2-Clause"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "failoverlb:layer",
+          "value": "nginx"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "lua-resty-lrucache",
+      "version": "v0.15",
+      "purl": "pkg:github/openresty/lua-resty-lrucache@v0.15",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://github.com/openresty/lua-resty-lrucache"
+        }
+      ],
+      "description": "the lua runtime the lua module needs",
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-2-Clause"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "failoverlb:layer",
+          "value": "nginx"
+        }
+      ]
+    },
+    {
+      "type": "data",
+      "name": "owasp-crs",
+      "version": "fetched at run time, lts or latest track",
+      "purl": "pkg:github/coreruleset/coreruleset",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://github.com/coreruleset/coreruleset"
+        }
+      ],
+      "description": "the firewall rules.  Chosen by track and updated on a schedule, so the version on a node is a property of that node rather than of this release.  The GUI reports what each node actually has.",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "failoverlb:layer",
+          "value": "data"
+        }
+      ]
+    },
+    {
+      "type": "data",
+      "name": "geolite2-country",
+      "version": "fetched at run time",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://www.maxmind.com/"
+        }
+      ],
+      "description": "the country database for geo blocking.  Fetched with the operator's own credentials and never redistributed with this product.",
+      "licenses": [
+        {
+          "expression": "LicenseRef-MaxMind-GeoLite2-EULA"
+        }
+      ],
+      "properties": [
+        {
+          "name": "failoverlb:layer",
+          "value": "data"
+        },
+        {
+          "name": "failoverlb:licence-note",
+          "value": "MaxMind's end user agreement, not an open source licence, and fetched at run time rather than shipped"
+        }
+      ]
+    }
+  ]
+}

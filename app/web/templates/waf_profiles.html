@@ -1,0 +1,265 @@
+{% extends "base.html" %}
+{% block title %}WAF Profiles &middot; Failover LB{% endblock %}
+
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <h1>WAF profiles</h1>
+    <div class="sub">
+      Tuned rule sets, made from a learning session and applied to any number of
+      sites.
+    </div>
+  </div>
+</div>
+
+<div class="notice info">
+  <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 3a.9.9 0 1 1 0 1.8A.9.9 0 0 1 8 4zm1.2 8H6.8v-.9h.7V7.9h-.7V7h2.1v4.1h.3V12z"/></svg>
+  <div>
+    A profile is made on a site's own WAF tab, during a learning session, which
+    is where the evidence is.  This is where they live afterwards: what each one
+    excuses, which sites are relying on it, and whether it still matches the
+    rules installed today.
+    <br><br>
+    Editing one changes <strong>every site using it</strong> at the next apply,
+    which is the point of having them and the reason the list of users is on
+    every card.
+  </div>
+</div>
+
+{% if not profiles %}
+  <div class="card">
+    <div class="card-body">
+      <div class="empty">
+        <strong>No profiles yet.</strong>
+        <p class="small muted">
+          Open a site, go to its WAF tab, start a learning session with the
+          addresses your testers work from, exercise the application, then stop
+          and save what fired as a profile.  It will appear here.
+        </p>
+      </div>
+    </div>
+  </div>
+{% endif %}
+
+<div id="profile-list"></div>
+
+{% endblock %}
+
+{% block scripts %}
+<script nonce="{{ csp_nonce }}">
+document.addEventListener("DOMContentLoaded", function () {
+  const holder = document.getElementById("profile-list");
+  const CAN_EDIT = {{ 'true' if can('edit_sites') else 'false' }};
+
+  function when(iso) {
+    if (!iso) return "unknown";
+    return String(iso).replace("T", " ").slice(0, 16);
+  }
+
+  async function load() {
+    let data, rules;
+    try { data = await NFM.api("/waf/profiles"); }
+    catch (err) { holder.textContent = err.message; return; }
+
+    // Which rule ids the installed rule set actually has.  Without this an
+    // exclusion can point at a rule retired by a rule set update: it does
+    // nothing, it is invisible, and nobody dares delete it.  A WAF fills up
+    // with those until it is excusing a list of rules that no longer exist.
+    try { rules = await NFM.api("/waf/rule-ids"); }
+    catch (err) { rules = null; }
+    const known = rules && rules.ids ? new Set(rules.ids.map(String)) : null;
+
+    const profiles = data.profiles || [];
+    if (!profiles.length) { holder.innerHTML = ""; return; }
+
+    holder.innerHTML = profiles.map(function (p) {
+      const orphans = known
+        ? (p.exclusions || []).filter(e => !known.has(String(e.rule_id)))
+        : [];
+
+      const rows = (p.exclusions || []).map(function (e) {
+        const dead = known && !known.has(String(e.rule_id));
+        // The path is an input rather than text when you may edit, because
+        // generalising a learned path is the everyday job here, not a rare
+        // one: learning gives one row per object and the useful rule is the
+        // pattern behind them.
+        const pathCell = CAN_EDIT
+          ? '<input class="mono small waf-path" style="width:100%;min-width:16rem" ' +
+            'value="' + NFM.escapeHtml(e.path || "") +
+            '" placeholder="blank means the whole site" ' +
+            'data-profile="' + p.id + '" data-exclusion="' + e.id +
+            '" data-was="' + NFM.escapeHtml(e.path || "") + '">'
+          : "<span class='mono small'>" +
+            NFM.escapeHtml(e.path || "whole site") + "</span>";
+        return "<tr" + (dead ? ' class="faint"' : "") + ">" +
+          "<td><strong>" + NFM.escapeHtml(e.rule_id) + "</strong>" +
+          (dead ? ' <span class="badge warn">not in the rule set</span>' : "") +
+          "</td><td>" + pathCell + "</td>" +
+          "<td class='small muted'>" + NFM.escapeHtml(e.message || "") + "</td>" +
+          "<td class='small faint'>" + NFM.escapeHtml(e.learned_from_ip || "-") +
+          "</td><td class='small faint'>" + when(e.created_at) + "</td>" +
+          (CAN_EDIT
+            ? '<td><button class="btn sm danger" data-drop-profile="' + p.id +
+              '" data-drop="' + e.id + '" data-rule="' + NFM.escapeHtml(e.rule_id) +
+              '" data-path="' + NFM.escapeHtml(e.path || "the whole site") +
+              '">Remove</button></td>'
+            : "") +
+          "</tr>";
+      }).join("");
+
+      const used = p.used_by || [];
+
+      return '<div class="card">' +
+        '<div class="card-head"><h2>' + NFM.escapeHtml(p.name) + "</h2>" +
+        '<span class="small faint">' + (p.exclusions || []).length +
+        " exclusions</span></div>" +
+        '<div class="card-body">' +
+
+        (p.description
+          ? '<p class="small muted" style="margin-top:0">' +
+            NFM.escapeHtml(p.description) + "</p>" : "") +
+
+        // Provenance.  An exclusion nobody can explain is one nobody will dare
+        // remove, so where it came from travels with it.
+        '<dl class="kv">' +
+        "<dt>Learned from</dt><dd>" +
+        NFM.escapeHtml(p.learned_from_site || "unknown site") +
+        (p.learned_at ? ' <span class="faint small">on ' + when(p.learned_at) + "</span>" : "") +
+        "</dd>" +
+        "<dt>Tester addresses</dt><dd class='mono small'>" +
+        NFM.escapeHtml((p.learned_from_addresses || []).join(", ") || "not recorded") +
+        "</dd>" +
+        "<dt>Used by</dt><dd>" +
+        (used.length
+          ? used.map(n => '<a href="{{ base }}/sites">' + NFM.escapeHtml(n) + "</a>").join(", ")
+          : '<span class="faint">no sites</span>') +
+        "</dd></dl>" +
+
+        (orphans.length
+          ? '<div class="notice warn"><div><strong>' + orphans.length +
+            (orphans.length === 1 ? " exclusion points" : " exclusions point") +
+            " at a rule the installed rule set no longer has.</strong>  " +
+            "A rule set update retires and renumbers rules, so these now do " +
+            "nothing at all.  They are safe to remove and worth removing, " +
+            "because a profile nobody trusts is one nobody prunes." +
+            "</div></div>"
+          : "") +
+
+        '<div class="table-scroll"><table><thead><tr>' +
+        "<th>Rule</th><th>Path</th><th>Why</th><th>From</th><th>Added</th>" +
+        (CAN_EDIT ? "<th></th>" : "") +
+        "</tr></thead><tbody>" + rows + "</tbody></table></div>" +
+
+        (CAN_EDIT
+          ? '<p class="small muted">Edit a path and press Enter or click away ' +
+            "to save.  <code>*</code> matches one part of a path and " +
+            "<code>**</code> matches any number, so " +
+            "<code>/trice/*.git/*</code> covers every repository including " +
+            "the ones that do not exist yet.  Blank means the whole site, " +
+            "which is a much bigger decision than it looks.</p>" +
+            '<div class="flex mb">' +
+            '<input class="mono sm waf-new-rule" style="max-width:9rem" ' +
+            'placeholder="rule id" data-profile="' + p.id + '">' +
+            '<input class="mono sm waf-new-path" style="max-width:22rem" ' +
+            'placeholder="/path/*  (blank means the whole site)" data-profile="' + p.id + '">' +
+            '<button class="btn sm" data-add="' + p.id + '">Add by hand</button>' +
+            "</div>"
+          : "") +
+
+        (CAN_EDIT
+          ? '<div class="flex mt"><button class="btn danger" data-del="' + p.id +
+            '" data-name="' + NFM.escapeHtml(p.name) + '"' +
+            (used.length ? " disabled" : "") + ">Delete</button>" +
+            (used.length
+              ? '<span class="small faint">Point those sites at something else first.</span>'
+              : "") +
+            "</div>"
+          : "") +
+
+        "</div></div>";
+    }).join("");
+  }
+
+  // Saving a path.  On blur rather than on every keystroke, and only when it
+  // actually changed, so tabbing through a table does not write a row per
+  // column.
+  holder.addEventListener("focusout", async function (ev) {
+    const box = ev.target.closest(".waf-path");
+    if (!box || box.value === box.dataset.was) return;
+    const wanted = box.value.trim();
+    box.disabled = true;
+    try {
+      await NFM.api("/waf/profiles/" + box.dataset.profile + "/exclusions/" +
+                    box.dataset.exclusion,
+                    { method: "PATCH", body: { path: wanted } });
+      box.dataset.was = wanted;
+      NFM.toast("Saved.  It reaches the sites at the next Apply config.", "ok");
+      load();
+    } catch (err) {
+      NFM.toast(err.message, "bad");
+      box.value = box.dataset.was;
+      box.disabled = false;
+    }
+  });
+
+  holder.addEventListener("keydown", function (ev) {
+    if (ev.key === "Enter" && ev.target.closest(".waf-path")) {
+      ev.preventDefault();
+      ev.target.blur();
+    }
+  });
+
+  holder.addEventListener("click", async function (ev) {
+    const add = ev.target.closest("[data-add]");
+    if (add) {
+      const id = add.dataset.add;
+      const rule = holder.querySelector('.waf-new-rule[data-profile="' + id + '"]');
+      const path = holder.querySelector('.waf-new-path[data-profile="' + id + '"]');
+      if (!rule.value.trim()) { NFM.toast("Which rule id?", "bad"); return; }
+      try {
+        await NFM.api("/waf/profiles/" + id + "/exclusions", {
+          method: "POST",
+          body: { rule_id: rule.value.trim(), path: path.value.trim() },
+        });
+        NFM.toast("Added", "ok");
+        load();
+      } catch (err) { NFM.toast(err.message, "bad"); }
+      return;
+    }
+
+    const drop = ev.target.closest("[data-drop]");
+    if (drop) {
+      NFM.confirmThen(
+        "Put rule " + drop.dataset.rule + " back into force on " +
+        drop.dataset.path + "?\n\n" +
+        "Every site using this profile starts checking that rule again at the " +
+        "next apply.  If it was excused because it was wrong about your " +
+        "application, it will start refusing that traffic again.",
+        async function () {
+          await NFM.api("/waf/profiles/" + drop.dataset.dropProfile +
+                        "/exclusions/" + drop.dataset.drop, { method: "DELETE" });
+          NFM.toast("Removed", "ok");
+          load();
+        });
+      return;
+    }
+
+    const del = ev.target.closest("[data-del]");
+    if (!del) return;
+    NFM.confirmThen(
+      "Delete the profile " + del.dataset.name + "?\n\n" +
+      "Any site using it would fall back to an untuned rule set and start " +
+      "refusing traffic it was tuned to allow, which is why this is refused " +
+      "while a site still points at it.",
+      async function () {
+        await NFM.api("/waf/profiles/" + del.dataset.del, { method: "DELETE" });
+        NFM.toast("Deleted", "ok");
+        load();
+      });
+  });
+
+  load();
+});
+</script>
+{% endblock %}

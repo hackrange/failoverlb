@@ -1,0 +1,402 @@
+{% extends "base.html" %}
+{% block title %}Error Pages &middot; Failover LB{% endblock %}
+
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <h1>Error pages</h1>
+    <div class="sub">
+      Your own page instead of the stock nginx one.  Write it once here and
+      point as many sites at it as you like.
+    </div>
+  </div>
+  <div class="page-actions">
+    {% if can('edit_sites') %}
+      <button class="btn primary" id="new-template">New template</button>
+    {% endif %}
+    {% if can('apply_config') %}
+      <button class="btn" id="apply-config">Apply config</button>
+    {% endif %}
+  </div>
+</div>
+
+<div class="notice info">
+  <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 3a.9.9 0 1 1 0 1.8A.9.9 0 0 1 8 4zm1.2 8H6.8v-.9h.7V7.9h-.7V7h2.1v4.1h.3V12z"/></svg>
+  <div>
+    The status code is not part of the template.  One template answers for 404,
+    500, 502 and the rest, and the code gets dropped in where you ask for it.
+    That is why these are shared objects: without it you would be writing a page
+    per code per site.
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head"><h2>Templates</h2></div>
+  <div class="card-body no-pad">
+    <table class="table">
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Answers for</th>
+          <th>Pictures</th>
+          <th>Used by</th>
+          <th class="right"></th>
+        </tr>
+      </thead>
+      <tbody id="template-rows">
+        <tr><td colspan="5" class="faint">Loading...</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- The editor, hidden until something is picked -->
+<div class="card" id="editor" style="display:none">
+  <div class="card-head">
+    <h2 id="editor-title">Template</h2>
+    <div class="card-actions">
+      {% if can('edit_sites') %}
+        <button class="btn primary" id="save-template">Save</button>
+      {% endif %}
+      <button class="btn" id="close-editor">Close</button>
+    </div>
+  </div>
+  <div class="card-body">
+
+    <div class="form-grid">
+      <div class="field">
+        <label for="t-name">Name</label>
+        <input type="text" id="t-name">
+        <div class="hint">Used as the folder the pages are written to.</div>
+      </div>
+      <div class="field">
+        <label for="t-desc">Description</label>
+        <input type="text" id="t-desc">
+      </div>
+    </div>
+
+    <h3>Which errors it answers for</h3>
+    <p class="hint">
+      Only the codes you tick get a page.  Anything else falls back to the stock
+      nginx page, which is the right answer for codes a visitor never sees.
+    </p>
+    <div id="code-boxes" class="check-grid"></div>
+
+    <h3>The page</h3>
+    <p class="hint">
+      Plain HTML.  Put everything in this one file, styles included: this is the
+      page you serve when the site is already having a bad time, so it must not
+      need to fetch anything to look right.
+    </p>
+
+    <div class="placeholder-help">
+      {% for token, what in placeholders %}
+        <div><code>{{ token }}</code> <span class="faint">{{ what }}</span></div>
+      {% endfor %}
+    </div>
+
+    <div class="field">
+      <textarea id="t-html" rows="20" class="mono" spellcheck="false"></textarea>
+    </div>
+
+    <h3>Pictures</h3>
+    <p class="hint">
+      Up to {{ max_image_kb }}KB each and {{ max_total_kb }}KB in total.  They go
+      into the page itself rather than being served as files, so a page can never
+      be missing one.  PNG, JPEG, GIF, SVG and ICO.
+    </p>
+    <div id="image-list" class="image-list"></div>
+    {% if can('edit_sites') %}
+      <div class="row gap">
+        <input type="text" id="img-name" placeholder="name, like logo" style="max-width:14rem">
+        <input type="file" id="img-file" accept="image/*">
+        <button class="btn" id="upload-image">Upload</button>
+      </div>
+    {% endif %}
+
+    <h3>What it looks like</h3>
+    <div class="row gap">
+      <label for="preview-code" class="inline-label">Show me a</label>
+      <select id="preview-code"></select>
+      <button class="btn" id="refresh-preview">Refresh</button>
+      <span class="faint small">Saved changes only.  Save first to see an edit.</span>
+    </div>
+    <iframe id="preview" class="preview-frame" title="Error page preview"></iframe>
+  </div>
+</div>
+
+<style>
+  .check-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr));
+                gap: 0.35rem 1rem; margin-bottom: 1rem; }
+  .check-grid label { display: flex; align-items: center; gap: 0.4rem; font-weight: 400; }
+  .placeholder-help { border: 1px solid var(--line, #ddd); border-radius: 4px;
+                      padding: 0.6rem 0.8rem; margin-bottom: 0.75rem; font-size: 0.85rem; }
+  .placeholder-help div { padding: 0.15rem 0; }
+  .preview-frame { width: 100%; height: 26rem; border: 1px solid var(--line, #ddd);
+                   border-radius: 4px; margin-top: 0.75rem; background: #fff; }
+  .image-list { display: flex; flex-wrap: wrap; gap: 0.75rem; margin-bottom: 0.75rem; }
+  .image-card { border: 1px solid var(--line, #ddd); border-radius: 4px; padding: 0.5rem;
+                font-size: 0.8rem; max-width: 12rem; }
+  .image-card img { max-width: 100%; max-height: 4rem; display: block; margin-bottom: 0.3rem; }
+  .row.gap { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+  .inline-label { font-weight: 400; }
+</style>
+
+<script nonce="{{ csp_nonce }}">
+// Waiting for DOMContentLoaded is not about the elements being there.  app.js
+// is the last thing in the layout, after this block, so an inline script that
+// runs straight away runs before window.NFM exists.  Everything here goes
+// through NFM, so without the wait the whole page does nothing and the only
+// sign of it is a table that never stops saying it is loading.
+document.addEventListener("DOMContentLoaded", function () {
+  const BASE = document.querySelector('meta[name=nfm-base]').content;
+  const MESSAGES = {{ messages | tojson }};
+  const DEFAULT_CODES = {{ default_codes | tojson }};
+  const CAN_EDIT = {{ 'true' if can('edit_sites') else 'false' }};
+
+  let current = null;
+
+  function el(id) { return document.getElementById(id); }
+  function val(id) { return el(id).value.trim(); }
+
+  // ---------------------------------------------------------------- the list
+  async function loadList() {
+    let data;
+    try {
+      data = await NFM.api("/error-pages");
+    } catch (err) {
+      // Written without NFM on purpose.  If this handler needs the very thing
+      // that failed, a page that cannot load says nothing at all and looks
+      // like it is still working.
+      const cell = document.createElement("td");
+      cell.colSpan = 5;
+      cell.className = "faint";
+      cell.textContent = "Could not load: " + (err && err.message ? err.message : err);
+      const row = document.createElement("tr");
+      row.appendChild(cell);
+      el("template-rows").replaceChildren(row);
+      return;
+    }
+
+    const rows = data.templates || [];
+    if (!rows.length) {
+      el("template-rows").innerHTML =
+        '<tr><td colspan="5" class="faint">Nothing here yet.  ' +
+        'A new template starts as a working page you can edit.</td></tr>';
+      return;
+    }
+
+    el("template-rows").innerHTML = rows.map(function (t) {
+      const codes = (t.codes || []).join(", ") || "nothing";
+      return "<tr>" +
+        "<td><strong>" + NFM.escapeHtml(t.name) + "</strong>" +
+        (t.description ? "<div class='small faint'>" +
+          NFM.escapeHtml(t.description) + "</div>" : "") + "</td>" +
+        "<td class='mono small'>" + NFM.escapeHtml(codes) + "</td>" +
+        "<td>" + t.image_count + "</td>" +
+        "<td class='small faint' data-used='" + t.id + "'></td>" +
+        "<td class='right'>" +
+          '<button class="btn small" data-open="' + t.id + '">Open</button> ' +
+          (CAN_EDIT ? '<button class="btn small danger" data-del="' + t.id +
+            '" data-name="' + NFM.escapeHtml(t.name) + '">Delete</button>' : "") +
+        "</td></tr>";
+    }).join("");
+  }
+
+  // ------------------------------------------------------------- the editor
+  function drawCodes(chosen) {
+    const all = Object.keys(MESSAGES).map(Number).sort(function (a, b) { return a - b; });
+    el("code-boxes").innerHTML = all.map(function (code) {
+      const on = chosen.indexOf(code) !== -1 ? " checked" : "";
+      return '<label><input type="checkbox" value="' + code + '"' + on + '> ' +
+             '<span class="mono">' + code + '</span> ' +
+             '<span class="faint small">' + NFM.escapeHtml(MESSAGES[code]) + "</span></label>";
+    }).join("");
+  }
+
+  function chosenCodes() {
+    return Array.prototype.slice
+      .call(el("code-boxes").querySelectorAll("input:checked"))
+      .map(function (box) { return parseInt(box.value, 10); });
+  }
+
+  function drawImages(images) {
+    if (!images.length) {
+      el("image-list").innerHTML = '<div class="faint small">No pictures yet.</div>';
+      return;
+    }
+    el("image-list").innerHTML = images.map(function (img) {
+      return '<div class="image-card">' +
+        '<div class="faint small">' + NFM.escapeHtml(img.content_type) + "</div>" +
+        "<strong>" + NFM.escapeHtml(img.name) + "</strong>" +
+        '<div class="mono small">' + NFM.escapeHtml(img.token) + "</div>" +
+        '<div class="faint small">' + Math.ceil(img.size_bytes / 1024) + "KB</div>" +
+        (CAN_EDIT ? '<button class="btn small danger" data-delimg="' + img.id +
+          '">Remove</button>' : "") +
+        "</div>";
+    }).join("");
+  }
+
+  function drawPreviewCodes(codes) {
+    el("preview-code").innerHTML = codes.map(function (c) {
+      return '<option value="' + c + '">' + c + " " +
+             NFM.escapeHtml(MESSAGES[c] || "") + "</option>";
+    }).join("");
+  }
+
+  async function open(id) {
+    current = await NFM.api("/error-pages/" + id);
+    el("editor").style.display = "";
+    el("editor-title").textContent = current.name;
+    el("t-name").value = current.name;
+    el("t-desc").value = current.description || "";
+    el("t-html").value = current.html || "";
+    drawCodes(current.codes || []);
+    drawImages(current.images || []);
+    drawPreviewCodes(current.codes || []);
+    refreshPreview();
+
+    const cell = document.querySelector('[data-used="' + current.id + '"]');
+    if (cell) {
+      cell.textContent = (current.used_by || []).join(", ") || "nothing yet";
+    }
+    el("editor").scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  function refreshPreview() {
+    if (!current) { return; }
+    const code = el("preview-code").value || 404;
+    // Loaded by URL rather than srcdoc so the page arrives with its own
+    // sandbox policy, which is what keeps somebody else's markup off this
+    // origin.  See sandboxed_html_headers on the server side.
+    el("preview").src = BASE + "/api/error-pages/" + current.id +
+                        "/preview?code=" + encodeURIComponent(code);
+  }
+
+  async function save() {
+    const codes = chosenCodes();
+    if (!codes.length) {
+      NFM.toast("Tick at least one status code, or this template never gets shown", "error");
+      return;
+    }
+    try {
+      current = await NFM.api("/error-pages/" + current.id, {
+        method: "PUT",
+        body: {
+          name: val("t-name"),
+          description: val("t-desc"),
+          codes: codes,
+          html: el("t-html").value,
+        },
+      });
+    } catch (err) {
+      NFM.toast(err.message, "error");
+      return;
+    }
+    NFM.toast("Saved.  It reaches the sites on the next apply.", "ok");
+    drawPreviewCodes(current.codes || []);
+    refreshPreview();
+    loadList();
+  }
+
+  // -------------------------------------------------------------- the wiring
+  el("template-rows").addEventListener("click", async function (ev) {
+    const openBtn = ev.target.closest("[data-open]");
+    if (openBtn) { open(openBtn.dataset.open); return; }
+
+    const delBtn = ev.target.closest("[data-del]");
+    if (delBtn) {
+      if (!confirm("Delete the template " + delBtn.dataset.name + "?")) { return; }
+      try {
+        await NFM.api("/error-pages/" + delBtn.dataset.del, { method: "DELETE" });
+      } catch (err) {
+        NFM.toast(err.message, "error");
+        return;
+      }
+      if (current && String(current.id) === delBtn.dataset.del) {
+        el("editor").style.display = "none";
+        current = null;
+      }
+      NFM.toast("Deleted", "ok");
+      loadList();
+    }
+  });
+
+  const newBtn = el("new-template");
+  if (newBtn) {
+    newBtn.addEventListener("click", async function () {
+      const name = prompt("What should this template be called?");
+      if (!name) { return; }
+      let made;
+      try {
+        made = await NFM.api("/error-pages", { method: "POST", body: { name: name } });
+      } catch (err) {
+        NFM.toast(err.message, "error");
+        return;
+      }
+      await loadList();
+      open(made.id);
+    });
+  }
+
+  const saveBtn = el("save-template");
+  if (saveBtn) { saveBtn.addEventListener("click", save); }
+
+  el("close-editor").addEventListener("click", function () {
+    el("editor").style.display = "none";
+    current = null;
+  });
+
+  el("refresh-preview").addEventListener("click", refreshPreview);
+  el("preview-code").addEventListener("change", refreshPreview);
+
+  const uploadBtn = el("upload-image");
+  if (uploadBtn) {
+    uploadBtn.addEventListener("click", function () {
+      const file = el("img-file").files[0];
+      const name = val("img-name");
+      if (!file) { NFM.toast("Pick a file first", "error"); return; }
+      if (!name) { NFM.toast("Give it a name, that is what goes in {{ '{{image:name}}' }}", "error"); return; }
+
+      const reader = new FileReader();
+      reader.onload = async function () {
+        try {
+          current = await NFM.api("/error-pages/" + current.id + "/images", {
+            method: "POST",
+            body: { name: name, filename: file.name, data: reader.result },
+          });
+        } catch (err) {
+          NFM.toast(err.message, "error");
+          return;
+        }
+        drawImages(current.images || []);
+        el("img-name").value = "";
+        el("img-file").value = "";
+        NFM.toast("Uploaded.  Put " + "{{ '{{image:' }}" + name + "}} in the page.", "ok");
+        loadList();
+      };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  el("image-list").addEventListener("click", async function (ev) {
+    const btn = ev.target.closest("[data-delimg]");
+    if (!btn) { return; }
+    try {
+      current = await NFM.api(
+        "/error-pages/" + current.id + "/images/" + btn.dataset.delimg,
+        { method: "DELETE" });
+    } catch (err) {
+      NFM.toast(err.message, "error");
+      return;
+    }
+    drawImages(current.images || []);
+    loadList();
+  });
+
+  loadList();
+});
+</script>
+
+{% endblock %}

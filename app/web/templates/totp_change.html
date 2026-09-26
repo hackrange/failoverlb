@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block title %}New authenticator &middot; Failover LB{% endblock %}
+
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <h1>Set up your new authenticator</h1>
+    <div class="sub">
+      Your old one still works until you finish this, so nothing is lost if you
+      stop here.
+    </div>
+  </div>
+</div>
+
+<div class="card" style="max-width:560px">
+  <div class="card-body">
+
+    <div class="help-section">
+      <h4>1. Scan this with the new phone</h4>
+      <img src="{{ qr }}" alt="QR code for the new authenticator"
+           style="border:1px solid var(--border); border-radius:var(--radius); background:#fff; padding:8px">
+    </div>
+
+    <div class="help-section">
+      <h4>Cannot scan it?</h4>
+      <p class="small muted">Type this into the app instead:</p>
+      <pre>{{ secret }}</pre>
+    </div>
+
+    <div class="help-section">
+      <h4>2. Save these new recovery codes</h4>
+      <p class="small muted">
+        These replace your old ones the moment you finish.  Anything you wrote
+        down before will stop working, so swap the paper over.
+      </p>
+      <pre>{% for code in recovery_codes %}{{ code }}
+{% endfor %}</pre>
+      <div class="notice warn">
+        <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.5 15 14H1L8 1.5zm0 4a.7.7 0 0 0-.7.8l.25 3.2a.45.45 0 0 0 .9 0l.25-3.2A.7.7 0 0 0 8 5.5zm0 5.4a.8.8 0 1 0 0 1.6.8.8 0 0 0 0-1.6z"/></svg>
+        <div>Shown once.  Copy them somewhere that is not the phone you just
+             scanned with.</div>
+      </div>
+    </div>
+
+    <div class="help-section">
+      <h4>3. Confirm it works</h4>
+      <form method="post" action="{{ base }}/account/totp/confirm">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div class="field">
+          <label for="code">Code from the new app</label>
+          <input type="text" id="code" name="code" inputmode="numeric"
+                 pattern="[0-9]*" maxlength="6" required autofocus
+                 placeholder="000000" autocomplete="one-time-code">
+        </div>
+        <button type="submit" class="btn primary">Switch to this authenticator</button>
+        <a href="{{ base }}/account" class="btn">Cancel</a>
+      </form>
+      <p class="small faint mt">
+        Finishing this signs you out of every other browser.
+      </p>
+    </div>
+
+  </div>
+</div>
+
+{% endblock %}

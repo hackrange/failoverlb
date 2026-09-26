@@ -1,0 +1,374 @@
+{% extends "base.html" %}
+{% block title %}NGINX&reg; Build &middot; Failover LB{% endblock %}
+
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <h1>NGINX&reg; build</h1>
+    <div class="sub">
+      Change the version, or add and drop modules.  Both mean rebuilding, one
+      node at a time.
+    </div>
+  </div>
+</div>
+
+<div class="notice info">
+  <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 3a.9.9 0 1 1 0 1.8A.9.9 0 0 1 8 4zm1.2 8H6.8v-.9h.7V7.9h-.7V7h2.1v4.1h.3V12z"/></svg>
+  <div>
+    Modules are compiled into nginx, so adding one means building it again.
+    That is the same operation as changing version, which is why they share
+    this page.  Each node takes roughly fifteen minutes and they are done in
+    order, so the rest of the fleet keeps serving throughout.
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head">
+    <h2>What is installed now</h2>
+    <button class="help-btn" data-help-static="h-modules"
+            data-help-title="Modules across the fleet" data-help-wide
+            aria-label="Help">?</button>
+  </div>
+  <div class="card-body" id="current-build">
+    <div class="empty"><strong>Loading...</strong></div>
+  </div>
+</div>
+
+{% if can('upgrade_nginx') %}
+<div class="card">
+  <div class="card-head">
+    <h2>Rebuild</h2>
+    <button class="help-btn" data-help-static="h-rebuild"
+            data-help-title="What a rebuild does" data-help-wide
+            aria-label="Help">?</button>
+  </div>
+  <div class="card-body">
+    <div class="form-grid" style="max-width:640px">
+      <div class="field">
+        <label for="u-nginx">nginx version</label>
+        <input type="text" id="u-nginx" placeholder="1.30.4">
+        <div class="hint">Leave it empty to keep the version and just rebuild.</div>
+      </div>
+      <div class="field">
+        <label for="u-openssl">OpenSSL version</label>
+        <input type="text" id="u-openssl" placeholder="3.5.7">
+        <div class="hint">
+          3.5 or newer is what gives you the post quantum key exchange.
+        </div>
+      </div>
+    </div>
+
+    <div class="checkline mt">
+      <input type="checkbox" id="u-waf">
+      <label for="u-waf">Include the WAF module</label>
+    </div>
+    <div class="field">
+      <div class="hint">
+        Adds ModSecurity to the build, which is what the WAF needs before it can
+        be switched on for a site.  The first build with this on also compiles
+        the engine, which on a sixteen core box adds a couple of minutes and on
+        a small one adds rather more; later builds skip it unless the engine
+        version changes.  Unticking it takes the module back out on the next
+        rebuild, so any site still using the WAF would stop passing its config
+        test.
+      </div>
+    </div>
+
+    <div class="notice warn">
+      <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.5 15 14H1L8 1.5zm0 4a.7.7 0 0 0-.7.8l.25 3.2a.45.45 0 0 0 .9 0l.25-3.2A.7.7 0 0 0 8 5.5zm0 5.4a.8.8 0 1 0 0 1.6.8.8 0 0 0 0-1.6z"/></svg>
+      <div>
+        Other than the WAF above, changing the module list means editing
+        the lists at the top of <code>nginx-installer.sh</code> on each node
+        first, then rebuilding here.  The script is the single place modules
+        are defined, and the manager drives it rather than second guessing it.
+      </div>
+    </div>
+
+    <div class="flex mt">
+      <button class="btn" id="check-plan">Show me what this would do</button>
+      <button class="btn primary" id="start-upgrade" disabled>Start the rebuild</button>
+    </div>
+
+    <div id="plan-output" class="mt"></div>
+  </div>
+</div>
+{% endif %}
+
+<div class="card" id="progress-card" hidden>
+  <div class="card-head">
+    <h2>Progress</h2>
+    <span class="small faint" id="progress-summary"></span>
+  </div>
+  <div class="card-body tight">
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr><th>Node</th><th>State</th><th>Version</th><th>Detail</th></tr>
+        </thead>
+        <tbody id="progress-rows"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<div hidden id="h-modules">
+  <div class="help-section">
+    <p>Which modules your nginx was built with, and whether every node agrees.</p>
+  </div>
+  <div class="help-section">
+    <h4>Why the fleet has to agree</h4>
+    <p>Every node runs the same config, because that is the whole point of a
+       cluster.  So a setting is only offered if every node can handle it.  One
+       box missing a module means that module's settings disappear from the GUI
+       entirely, for everybody.
+
+That is deliberate.  The alternative is a change that passes on three nodes,
+fails its config test on the fourth, and therefore never goes out at all, with
+nothing obviously wrong to look at.</p>
+  </div>
+  <div class="help-section">
+    <h4>Adding a module</h4>
+    <p>Modules are compiled in, so there is no installing one at runtime.  Add
+       it to the list at the top of nginx-installer.sh on every node, then
+       rebuild from this page.  The new settings appear on their own once every
+       node has it.</p>
+  </div>
+</div>
+
+<div hidden id="h-rebuild">
+  <div class="help-section">
+    <p>What actually happens when you press the button.</p>
+  </div>
+  <div class="help-section">
+    <h4>One node at a time, in order</h4>
+    <p>Standbys first, the active node last.  A build takes ten to twenty
+       minutes and ends with nginx restarting, so doing them all at once would
+       mean every load balancer you own is rebuilding simultaneously.  Walking
+       them keeps the fleet serving.
+
+The active node goes last because it is the one taking config changes, so it is
+the one worth keeping working while the others are busy.</p>
+  </div>
+  <div class="help-section">
+    <h4>Every node gets checked before we move on</h4>
+    <p>After each build: is nginx running, does its config still pass, and did
+       the version actually change.  Only then does the next node start.
+
+Anything that fails stops the walk and leaves the remaining nodes alone.  A
+fleet that is half upgraded is a perfectly good state to be in while you work
+out what went wrong.  A fleet where we carried on and broke the rest the same
+way is not.</p>
+  </div>
+  <div class="help-section">
+    <h4>If a build goes bad</h4>
+    <p>The installer takes a snapshot of the binary and the config before every
+       build, so there is always a way back.  Use Revert on the node, which runs
+       that same script's revert path and restarts nginx on the old build.</p>
+  </div>
+  <div class="help-section">
+    <h4>One thing to know about the perl module</h4>
+    <p>If your build includes the perl module, its shared library lives under
+       /etc/nginx/perl and is compiled against one exact nginx version.  A
+       binary from a different version refuses to load it, with "undefined
+       symbol", and nginx will not start at all.
+
+The installer replaces both together so a normal build is fine.  Where it bites
+is putting an old binary back beside a new library, or restoring /etc/nginx from
+a backup taken at a different version.  The check after each build runs nginx -t,
+which catches exactly this, which is why the walk stops rather than moving on.</p>
+  </div>
+  <div class="help-section">
+    <h4>Mixed versions are fine, for a while</h4>
+    <p>Nothing breaks while some nodes are newer than others.  The manager works
+       out which settings are safe from the oldest node in the fleet, so it will
+       not offer a directive your laggard cannot parse.
+
+You will see fewer settings until the walk finishes, which is the honest
+answer rather than a broken one.</p>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script nonce="{{ csp_nonce }}">
+document.addEventListener("DOMContentLoaded", function () {
+  let pollTimer = null;
+
+  async function loadCurrent() {
+    try {
+      const m = await NFM.api("/upgrade/modules");
+      const d = m.differences || {};
+
+      // Show what the next rebuild will actually do.  Defaulting this to
+      // unticked would quietly take the module back out of the build for
+      // anybody who rebuilt for an unrelated reason.
+      const waf = document.getElementById("u-waf");
+      if (waf) waf.checked = !!m.waf_module;
+      let html = '<dl class="kv">' +
+        "<dt>nginx</dt><dd>" + NFM.escapeHtml(m.nginx_version || "unknown") +
+        (d.versions ? ' <span class="faint small">(oldest in the fleet)</span>' : "") + "</dd>" +
+        "<dt>OpenSSL</dt><dd>" + NFM.escapeHtml(m.openssl_version || "unknown") +
+        (m.post_quantum ? ' <span class="badge ok">post quantum ready</span>' : "") + "</dd>" +
+        "<dt>Modules</dt><dd>" + m.common_count + " on every node, " +
+        (m.third_party || []).length + " of them third party</dd>" +
+        "</dl>";
+
+      if (d.versions) {
+        html += '<div class="mt small"><strong>Per node</strong><ul>';
+        Object.keys(d.versions).forEach(function (n) {
+          html += "<li>" + NFM.escapeHtml(n) + ": nginx " +
+                  NFM.escapeHtml(d.versions[n] || "?") +
+                  ", " + (d.nodes[n] || 0) + " modules</li>";
+        });
+        html += "</ul></div>";
+      }
+
+      if (d.missing && Object.keys(d.missing).length) {
+        html += '<div class="notice warn mt">' + NFM.icon("warn") +
+          "<div><strong>Nodes were built differently.</strong><ul>";
+        Object.keys(d.missing).forEach(function (n) {
+          html += "<li>" + NFM.escapeHtml(n) + " is missing: <span class='mono small'>" +
+                  NFM.escapeHtml(d.missing[n].slice(0, 8).join(", ")) + "</span></li>";
+        });
+        html += "</ul>Only modules every node has are offered in the GUI.</div></div>";
+      } else {
+        html += '<div class="notice ok mt">' + NFM.icon("check") +
+                "<div>Every node was built the same way.</div></div>";
+      }
+
+      html += '<details class="mt"><summary class="small">Show the full module list</summary>' +
+              "<pre>" + NFM.escapeHtml((m.common || []).join("\n")) + "</pre></details>";
+
+      document.getElementById("current-build").innerHTML = html;
+    } catch (err) {
+      document.getElementById("current-build").innerHTML =
+        '<div class="notice bad"><div>' + NFM.escapeHtml(err.message) + "</div></div>";
+    }
+  }
+
+  const planBtn = document.getElementById("check-plan");
+  if (planBtn) planBtn.addEventListener("click", async function () {
+    const out = document.getElementById("plan-output");
+    out.innerHTML = "<p class='small faint'>working it out...</p>";
+    try {
+      const q = new URLSearchParams();
+      const n = document.getElementById("u-nginx").value.trim();
+      const o = document.getElementById("u-openssl").value.trim();
+      if (n) q.set("nginx_version", n);
+      if (o) q.set("openssl_version", o);
+
+      const plan = await NFM.api("/upgrade/plan?" + q.toString());
+
+      let html = "<p><strong>Order:</strong> " +
+                 NFM.escapeHtml(plan.order.join(" then ")) +
+                 "  <span class='faint'>(roughly " + plan.estimated_minutes +
+                 " minutes in total)</span></p>";
+
+      (plan.blockers || []).forEach(function (b) {
+        html += '<div class="notice bad">' + NFM.icon("warn") +
+                "<div>" + NFM.escapeHtml(b) + "</div></div>";
+      });
+      (plan.warnings || []).forEach(function (w) {
+        html += '<div class="notice warn">' + NFM.icon("warn") +
+                "<div>" + NFM.escapeHtml(w) + "</div></div>";
+      });
+
+      if (plan.can_start) {
+        html += '<div class="notice ok">' + NFM.icon("check") +
+                "<div>Nothing is standing in the way.</div></div>";
+      }
+      out.innerHTML = html;
+      document.getElementById("start-upgrade").disabled = !plan.can_start;
+    } catch (err) {
+      out.innerHTML = '<div class="notice bad"><div>' + NFM.escapeHtml(err.message) + "</div></div>";
+    }
+  });
+
+  const startBtn = document.getElementById("start-upgrade");
+  if (startBtn) startBtn.addEventListener("click", function () {
+    const n = document.getElementById("u-nginx").value.trim();
+    const o = document.getElementById("u-openssl").value.trim();
+
+    NFM.confirmThen(
+      "Rebuild nginx across the fleet?\n\n" +
+      "Each node takes about fifteen minutes and its nginx restarts at the end.\n" +
+      "They are done one at a time, so the others keep serving.\n\n" +
+      "This cannot be paused once it starts.",
+      async function () {
+        startBtn.disabled = true;
+        await NFM.api("/upgrade/start", { method: "POST", body: {
+          nginx_version: n || null, openssl_version: o || null,
+          with_modsecurity: document.getElementById("u-waf").checked
+        }});
+        NFM.toast("Rebuild started.  Watch the progress below.", "ok");
+        startPolling();
+      });
+  });
+
+  function startPolling() {
+    document.getElementById("progress-card").hidden = false;
+    if (pollTimer) clearInterval(pollTimer);
+    pollTimer = setInterval(refreshProgress, 5000);
+    refreshProgress();
+  }
+
+  async function refreshProgress() {
+    try {
+      const s = await NFM.api("/upgrade/status");
+      if (!s.order || !s.order.length) return;
+
+      document.getElementById("progress-card").hidden = false;
+
+      let rows = "";
+      s.order.forEach(function (name) {
+        const n = s.nodes[name] || { state: "waiting" };
+        const badge = {
+          waiting:  '<span class="badge neutral">waiting</span>',
+          starting: '<span class="badge info">starting</span>',
+          building: '<span class="badge warn">building</span>',
+          done:     '<span class="badge ok">done</span>',
+          failed:   '<span class="badge bad">failed</span>',
+          skipped:  '<span class="badge neutral">skipped</span>'
+        }[n.state] || NFM.escapeHtml(n.state);
+
+        let detail = "";
+        if (n.state === "building" && n.log_tail) {
+          detail = "<pre style='max-height:110px;overflow:auto;margin:0'>" +
+                   NFM.escapeHtml(n.log_tail.slice(-500)) + "</pre>";
+        } else if (n.detail && typeof n.detail === "object") {
+          detail = "<span class='small faint'>" +
+                   NFM.escapeHtml(n.detail.version_before || "?") + " to " +
+                   NFM.escapeHtml(n.detail.version_after || "?") + ", " +
+                   (n.detail.modules || 0) + " modules</span>";
+        } else if (n.detail) {
+          detail = "<pre style='max-height:110px;overflow:auto;margin:0'>" +
+                   NFM.escapeHtml(String(n.detail).slice(0, 600)) + "</pre>";
+        }
+
+        rows += "<tr><td><strong>" + NFM.escapeHtml(name) + "</strong>" +
+                (s.current === name ? ' <span class="faint small">now</span>' : "") +
+                "</td><td>" + badge + "</td><td class='small faint'>" +
+                NFM.escapeHtml(n.installed_version || "") + "</td><td>" + detail + "</td></tr>";
+      });
+
+      document.getElementById("progress-rows").innerHTML = rows;
+      document.getElementById("progress-summary").textContent =
+        s.running ? "running, on " + (s.current || "?") : "finished";
+
+      if (!s.running) {
+        if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+        if (s.stopped_because) NFM.toast(s.stopped_because, "bad");
+        loadCurrent();
+      }
+    } catch (err) {
+      // A poll failing is not worth shouting about, the next one will do.
+    }
+  }
+
+  loadCurrent();
+  refreshProgress();
+});
+</script>
+{% endblock %}

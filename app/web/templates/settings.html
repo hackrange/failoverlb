@@ -1,0 +1,841 @@
+{% extends "base.html" %}
+{% block title %}Settings &middot; Failover LB{% endblock %}
+
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <h1>Settings</h1>
+    <div class="sub">
+      Things you can change without restarting anything.
+    </div>
+  </div>
+</div>
+
+{% if error %}
+  <div class="notice bad">
+    <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.5 15 14H1L8 1.5zm0 4a.7.7 0 0 0-.7.8l.25 3.2a.45.45 0 0 0 .9 0l.25-3.2A.7.7 0 0 0 8 5.5zm0 5.4a.8.8 0 1 0 0 1.6.8.8 0 0 0 0-1.6z"/></svg>
+    <div>{{ error }}</div>
+  </div>
+{% endif %}
+{% if ok %}
+  <div class="notice ok">
+    <svg viewBox="0 0 16 16" fill="currentColor"><path d="M13.5 4.5 6 12 2.5 8.5l1-1L6 10l6.5-6.5 1 1z"/></svg>
+    <div>{{ ok }}</div>
+  </div>
+{% endif %}
+
+<form method="post" action="{{ base }}/settings">
+<input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+{# Sign in goes first.  It is the only card on this page that can lock
+   everybody out, so it should not be something somebody scrolls past. #}
+<div class="card">
+  <div class="card-head">
+    <h2>Signing in to this GUI</h2>
+    <button class="help-btn" data-help-static="h-auth"
+            data-help-title="How people sign in" data-help-wide
+            aria-label="Help">?</button>
+  </div>
+  <div class="card-body">
+
+    {% if auth.from_env %}
+      <div class="notice">
+        <div>
+          Single sign on is currently switched on by <code>NFM_OIDC_ENABLED</code>
+          in the environment.  Saving this card writes the choice to the
+          database instead, where it applies without a restart and travels to
+          the other nodes with the config.  The environment stays as a fallback
+          and does no harm.
+        </div>
+      </div>
+    {% endif %}
+
+    <fieldset class="field">
+      <legend>Who can sign in</legend>
+
+      <div class="checkline">
+        <input type="radio" id="auth_local" name="auth_mode" value="local"
+               {{ 'checked' if auth.mode == 'local' }}>
+        <label for="auth_local">
+          <strong>Local accounts only.</strong>
+          Usernames and passwords kept here, with a second factor.  The
+          provider is ignored even if it is filled in below, which is what you
+          want while you are still setting one up.
+        </label>
+      </div>
+
+      <div class="checkline">
+        <input type="radio" id="auth_both" name="auth_mode" value="both"
+               {{ 'checked' if auth.mode == 'both' }}
+               {{ 'disabled' if not auth.has_details }}>
+        <label for="auth_both">
+          <strong>Local accounts or single sign on.</strong>
+          Both offered on the login page.  This is the mode to be in while you
+          test the provider, and the only one you can reach the next one from.
+          {% if not auth.has_details %}
+            <span class="badge neutral">fill in the details below first</span>
+          {% endif %}
+        </label>
+      </div>
+
+      <div class="checkline">
+        <input type="radio" id="auth_oidc" name="auth_mode" value="oidc"
+               {{ 'checked' if auth.mode == 'oidc' }}
+               {{ 'disabled' if not auth.can_go_oidc_only }}>
+        <label for="auth_oidc">
+          <strong>Single sign on only.</strong>
+          Local passwords stop working entirely.  This is the mode to be in
+          once the provider is the system of record, because otherwise its
+          lockout, its second factor and its leaver process all have a way
+          round them.
+          {% if auth.can_go_oidc_only %}
+            <span class="hint">
+              {{ auth.sso_admins|length }} admin{{ '' if auth.sso_admins|length == 1 else 's' }}
+              can already get in this way: {{ auth.sso_admins|join(', ') }}.
+            </span>
+          {% else %}
+            <span class="badge neutral">not available yet</span>
+            <span class="hint">
+              No admin has completed a single sign on login, so switching now
+              would lock everybody out.  Choose the middle option, sign in that
+              way once, then come back.
+            </span>
+          {% endif %}
+        </label>
+      </div>
+    </fieldset>
+
+    <div class="notice warn">
+      <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.5 15 14H1L8 1.5zm0 4a.7.7 0 0 0-.7.8l.25 3.2a.45.45 0 0 0 .9 0l.25-3.2A.7.7 0 0 0 8 5.5zm0 5.4a.8.8 0 1 0 0 1.6.8.8 0 0 0 0-1.6z"/></svg>
+      <div>
+        <strong>The way back in.</strong>  If you pick single sign on only and
+        the provider then stops answering, nobody can sign in through the
+        browser at all.  Run <code>./auth-recovery.sh --allow-local</code> from
+        the install directory on any node in the fleet and local passwords come
+        straight back.  It needs a shell on the box, which is the point: it is
+        the door that does not depend on the thing that broke.
+      </div>
+    </div>
+
+    <h3>Provider details</h3>
+    <p class="small muted">
+      These are read live, so a change takes effect on the next sign in with
+      nothing restarted.  They travel to the other nodes with the config, so
+      the standby can sign people in the day it is promoted.
+    </p>
+
+    <div class="field" style="max-width:420px">
+      <label for="oidc_discovery_url">Discovery URL</label>
+      <input type="text" id="oidc_discovery_url" name="oidc_discovery_url"
+             value="{{ auth.values.oidc_discovery_url }}"
+             placeholder="https://login.example.com/.well-known/openid-configuration">
+      <div class="hint">
+        The <code>.well-known/openid-configuration</code> address.  Everything
+        else, the endpoints and the signing keys, is read from there rather
+        than typed in here.
+      </div>
+    </div>
+
+    <div class="field" style="max-width:420px">
+      <label for="oidc_client_id">Client id</label>
+      <input type="text" id="oidc_client_id" name="oidc_client_id"
+             value="{{ auth.values.oidc_client_id }}" autocomplete="off">
+    </div>
+
+    <div class="field" style="max-width:420px">
+      <label for="oidc_client_secret">
+        Client secret
+        {% if auth.secret_set %}<span class="badge ok">stored</span>{% endif %}
+      </label>
+      <input type="password" id="oidc_client_secret" name="oidc_client_secret"
+             value="" autocomplete="new-password"
+             placeholder="{{ 'leave empty to keep the one stored' if auth.secret_set else 'optional for a public client' }}">
+      <div class="hint">
+        Encrypted at rest and never sent back to this page, so the box is
+        always empty.  Saving with it empty keeps what is already stored.
+      </div>
+    </div>
+
+    <div class="field" style="max-width:420px">
+      <label for="oidc_redirect_base">Address the provider sends people back to</label>
+      <input type="text" id="oidc_redirect_base" name="oidc_redirect_base"
+             value="{{ auth.values.oidc_redirect_base }}"
+             placeholder="https://{{ env.node_name }}{{ env.root_path or '' }}">
+      <div class="hint">
+        The outside address of this GUI, including any prefix it is served
+        under.  We add <code>/auth/oidc/callback</code> to it, and that whole
+        address has to be registered with the provider or it will refuse the
+        login.
+      </div>
+    </div>
+
+    <div class="field" style="max-width:280px">
+      <label for="oidc_groups_claim">Claim holding the group names</label>
+      <input type="text" id="oidc_groups_claim" name="oidc_groups_claim"
+             value="{{ auth.values.oidc_groups_claim or 'groups' }}">
+      <div class="hint">
+        Read from the id token, and from the userinfo endpoint when the token
+        does not carry it.
+      </div>
+    </div>
+
+    <div class="grid-3">
+      <div class="field">
+        <label for="oidc_admin_group">Group that gets admin</label>
+        <input type="text" id="oidc_admin_group" name="oidc_admin_group"
+               value="{{ auth.values.oidc_admin_group or 'nginx-admins' }}">
+      </div>
+      <div class="field">
+        <label for="oidc_operator_group">Group that gets operator</label>
+        <input type="text" id="oidc_operator_group" name="oidc_operator_group"
+               value="{{ auth.values.oidc_operator_group or 'nginx-operators' }}">
+      </div>
+      <div class="field">
+        <label for="oidc_viewer_group">Group that gets viewer</label>
+        <input type="text" id="oidc_viewer_group" name="oidc_viewer_group"
+               value="{{ auth.values.oidc_viewer_group or 'nginx-viewers' }}">
+      </div>
+    </div>
+    <p class="small muted">
+      Highest wins.  Somebody in the admin group and the viewer group is an
+      admin, so adding a person to the admin group works without having to take
+      them out of anything first.  Somebody in none of the three cannot sign in
+      at all, which is how access is taken away: remove them at the provider.
+    </p>
+
+    <div class="flex-between mt">
+      <button type="button" class="btn" id="oidc-test">Test the discovery URL</button>
+      <span class="small muted" id="oidc-test-out"></span>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head">
+    <h2>Certificates</h2>
+    <button class="help-btn" data-help-static="h-acme"
+            data-help-title="Certificate settings" data-help-wide
+            aria-label="Help">?</button>
+  </div>
+  <div class="card-body">
+
+    <div class="field" style="max-width:420px">
+      <label for="acme_email">
+        Contact email
+        <span class="badge neutral">optional</span>
+      </label>
+      <input type="email" id="acme_email" name="acme_email"
+             value="{{ values.acme_email.value or '' }}"
+             placeholder="ssl-admin@example.com">
+      <div class="hint">
+        Where the certificate authority sends expiry warnings.  Leave it empty
+        and certificates still work, you just do not get that mail.  The
+        dashboard warns you either way.  Use a list more than one person reads,
+        not somebody's personal mailbox.
+      </div>
+    </div>
+
+    <div class="checkline">
+      <input type="checkbox" id="acme_staging" name="acme_staging" value="true"
+             {{ 'checked' if values.acme_staging.value }}>
+      <label for="acme_staging">
+        Use the staging service
+        <button class="help-btn" data-help-static="h-staging"
+                data-help-title="Staging versus the real thing" aria-label="Help">?</button>
+      </label>
+    </div>
+    <div class="hint" style="margin:-4px 0 14px 23px">
+      Staging certificates are not trusted by browsers, but the rate limits are
+      far looser.  Leave this on while you are working things out.
+    </div>
+
+    <div class="field" style="max-width:260px">
+      <label for="acme_renew_days_before">Renew this many days before expiry</label>
+      <input type="number" id="acme_renew_days_before" name="acme_renew_days_before"
+             min="1" max="89" value="{{ values.acme_renew_days_before.value or 30 }}">
+      <div class="hint">
+        Lets Encrypt certificates last 90 days and they suggest renewing at 30.
+        That leaves a fortnight to notice a failure and still have time to fix
+        it.
+      </div>
+    </div>
+
+      <h3>Buying from a named authority</h3>
+      <p class="hint">
+        Certificates you pay for come from an authority you set up on its own
+        page, so you can use more than one and so Lets Encrypt keeps working
+        alongside them.  See <a href="{{ base }}/authorities">Paid Certificate
+        Authorities</a>.
+      </p>
+
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head">
+    <h2>DNS</h2>
+    <button class="help-btn" data-help-static="h-dns"
+            data-help-title="DNS servers for domain checks" data-help-wide
+            aria-label="Help">?</button>
+  </div>
+  <div class="card-body">
+    <div class="field">
+      <label for="dns_resolvers">DNS servers to ask</label>
+      <textarea id="dns_resolvers" name="dns_resolvers" rows="3"
+                placeholder="1.1.1.1&#10;8.8.8.8&#10;9.9.9.9">{{ values.dns_resolvers.value|join('
+') if values.dns_resolvers.value else '' }}</textarea>
+      <div class="hint">
+        One per line.  Leave it empty to use 1.1.1.1, 8.8.8.8 and 9.9.9.9.
+        These decide which node gets to ask for a certificate, so they should
+        see the same answer the certificate authority will.
+      </div>
+    </div>
+    <div class="checkline">
+      <input type="checkbox" id="dns_use_system_resolver" name="dns_use_system_resolver"
+             value="true" {{ 'checked' if values.dns_use_system_resolver.value }}>
+      <label for="dns_use_system_resolver">Ask this box's own resolver as well</label>
+    </div>
+    <div class="hint" style="margin:-4px 0 0 23px">
+      Worth having on a split horizon network, where the internal answer is the
+      one that matters.  Answers from every server are merged, so a resolver
+      that disagrees adds a possibility rather than overriding anything.
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head">
+    <h2>Management networks</h2>
+    <button class="help-btn" data-help-static="h-mgmt"
+            data-help-title="Management networks" data-help-wide
+            aria-label="Help">?</button>
+  </div>
+  <div class="card-body">
+    <div class="field">
+      <label for="management_networks">Networks that count as management</label>
+      <textarea id="management_networks" name="management_networks" rows="4"
+                placeholder="10.20.30.0/24&#10;192.168.50.10/32">{{ values.management_networks.value|join('\n') if values.management_networks.value else '' }}</textarea>
+      <div class="hint">
+        One CIDR per line.  These get an allow line on any site set to
+        management only, along with every cluster node.
+      </div>
+    </div>
+    <div class="notice info">
+      <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 3a.9.9 0 1 1 0 1.8A.9.9 0 0 1 8 4zm1.2 8H6.8v-.9h.7V7.9h-.7V7h2.1v4.1h.3V12z"/></svg>
+      <div>
+        This is not the same thing as who can reach this GUI.  That is
+        <code>NFM_ADMIN_ALLOWLIST</code> in the environment, because it has to
+        be in force before the login page will even render, which is earlier
+        than anything in the database can be read.
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head"><h2>Monitoring</h2></div>
+  <div class="card-body">
+    <div class="field" style="max-width:260px">
+      <label for="health_check_interval">Default health check interval</label>
+      <input type="number" id="health_check_interval" name="health_check_interval"
+             min="2" max="300" value="{{ values.health_check_interval.value or 10 }}">
+      <div class="hint">
+        Seconds, and only the default for a new pool.  Each pool can set its
+        own and the checker honours it.
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head">
+    <h2>Country database</h2>
+    <span class="small faint" id="geo-summary">checking the fleet</span>
+  </div>
+  <div class="card-body">
+    <p class="small muted" style="margin-top:0">
+      Needed before a site can block anywhere.  It is a file next to nginx on
+      every node, and a node without it refuses the whole config, so this puts
+      it on all of them and keeps it current.
+    </p>
+
+    <div class="field" style="max-width:420px">
+      <label for="geoip_source">Where it comes from</label>
+      <select id="geoip_source" name="geoip_source">
+        <option value="" {{ 'selected' if not values.geoip_source.value }}>
+          Not using one
+        </option>
+        <option value="dbip" {{ 'selected' if values.geoip_source.value == 'dbip' }}>
+          db-ip, free, nothing to sign up for
+        </option>
+        <option value="maxmind" {{ 'selected' if values.geoip_source.value == 'maxmind' }}>
+          MaxMind GeoLite2, free, needs an account
+        </option>
+      </select>
+      <div class="hint">
+        db-ip publish a country database every month and ask for nothing but
+        attribution.  Pick MaxMind if you already have an account or want
+        theirs.
+      </div>
+    </div>
+
+    <div id="geo-maxmind" style="display:none; margin-left:4px; border-left:3px solid var(--line); padding-left:14px">
+      <div class="field" style="max-width:320px">
+        <label for="geoip_account_id">MaxMind account id</label>
+        <input type="text" id="geoip_account_id" name="geoip_account_id"
+               value="{{ values.geoip_account_id.value or '' }}" placeholder="123456">
+      </div>
+      <div class="field" style="max-width:420px">
+        <label for="geoip_license_key">MaxMind licence key</label>
+        <input type="password" id="geoip_license_key" name="geoip_license_key"
+               placeholder="{{ 'saved, leave blank to keep it' if values.geoip_license_key.is_set else 'from your MaxMind account' }}">
+        <div class="hint">
+          Stored encrypted and never sent back to this page.  Leave it blank to
+          keep the one already saved.
+        </div>
+      </div>
+    </div>
+
+    <div class="field" style="max-width:320px">
+      <label for="geoip_refresh">Fetch a new one</label>
+      <select id="geoip_refresh" name="geoip_refresh">
+        <option value="never" {{ 'selected' if values.geoip_refresh.value == 'never' }}>Never, I will do it myself</option>
+        <option value="daily" {{ 'selected' if values.geoip_refresh.value == 'daily' }}>Daily</option>
+        <option value="weekly" {{ 'selected' if values.geoip_refresh.value == 'weekly' }}>Weekly</option>
+        <option value="monthly" {{ 'selected' if (values.geoip_refresh.value or 'monthly') == 'monthly' }}>Monthly</option>
+      </select>
+      <div class="hint">
+        Both sources publish monthly, so monthly is plenty.  Daily costs a
+        download and finds nothing new most days.  The active node does it, for
+        the whole fleet.
+      </div>
+    </div>
+
+    <div class="flex mt">
+      <button type="button" class="btn" id="geo-install">Install it now</button>
+      <span class="small faint" id="geo-install-state"></span>
+    </div>
+
+    <div id="geo-nodes" class="mt"></div>
+
+    <div class="notice info mt">
+      <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 3a.9.9 0 1 1 0 1.8A.9.9 0 0 1 8 4zm1.2 8H6.8v-.9h.7V7.9h-.7V7h2.1v4.1h.3V12z"/></svg>
+      <div>
+        Save the page first, then install: the download uses whatever source is
+        saved here.  db-ip's free database is licensed CC BY, so if you publish
+        anything derived from it, credit them.
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head">
+    <h2>WAF rule set</h2>
+    <span class="small faint" id="crs-summary">checking the fleet</span>
+  </div>
+  <div class="card-body">
+    <p class="small muted" style="margin-top:0">
+      The OWASP Core Rule Set, which is what the WAF actually checks
+      requests against.  Same story as the country database: it is files next
+      to nginx on every node, and a node without them refuses the whole config,
+      so this puts them on all of them and keeps them current.
+    </p>
+
+    <div class="field" style="max-width:420px">
+      <label for="waf_crs_track">Which version to follow</label>
+      <select id="waf_crs_track" name="waf_crs_track">
+        <option value="lts" {{ 'selected' if (values.waf_crs_track.value or 'lts') == 'lts' }}>
+          Long term support, recommended
+        </option>
+        <option value="latest" {{ 'selected' if values.waf_crs_track.value == 'latest' }}>
+          Latest release
+        </option>
+      </select>
+      <div class="hint">
+        The long term support line gets fixes and few new rules, which means
+        few new false positives.  Latest catches more, and the price is that a
+        new rule can start refusing something your own application does, on a
+        site already in blocking mode.
+      </div>
+    </div>
+
+    <div class="field" style="max-width:320px">
+      <label for="waf_crs_refresh">Fetch a new one</label>
+      <select id="waf_crs_refresh" name="waf_crs_refresh">
+        <option value="never" {{ 'selected' if (values.waf_crs_refresh.value or 'never') == 'never' }}>Never, I will do it myself</option>
+        <option value="daily" {{ 'selected' if values.waf_crs_refresh.value == 'daily' }}>Daily</option>
+        <option value="weekly" {{ 'selected' if values.waf_crs_refresh.value == 'weekly' }}>Weekly</option>
+        <option value="monthly" {{ 'selected' if values.waf_crs_refresh.value == 'monthly' }}>Monthly</option>
+      </select>
+      <div class="hint">
+        Monthly suits the support line.  Whatever you pick, the active node
+        does it for the whole fleet, and the rules are swapped in one step so
+        nginx never reads half of one version and half of another.
+      </div>
+    </div>
+
+    <div class="flex mt">
+      <button type="button" class="btn" id="crs-install">Install it now</button>
+      <span class="small faint" id="crs-install-state"></span>
+    </div>
+
+    <div id="crs-nodes" class="mt"></div>
+
+    <div class="notice info mt">
+      <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 3a.9.9 0 1 1 0 1.8A.9.9 0 0 1 8 4zm1.2 8H6.8v-.9h.7V7.9h-.7V7h2.1v4.1h.3V12z"/></svg>
+      <div>
+        Save the page first, then install: the download follows whichever track
+        is saved here.  Having the rules on a node does not switch anything on.
+        A site only gets checked once its own WAF setting is turned on,
+        and that starts in watching mode.
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head"><h2>Set in the environment</h2></div>
+  <div class="card-body">
+    <p class="small muted" style="margin-top:0">
+      These are read once when the container starts, so changing them means
+      editing <code>.env</code> and restarting.  Showing them here so you can
+      see what is actually in force.
+    </p>
+    <dl class="kv">
+      <dt>This node</dt><dd class="mono">{{ env.node_name }} at {{ env.node_address }}</dd>
+      <dt>GUI port</dt><dd class="mono">{{ env.gui_port }}</dd>
+      <dt>Peer port</dt><dd class="mono">{{ env.peer_port }}</dd>
+      <dt>Cluster priority</dt><dd class="mono">{{ env.cluster_priority }}</dd>
+      <dt>GUI allow list</dt>
+      <dd class="mono">
+        {% if env.admin_allowlist %}{{ env.admin_allowlist }}
+        {% else %}<span style="color:var(--warn)">not set, anybody who can reach the port sees the login page</span>{% endif %}
+      </dd>
+      <dt>Session timeout</dt><dd class="mono">{{ env.session_timeout }} minutes</dd>
+      <dt>Single sign on</dt>
+      <dd class="mono">
+        {{ auth.mode }}
+        <span class="small faint">
+          set on this page now, not in the environment.
+          {%- if env.oidc_enabled %} NFM_OIDC_ENABLED is still true in
+          <code>.env</code> and is only a fallback.{% endif %}
+        </span>
+      </dd>
+      <dt>Served under</dt><dd class="mono">{{ env.root_path or '/' }}</dd>
+    </dl>
+  </div>
+</div>
+
+<div class="card" style="position:sticky; bottom:0">
+  <div class="card-body flex-between">
+    <div class="small faint">Saved straight away.  Certificate settings apply to the next issue or renewal.</div>
+    <button type="submit" class="btn primary">Save settings</button>
+  </div>
+</div>
+
+</form>
+
+<div hidden id="h-acme">
+  <div class="help-section">
+    <p>How the manager talks to the certificate authority.</p>
+  </div>
+  <div class="help-section">
+    <h4>The email really is optional</h4>
+    <p>Lets Encrypt will issue certificates with no contact address at all.  The
+       only thing you give up is the mail they send when something is about to
+       expire.
+
+That matters less here than it would somewhere else, because the manager is
+already watching expiry and puts a warning on the dashboard weeks ahead.  Set
+one anyway if you have a shared mailbox, since a second warning path costs
+nothing.  Just do not use somebody's personal address, because certificates
+outlive jobs.</p>
+  </div>
+  <div class="help-section">
+    <h4>Renewal is driven from here, not by certbot</h4>
+    <p>The certbot timer is turned off on purpose.  It fires on every box, and
+       on a node that does not currently own the public address the challenge
+       fails every single time.  You end up with a mailbox full of failures
+       from two of your three nodes and the real problem buried in it.
+
+The manager works out which node can actually answer, at renewal time, with
+current DNS, and runs it there.</p>
+  </div>
+</div>
+
+<div hidden id="h-staging">
+  <div class="help-section">
+    <p>Lets Encrypt runs a practice service alongside the real one.</p>
+  </div>
+  <div class="help-section">
+    <h4>Why you want it on at first</h4>
+    <p>The real service has hard rate limits: five certificates a week for the
+       same set of names.  Get your setup wrong a few times and you are locked
+       out for a week, with no way to appeal.
+
+Staging has far looser limits.  The certificates it issues are not trusted by
+browsers, so you will see a warning, but everything else behaves the same.  Get
+it working there, then turn this off and do it for real.</p>
+  </div>
+  <div class="help-section">
+    <h4>Switching to real certificates</h4>
+    <p>Turn this off and issue again.  The staging certificate gets replaced.
+       Nothing else needs changing.</p>
+  </div>
+</div>
+
+<div hidden id="h-dns">
+  <div class="help-section">
+    <p>Which DNS servers the manager asks when it needs to know where a domain
+       points.</p>
+  </div>
+  <div class="help-section">
+    <h4>What this decides</h4>
+    <p>Before asking for a certificate, the manager looks the domain up and
+       compares the answer against what each node reports its own public address
+       to be.  Whichever node matches is the one that runs certbot, because it
+       is the only one the certificate authority will actually reach.
+
+Ask the wrong resolver and you get the wrong answer, and the job goes to a node
+that cannot possibly answer the challenge.</p>
+  </div>
+  <div class="help-section">
+    <h4>Why the default is public resolvers</h4>
+    <p>An internal resolver very often has a split horizon answer, pointing at a
+       private address for a name that is public.  That is useful for your own
+       traffic and actively wrong here, because the certificate authority is out
+       on the internet and will see the public answer.
+
+If your boxes cannot reach 1.1.1.1 and friends, put your own resolvers here.
+Just make sure they give the public answer for names you want certificates for.</p>
+  </div>
+  <div class="help-section">
+    <h4>Not the same as nginx's resolver</h4>
+    <p>This is the manager deciding which node should ask for a certificate.
+       nginx has its own separate resolver setting, for looking up backend
+       hostnames while it is running, and that is per site under Advanced.
+
+They are unrelated and you may well want different values in each.</p>
+  </div>
+</div>
+
+<div hidden id="h-mgmt">
+  <div class="help-section">
+    <p>Networks that count as yours when a site is set to management only.</p>
+  </div>
+  <div class="help-section">
+    <h4>What it does</h4>
+    <p>Any site with "management network only" ticked gets an allow line for
+       each of these, plus one for every node in the cluster, then a deny all.
+
+The cluster nodes are added from the roster rather than typed in, so when you
+add a node later it lands in every one of those lists on its own.  That is the
+bit people forget by hand, and it is how health checks end up blocked by an ACL
+somebody wrote months earlier.</p>
+  </div>
+  <div class="help-section">
+    <h4>Not the same as the GUI allow list</h4>
+    <p>This decides who your nginx sites let in.  Who can reach this management
+       GUI is a separate setting in the environment, and it has to be, because
+       it is enforced before the login page renders and therefore before
+       anything in the database has been read.</p>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<div hidden id="h-auth">
+  <p>Three ways in, and the order matters because you can only get to the
+  third one through the second.</p>
+
+  <p><strong>Local accounts only.</strong>  Usernames and passwords kept in
+  this fleet, each with a second factor.  This is where every install starts
+  and there is nothing wrong with staying here.</p>
+
+  <p><strong>Local accounts or single sign on.</strong>  Both offered.  Use
+  this while you are testing the provider, because if the provider is wrong you
+  still have your password.  It is also where somebody has to sign in through
+  the provider once before the third option becomes available.</p>
+
+  <p><strong>Single sign on only.</strong>  Local passwords stop working.  The
+  reason to want this is that leaving them on means the provider's rules do not
+  really apply: its lockout, its second factor and, most of all, its leaver
+  process all have a way round them.  Somebody who left last month still has a
+  password here.</p>
+
+  <p><strong>Why the third one is refused until somebody has used the
+  second.</strong>  Turning local passwords off is the only setting on this
+  page that can leave nobody able to sign in, and it fails quietly: the page
+  saves, and the next person to open the login screen finds neither route
+  works.  So we want evidence rather than intention, and the only evidence
+  worth having is a completed login.  An account gets an OIDC subject on it the
+  first time somebody actually signs in that way, and that is what is being
+  counted.</p>
+
+  <p><strong>Groups decide the role.</strong>  Highest wins.  Somebody in none
+  of the three groups cannot sign in at all, which is how you take access away:
+  remove them at the provider and they are out of every node at once.</p>
+
+  <p><strong>If it all goes wrong.</strong>  Run
+  <code>./auth-recovery.sh --allow-local</code> from the install directory on
+  any node.  It puts local passwords back without needing the GUI, which is the
+  point of it: the way back in must not depend on the thing that broke.</p>
+
+  <p><strong>Where these are kept.</strong>  In the database, not the
+  environment, so a change applies on the next sign in with nothing restarted
+  and travels to the other nodes with the config.  If <code>NFM_OIDC_*</code>
+  is still set in <code>.env</code> it stays as a fallback for anything left
+  blank here.</p>
+</div>
+
+<script nonce="{{ csp_nonce }}">
+document.addEventListener("DOMContentLoaded", function () {
+  // Check the discovery URL without making anybody attempt a login.  A typo
+  // here is the most common way this is set up wrong, and the worst place to
+  // find out is the login page in front of somebody who cannot get in.
+  const testBtn = document.getElementById("oidc-test");
+  if (testBtn) {
+    testBtn.addEventListener("click", async function () {
+      const out = document.getElementById("oidc-test-out");
+      testBtn.disabled = true;
+      out.textContent = "asking the provider";
+      try {
+        const r = await NFM.api("/auth/oidc/test", { method: "POST", body: {} });
+        out.textContent = "answered as " + r.issuer +
+          (r.supports_pkce ? ", PKCE supported" : ", no PKCE advertised") +
+          (r.redirect_uri ? ".  Register " + r.redirect_uri + " with it." : "");
+        NFM.toast("The provider answered", "ok");
+      } catch (err) {
+        out.textContent = err.message;
+        NFM.toast(err.message, "bad");
+      } finally {
+        testBtn.disabled = false;
+      }
+    });
+  }
+
+  const source = document.getElementById("geoip_source");
+  const maxmind = document.getElementById("geo-maxmind");
+  const summary = document.getElementById("geo-summary");
+  const nodes = document.getElementById("geo-nodes");
+
+  // The MaxMind fields only exist when MaxMind is the answer.  Two credential
+  // boxes on screen for a source that needs none is a page asking a question
+  // it already knows the answer to.
+  function showSource() {
+    maxmind.style.display = source.value === "maxmind" ? "" : "none";
+  }
+  source.addEventListener("change", showSource);
+  showSource();
+
+  function size(bytes) {
+    if (!bytes) return "";
+    return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+  }
+
+  async function load() {
+    let state;
+    try { state = await NFM.api("/geoip"); }
+    catch (err) { summary.textContent = err.message; return; }
+
+    const rows = Object.entries(state.nodes || {});
+    const have = rows.filter(([, n]) => n.present).length;
+    summary.textContent = rows.length
+      ? (have === rows.length
+         ? "on all " + rows.length + " nodes"
+         : have + " of " + rows.length + " nodes have it")
+      : "no nodes to ask";
+
+    nodes.innerHTML = rows.length ? '<table><thead><tr><th>Node</th>' +
+      '<th>Database</th><th>From</th><th>Size</th></tr></thead><tbody>' +
+      rows.sort().map(([name, n]) => '<tr><td><strong>' + NFM.escapeHtml(name) +
+        '</strong></td><td>' + (n.present
+          ? '<span class="badge ok">' + NFM.escapeHtml((n.modified || "").slice(0, 10)) + '</span>'
+          : '<span class="badge bad">missing</span>') +
+        '</td><td class="small faint">' + NFM.escapeHtml(n.source || (n.error ? "could not ask" : "-")) +
+        '</td><td class="small faint">' + size(n.bytes) + '</td></tr>').join("") +
+      "</tbody></table>" : "";
+  }
+
+  document.getElementById("geo-install").addEventListener("click", async function () {
+    const button = document.getElementById("geo-install");
+    const state = document.getElementById("geo-install-state");
+    button.disabled = true;
+    state.textContent = "downloading, this takes a few seconds";
+    try {
+      const r = await NFM.api("/geoip/install", { method: "POST", body: {} });
+      state.textContent = "installed on " + (r.installed || []).join(", ");
+      NFM.toast("Country database installed", "ok");
+    } catch (err) {
+      state.textContent = "";
+      NFM.toast(err.message, "bad");
+    }
+    button.disabled = false;
+    load();
+  });
+
+  load();
+
+  // ---- the WAF rule set ------------------------------------------------
+
+  const crsSummary = document.getElementById("crs-summary");
+  const crsNodes = document.getElementById("crs-nodes");
+
+  async function loadCrs() {
+    let state;
+    try { state = await NFM.api("/waf/rules"); }
+    catch (err) { crsSummary.textContent = err.message; return; }
+
+    const rows = Object.entries(state.nodes || {});
+    const have = rows.filter(([, n]) => n.present).length;
+
+    // Disagreement gets said out loud.  Two nodes on different rule sets is
+    // not an outage, it is a site that behaves differently depending on which
+    // box answered, which is far harder to work out from the outside.
+    if (!rows.length) {
+      crsSummary.textContent = "no nodes to ask";
+    } else if (have !== rows.length) {
+      crsSummary.textContent = have + " of " + rows.length + " nodes have it";
+    } else if (!state.agreed) {
+      crsSummary.textContent = "on all " + rows.length + " nodes, but not the same version";
+    } else {
+      crsSummary.textContent = "on all " + rows.length + " nodes";
+    }
+
+    crsNodes.innerHTML = rows.length ? '<table><thead><tr><th>Node</th>' +
+      '<th>Rule set</th><th>Track</th><th>Rules</th></tr></thead><tbody>' +
+      rows.sort().map(([name, n]) => '<tr><td><strong>' + NFM.escapeHtml(name) +
+        '</strong></td><td>' + (n.present
+          ? '<span class="badge ' + (state.agreed ? "ok" : "warn") + '">' +
+            NFM.escapeHtml(n.version || "unknown") + '</span>'
+          : '<span class="badge bad">missing</span>') +
+        '</td><td class="small faint">' + NFM.escapeHtml(n.track || (n.error ? "could not ask" : "-")) +
+        '</td><td class="small faint">' + (n.rules == null ? "" : n.rules) +
+        '</td></tr>').join("") +
+      "</tbody></table>" : "";
+  }
+
+  document.getElementById("crs-install").addEventListener("click", async function () {
+    const button = document.getElementById("crs-install");
+    const state = document.getElementById("crs-install-state");
+    button.disabled = true;
+    state.textContent = "downloading, this takes a few seconds";
+    try {
+      const r = await NFM.api("/waf/rules/install", { method: "POST", body: {} });
+      state.textContent = "installed on " + (r.installed || []).join(", ");
+      NFM.toast("Rule set installed", "ok");
+    } catch (err) {
+      state.textContent = "";
+      NFM.toast(err.message, "bad");
+    }
+    button.disabled = false;
+    loadCrs();
+  });
+
+  loadCrs();
+});
+</script>
+{% endblock %}

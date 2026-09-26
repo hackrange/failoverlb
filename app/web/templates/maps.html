@@ -1,0 +1,288 @@
+{% extends "base.html" %}
+{% block title %}Maps &middot; Failover LB{% endblock %}
+
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <h1>Maps</h1>
+    <div class="sub">
+      nginx's lookup table.  Read one thing, set another, and use the answer
+      anywhere a setting takes a value.
+    </div>
+  </div>
+  <div class="page-actions">
+    {% if can('edit_sites') %}
+      <button class="btn primary" id="new-map">Add one</button>
+    {% endif %}
+    {% if can('apply_config') %}
+      <button class="btn" id="apply-config">Apply config</button>
+    {% endif %}
+  </div>
+</div>
+
+<div class="notice info">
+  <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 3a.9.9 0 1 1 0 1.8A.9.9 0 0 1 8 4zm1.2 8H6.8v-.9h.7V7.9h-.7V7h2.1v4.1h.3V12z"/></svg>
+  <div>
+    A map is how you do conditional things without piling up <code>if</code>
+    blocks, which nginx handles badly inside a location.  It looks at one
+    variable, works down its list top to bottom, takes the first match, and
+    puts the answer in a variable of your own.  Then you use that variable in a
+    setting, in a header value, or in raw config.
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head"><h2>Lookups</h2></div>
+  <div class="card-body no-pad">
+    <table class="table">
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Reads</th>
+          <th>Sets</th>
+          <th>Rules</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="map-rows">
+        <tr><td colspan="5" class="faint">Loading...</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<style>
+  .entry-row { display: grid; grid-template-columns: 1fr 1fr auto; gap: .5rem;
+               margin-bottom: .4rem; align-items: center; }
+  .entry-row input { width: 100%; }
+  .entry-head { font-size: .8rem; }
+</style>
+
+<script nonce="{{ csp_nonce }}">
+// Waits for app.js, which the layout loads after this block, so window.NFM
+// exists by the time anything here runs.
+document.addEventListener("DOMContentLoaded", function () {
+  const CAN_EDIT = {{ 'true' if can('edit_sites') else 'false' }};
+  let SOURCES = [];
+  let PREFIXES = [];
+
+  function el(id) { return document.getElementById(id); }
+  function val(id) { const e = el(id); return e ? e.value.trim() : ""; }
+
+  async function load() {
+    let data;
+    try {
+      data = await NFM.api("/maps");
+    } catch (err) {
+      const cell = document.createElement("td");
+      cell.colSpan = 5;
+      cell.className = "faint";
+      cell.textContent = "Could not load: " + (err && err.message ? err.message : err);
+      const row = document.createElement("tr");
+      row.appendChild(cell);
+      el("map-rows").replaceChildren(row);
+      return;
+    }
+    SOURCES = data.sources || [];
+    PREFIXES = data.prefixes || [];
+
+    const rows = data.maps || [];
+    if (!rows.length) {
+      el("map-rows").innerHTML =
+        '<tr><td colspan="5" class="faint">Nothing here yet.  A map is worth ' +
+        'making when the same condition would otherwise be repeated on several ' +
+        'sites, or when an if block would be the only other way.</td></tr>';
+      return;
+    }
+
+    el("map-rows").innerHTML = rows.map(function (m) {
+      return "<tr>" +
+        "<td><strong>" + NFM.escapeHtml(m.name) + "</strong>" +
+        (m.description ? "<div class='small faint'>" +
+          NFM.escapeHtml(m.description) + "</div>" : "") +
+        (m.hostnames ? " <span class='badge neutral'>hostnames</span>" : "") +
+        "</td>" +
+        "<td class='mono small'>" + NFM.escapeHtml(m.source_variable) + "</td>" +
+        "<td class='mono small'>$" + NFM.escapeHtml(m.result_variable) + "</td>" +
+        "<td class='small'>" + (m.entries || []).length +
+        " <span class='faint'>then " +
+        NFM.escapeHtml(m.default_value === "" ? "nothing" : m.default_value) +
+        "</span></td>" +
+        "<td class='right'>" +
+        (CAN_EDIT
+          ? '<button class="btn small" data-edit="' + m.id + '">Edit</button> ' +
+            '<button class="btn small danger" data-del="' + m.id +
+            '" data-name="' + NFM.escapeHtml(m.name) + '">Delete</button>'
+          : "") +
+        "</td></tr>";
+    }).join("");
+  }
+
+  function entryRow(entry) {
+    entry = entry || { match: "", value: "" };
+    return '<div class="entry-row" data-entry>' +
+      '<input type="text" class="mono" data-match placeholder="what to look for" value="' +
+      NFM.escapeHtml(entry.match) + '">' +
+      '<input type="text" class="mono" data-value placeholder="what to set it to" value="' +
+      NFM.escapeHtml(entry.value) + '">' +
+      '<button class="btn small danger" data-drop type="button">Remove</button>' +
+      "</div>";
+  }
+
+  function form(m) {
+    m = m || { source_variable: "$http_user_agent", result_variable: "",
+               default_value: "", entries: [], hostnames: false };
+    const sourceOpts = SOURCES.map(function (s) {
+      return '<option value="' + NFM.escapeHtml(s) + '"' +
+             (m.source_variable === s ? " selected" : "") + ">" +
+             NFM.escapeHtml(s) + "</option>";
+    }).join("");
+    const known = SOURCES.indexOf(m.source_variable) !== -1;
+
+    return `
+      <div class="form-grid">
+        <div class="field">
+          <label for="m-name">Name</label>
+          <input type="text" id="m-name" value="${NFM.escapeHtml(m.name || "")}"
+                 placeholder="device_lookup">
+          <div class="hint">Just for finding it here.  It is not the variable.</div>
+        </div>
+        <div class="field">
+          <label for="m-result">Sets the variable</label>
+          <input type="text" id="m-result" value="${NFM.escapeHtml(m.result_variable || "")}"
+                 placeholder="device_type">
+          <div class="hint">Use it as <code>$device_type</code>.  It cannot be a
+            name nginx already has.</div>
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="m-source">Reads</label>
+        <select id="m-source">${sourceOpts}
+          <option value="__other__" ${known ? "" : "selected"}>something else, I will type it</option>
+        </select>
+        <input type="text" id="m-source-other" class="mono mt" style="display:none"
+               value="${known ? "" : NFM.escapeHtml(m.source_variable || "")}"
+               placeholder="$http_x_my_header">
+        <div class="hint">
+          Anything starting ${NFM.escapeHtml(PREFIXES.join(", "))} works too, with
+          the header or argument name on the end.  A variable nginx does not know
+          stops it starting, on every node, so this is checked before it is saved.
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="m-default">When nothing matches, set it to</label>
+        <input type="text" id="m-default" class="mono"
+               value="${NFM.escapeHtml(m.default_value || "")}" placeholder="leave blank for empty">
+      </div>
+
+      <div class="checkline">
+        <input type="checkbox" id="m-hostnames" ${m.hostnames ? "checked" : ""}>
+        <label for="m-hostnames">These are hostnames</label>
+      </div>
+      <div class="hint" style="margin-bottom:.75rem">
+        Turns on nginx's hostname matching, so <code>*.example.com</code> and
+        <code>.example.com</code> mean what you would expect.  Only tick it when
+        the thing being read really is a host name.
+      </div>
+
+      <h3>Rules, first match wins</h3>
+      <div class="entry-row entry-head faint">
+        <div>If it looks like</div><div>Set it to</div><div></div>
+      </div>
+      <div id="m-entries">${(m.entries || []).map(entryRow).join("")}</div>
+      <button class="btn small" id="m-add" type="button">Add a rule</button>
+
+      <div class="hint mt">
+        A plain word matches exactly.  Start it with <code>~</code> for a regular
+        expression, or <code>~*</code> to ignore case.  Backslashes are fine, so
+        <code>~*\\.(jpg|png)$</code> is what you would write.
+      </div>
+
+      <div class="mt"><button class="btn primary" id="m-save">Save</button></div>`;
+  }
+
+  function collectEntries() {
+    return Array.prototype.slice.call(
+      document.querySelectorAll("#m-entries [data-entry]")).map(function (row) {
+      return {
+        match: row.querySelector("[data-match]").value.trim(),
+        value: row.querySelector("[data-value]").value.trim()
+      };
+    }).filter(function (e) { return e.match; });
+  }
+
+  function openDialog(existing) {
+    NFM.openModal(existing ? "Edit " + existing.name : "Add a map", "",
+                  form(existing), true);
+
+    const src = el("m-source");
+    function syncSource() {
+      el("m-source-other").style.display = src.value === "__other__" ? "" : "none";
+    }
+    src.addEventListener("change", syncSource);
+    syncSource();
+
+    el("m-add").addEventListener("click", function () {
+      el("m-entries").insertAdjacentHTML("beforeend", entryRow(null));
+    });
+    el("m-entries").addEventListener("click", function (ev) {
+      const drop = ev.target.closest("[data-drop]");
+      if (drop) { drop.closest("[data-entry]").remove(); }
+    });
+
+    el("m-save").addEventListener("click", async function () {
+      const body = {
+        name: val("m-name"),
+        result_variable: val("m-result"),
+        source_variable: src.value === "__other__" ? val("m-source-other") : src.value,
+        default_value: val("m-default"),
+        hostnames: el("m-hostnames").checked,
+        entries: collectEntries()
+      };
+      if (!body.name) { NFM.toast("Give it a name", "bad"); return; }
+      if (!body.result_variable) { NFM.toast("Say what variable it sets", "bad"); return; }
+      try {
+        if (existing) {
+          await NFM.api("/maps/" + existing.id, { method: "PUT", body: body });
+        } else {
+          await NFM.api("/maps", { method: "POST", body: body });
+        }
+      } catch (err) {
+        NFM.toast(err.message, "bad");
+        return;
+      }
+      NFM.closeModal();
+      NFM.toast("Saved.  It reaches nginx on the next apply.", "ok");
+      load();
+    });
+  }
+
+  el("map-rows").addEventListener("click", async function (ev) {
+    const edit = ev.target.closest("[data-edit]");
+    if (edit) {
+      try { openDialog(await NFM.api("/maps/" + edit.dataset.edit)); }
+      catch (err) { NFM.toast(err.message, "bad"); }
+      return;
+    }
+    const del = ev.target.closest("[data-del]");
+    if (del) {
+      if (!confirm("Delete the map " + del.dataset.name + "?")) { return; }
+      try {
+        await NFM.api("/maps/" + del.dataset.del, { method: "DELETE" });
+      } catch (err) { NFM.toast(err.message, "bad"); return; }
+      NFM.toast("Deleted", "ok");
+      load();
+    }
+  });
+
+  const add = el("new-map");
+  if (add) { add.addEventListener("click", function () { openDialog(null); }); }
+
+  load();
+});
+</script>
+
+{% endblock %}

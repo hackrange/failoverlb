@@ -1,0 +1,399 @@
+{% extends "base.html" %}
+{% block title %}Backend Pools &middot; Failover LB{% endblock %}
+
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <h1>Backend pools</h1>
+    <div class="sub">
+      Groups of servers nginx sends traffic to.  The manager health checks each
+      one and takes the bad ones out on its own.
+    </div>
+  </div>
+  <div class="page-actions">
+    {% if can('edit_pools') %}
+      <button class="btn" id="new-pool">New pool</button>
+      <button class="btn primary" id="apply-config">Apply config</button>
+    {% endif %}
+  </div>
+</div>
+
+{% if not pools %}
+  <div class="card">
+    <div class="empty">
+      <strong>No pools yet</strong>
+      <p>A pool holds one or more backend servers.  A site points at a pool, and
+         nginx spreads requests across whatever is healthy in it.</p>
+      {% if can('edit_pools') %}
+        <p class="mt"><button class="btn primary" id="new-pool-empty">Make the first one</button></p>
+      {% endif %}
+    </div>
+  </div>
+{% endif %}
+
+{% if pools %}
+  <div class="flex" style="margin-bottom:14px; gap:10px; align-items:center">
+    <input type="search" id="pool-filter" data-filter=".pool-card"
+           data-filter-empty="pool-none" data-filter-count="pool-count"
+           placeholder="Search pools, backends, method, health check"
+           style="flex:1; max-width:480px">
+    <span class="small faint" id="pool-count"></span>
+  </div>
+  <div class="empty" id="pool-none" hidden>
+    <strong>No pool matches that</strong>
+    <p>Search covers the name, the description, the load balancing method, the
+       health check, and every backend address in the pool.</p>
+  </div>
+{% endif %}
+
+{% for pool in pools %}
+  {#- Everything worth searching, flattened onto the card.  Backends matter
+      most: somebody knows the address of the box misbehaving and not which
+      pool it is sitting in. -#}
+  {%- set searchable = [
+        pool.name, pool.description or '', pool.lb_method,
+        pool.backend_kind or '', pool.effective_health_check_type or '',
+        'https' if pool.uses_backend_tls else 'http',
+        pool.status_summary
+      ] + pool.members|map(attribute='label')|list -%}
+  <div class="card pool-card" data-search="{{ searchable|join(' ')|lower }}">
+    <div class="card-head">
+      <div>
+        <h2>
+          <a href="{{ base }}/pools/{{ pool.id }}">{{ pool.name }}</a>
+          {% if pool.status_summary == 'healthy' %}
+            <span class="badge ok">healthy</span>
+          {% elif pool.status_summary == 'degraded' %}
+            <span class="badge warn">{{ pool.healthy_count }} of {{ pool.total_count }} up</span>
+          {% elif pool.status_summary == 'down' %}
+            <span class="badge bad">all down</span>
+          {% else %}
+            <span class="badge neutral">no backends</span>
+          {% endif %}
+        </h2>
+        {% if pool.description %}
+          <div class="small faint">{{ pool.description }}</div>
+        {% endif %}
+      </div>
+      <div class="flex">
+        <span class="small faint mono">{{ pool.lb_method }}</span>
+        <button class="help-btn" data-help-static="help-lb"
+                data-help-title="Load balancing methods" data-help-wide
+                aria-label="Help">?</button>
+        {% if can('edit_pools') %}
+          <button class="btn sm" data-add-member="{{ pool.id }}">Add backend</button>
+        {% endif %}
+      </div>
+    </div>
+
+    <div class="card-body tight">
+      {% if pool.members %}
+        <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Backend</th>
+              <th>State</th>
+              <th class="right">Weight</th>
+              <th class="right">Last check</th>
+              <th class="right">Average</th>
+              <th>Last error</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for m in pool.members %}
+              {% set state = m.effective_state.value %}
+              <tr>
+                <td class="mono">
+                  {% if state == 'up' %}<span class="dot ok"></span>
+                  {% elif state == 'down' %}<span class="dot bad"></span>
+                  {% elif state in ('draining', 'maintenance') %}<span class="dot warn"></span>
+                  {% else %}<span class="dot neutral"></span>{% endif %}
+                  {{ m.label }}
+                  {% if m.backup %}<span class="badge neutral">backup</span>{% endif %}
+                </td>
+                <td>
+                  {% if state == 'up' %}<span class="badge ok">up</span>
+                  {% elif state == 'down' %}<span class="badge bad">down</span>
+                  {% elif state == 'draining' %}<span class="badge warn">draining</span>
+                  {% elif state == 'maintenance' %}<span class="badge warn">maintenance</span>
+                  {% else %}<span class="badge neutral">not checked</span>{% endif %}
+                </td>
+                <td class="num">{{ m.weight }}</td>
+                <td class="num faint">
+                  {{ '%.0f ms'|format(m.last_response_ms) if m.last_response_ms else '-'|safe }}
+                </td>
+                <td class="num faint">
+                  {{ '%.0f ms'|format(m.avg_response_ms) if m.avg_response_ms else '-'|safe }}
+                </td>
+                <td class="small faint">{{ (m.last_error or '')[:70] }}</td>
+                <td class="right nowrap">
+                  {% if can('drain_member') %}
+                    {% if m.admin_state == 'up' %}
+                      <button class="btn sm" data-member-state="{{ m.id }}" data-state="draining">Drain</button>
+                    {% else %}
+                      <button class="btn sm" data-member-state="{{ m.id }}" data-state="up">Put back</button>
+                    {% endif %}
+                  {% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        </div>
+      {% else %}
+        <div class="empty">
+          <strong>No backends in this pool</strong>
+          <p>Add at least one server for it to send traffic to.</p>
+        </div>
+      {% endif %}
+    </div>
+
+    <div class="card-head" style="border-top:1px solid var(--border); border-bottom:none;">
+      <div class="small faint">
+        Health check:
+        {% if pool.health_check_enabled %}
+          {{ pool.effective_health_check_type|upper }} {{ pool.health_check_path }}
+          every {{ pool.health_check_interval }}s,
+          up after {{ pool.health_check_rise }},
+          down after {{ pool.health_check_fall }}
+        {% else %}
+          turned off, so nginx only notices a bad backend after a request fails
+        {% endif %}
+      </div>
+      <button class="help-btn" data-help-static="help-hc"
+              data-help-title="How health checks work here" data-help-wide
+              aria-label="Help">?</button>
+    </div>
+  </div>
+{% endfor %}
+
+{# ---- help content ---- #}
+
+<div hidden id="help-lb">
+  <div class="help-section">
+    <p>How nginx picks which backend gets each request.</p>
+  </div>
+  <div class="help-section">
+    <h4>What you can use</h4>
+    <ul>
+      <li><strong>round_robin</strong> takes turns.  The default, and fine for
+          most things where your backends are about the same.</li>
+      <li><strong>least_conn</strong> sends to whichever has the fewest open
+          connections.  Better when requests take very different amounts of
+          time, because a slow backend piles up connections and naturally stops
+          being picked.</li>
+      <li><strong>ip_hash</strong> pins a client to a backend by their address.
+          Careful with this one: a whole office behind one NAT address all lands
+          on the same backend.</li>
+      <li><strong>hash</strong> pins on anything you name, like a cookie.
+          Usually better than ip_hash if you need stickiness.</li>
+      <li><strong>random two least_conn</strong> picks two at random and takes
+          the less busy one.  Good on very large pools where least_conn makes
+          everything pile onto whichever server just freed up.</li>
+    </ul>
+  </div>
+  <div class="help-section">
+    <h4>What is not here</h4>
+    <p>least_time and sticky cookie are in the paid nginx only.  For least_time,
+       use least_conn, which tracks it closely in practice.  For sticky, turn on
+       Sticky Sessions in the pool settings and the manager builds the cookie
+       side of it for you.  See the Open Source Parity page.</p>
+  </div>
+</div>
+
+<div hidden id="help-hc">
+  <div class="help-section">
+    <p>Two different things watch your backends, and it helps to know which
+       is which.</p>
+  </div>
+  <div class="help-section">
+    <h4>nginx does passive checks</h4>
+    <p>It notices when a real request to a backend fails and stops sending
+       traffic there for a while.  That is max_fails and fail_timeout.  It is
+       all the free nginx has on its own, and the catch is that somebody had to
+       get an error first for nginx to find out.</p>
+  </div>
+  <div class="help-section">
+    <h4>The manager does active checks</h4>
+    <p>It reaches out to every backend on a schedule whether or not anybody is
+       browsing the site.  When one fails enough times in a row, the manager
+       rewrites the upstream with that server marked down and reloads nginx.  So
+       a dead backend is out of the rotation before a user ever hits it.
+
+This is the paid version's headline feature, done from out here instead of
+inside nginx.</p>
+  </div>
+  <div class="help-section">
+    <h4>Rise and fall</h4>
+    <p>Fall is how many checks in a row have to fail before a backend is taken
+       out.  Rise is how many have to pass before it goes back in.  Both are
+       there so one dropped packet does not cause a reload.
+
+Higher fall means slower to react but fewer false alarms.  3 is a sensible
+starting point at a 10 second interval, so a backend is out within 30 seconds.</p>
+  </div>
+  <div class="help-section">
+    <h4>The safety net</h4>
+    <p>If every member of a pool would be marked down at once, the manager
+       leaves them all in instead and logs a warning.  A pool serving errors is
+       bad, but a pool serving nothing because a network blip failed every check
+       at the same moment is worse.</p>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script nonce="{{ csp_nonce }}">
+document.addEventListener("DOMContentLoaded", function () {
+
+  // Drain or restore a backend.  Both go through the same endpoint, which
+  // applies the config afterwards, so the change reaches nginx right away.
+  document.body.addEventListener("click", async function (e) {
+    const btn = e.target.closest("[data-member-state]");
+    if (!btn) return;
+
+    const id = btn.getAttribute("data-member-state");
+    const state = btn.getAttribute("data-state");
+
+    const message = state === "draining"
+      ? "Drain this backend?\n\nIt stops taking new connections but finishes the " +
+        "ones it already has, so nobody gets cut off mid request."
+      : "Put this backend back into the rotation?";
+
+    NFM.confirmThen(message, async function () {
+      btn.disabled = true;
+      const result = await NFM.api("/members/" + id + "/state", {
+        method: "POST",
+        body: { state: state }
+      });
+      NFM.toast("Backend set to " + state, "ok");
+      setTimeout(function () { window.location.reload(); }, 900);
+    });
+  });
+
+  // Add a backend to a pool.
+  document.body.addEventListener("click", function (e) {
+    const btn = e.target.closest("[data-add-member]");
+    if (!btn) return;
+
+    const poolId = btn.getAttribute("data-add-member");
+
+    NFM.openModal("Add a backend", "server address:port", `
+      <div class="field">
+        <label for="m-address">Address</label>
+        <input type="text" id="m-address" placeholder="10.20.30.51" autofocus>
+        <div class="hint">An IP address or a hostname nginx can resolve.</div>
+      </div>
+      <div class="field">
+        <label for="m-port">Port</label>
+        <input type="number" id="m-port" value="8080" min="1" max="65535">
+      </div>
+      <div class="field">
+        <label for="m-weight">Weight</label>
+        <input type="number" id="m-weight" value="1" min="1" max="1000">
+        <div class="hint">
+          Higher means more traffic.  A backend with weight 2 gets about twice
+          as many requests as one with weight 1.  Leave it at 1 if your servers
+          are the same size.
+        </div>
+      </div>
+      <div class="checkline">
+        <input type="checkbox" id="m-backup">
+        <label for="m-backup">Backup only</label>
+      </div>
+      <div class="hint">
+        A backup server sits idle until every normal one is down.  Good for a
+        static "we are down" page.
+      </div>
+      <div class="mt"><button class="btn primary" id="m-save">Add backend</button></div>
+    `);
+
+    document.getElementById("m-save").addEventListener("click", async function () {
+      const body = {
+        address: document.getElementById("m-address").value.trim(),
+        port: parseInt(document.getElementById("m-port").value, 10),
+        weight: parseInt(document.getElementById("m-weight").value, 10),
+        backup: document.getElementById("m-backup").checked
+      };
+
+      if (!body.address) { NFM.toast("A backend needs an address", "bad"); return; }
+
+      try {
+        await NFM.api("/pools/" + poolId + "/members", { method: "POST", body: body });
+        NFM.closeModal();
+        NFM.toast("Backend added.  Apply the config to send it live.", "ok");
+        setTimeout(function () { window.location.reload(); }, 900);
+      } catch (err) {
+        NFM.toast(err.message, "bad");
+      }
+    });
+  });
+
+  // New pool.
+  function newPool() {
+    NFM.openModal("New backend pool", "upstream block", `
+      <div class="field">
+        <label for="p-name">Name</label>
+        <input type="text" id="p-name" placeholder="app_pool" autofocus>
+        <div class="hint">
+          Letters, numbers, dots, dashes and underscores.  This becomes the
+          upstream name in the nginx config.
+        </div>
+      </div>
+      <div class="field">
+        <label for="p-desc">Description</label>
+        <input type="text" id="p-desc" placeholder="the main application servers">
+      </div>
+      <div class="field">
+        <label for="p-lb">Load balancing</label>
+        <select id="p-lb">
+          <option value="round_robin">Round robin, take turns</option>
+          <option value="least_conn">Least connections</option>
+          <option value="ip_hash">Pin by client address</option>
+          <option value="random_two">Random two, least connections</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="p-path">Health check path</label>
+        <input type="text" id="p-path" value="/" placeholder="/healthz">
+        <div class="hint">
+          A path that is cheap to serve and actually says whether the app works.
+          Pointing it at your home page means a slow database shows up as a
+          failed health check, which is usually what you want.
+        </div>
+      </div>
+      <div class="mt"><button class="btn primary" id="p-save">Create pool</button></div>
+    `);
+
+    document.getElementById("p-save").addEventListener("click", async function () {
+      const body = {
+        name: document.getElementById("p-name").value.trim(),
+        description: document.getElementById("p-desc").value.trim(),
+        lb_method: document.getElementById("p-lb").value,
+        health_check_path: document.getElementById("p-path").value.trim() || "/"
+      };
+
+      if (!body.name) { NFM.toast("A pool needs a name", "bad"); return; }
+
+      try {
+        await NFM.api("/pools", { method: "POST", body: body });
+        NFM.closeModal();
+        NFM.toast("Pool created", "ok");
+        setTimeout(function () { window.location.reload(); }, 800);
+      } catch (err) {
+        NFM.toast(err.message, "bad");
+      }
+    });
+  }
+
+  const nb = document.getElementById("new-pool");
+  if (nb) nb.addEventListener("click", newPool);
+  const nbe = document.getElementById("new-pool-empty");
+  if (nbe) nbe.addEventListener("click", newPool);
+});
+</script>
+{% endblock %}

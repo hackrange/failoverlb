@@ -1,0 +1,324 @@
+{% extends "base.html" %}
+{% block title %}Sites &middot; Failover LB{% endblock %}
+
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <h1>Sites</h1>
+    <div class="sub">Each one becomes a server block in the nginx config.</div>
+  </div>
+  <div class="page-actions">
+    {% if can('edit_sites') %}
+      <button class="btn" id="new-site">New site</button>
+      <button class="btn primary" id="apply-config">Apply config</button>
+    {% endif %}
+  </div>
+</div>
+
+{% if hosts %}
+  <div class="flex" style="margin-bottom:14px; gap:10px; align-items:center">
+    <input type="search" id="site-filter" data-filter="tr[data-search]"
+           data-filter-empty="site-none" data-filter-count="site-count"
+           placeholder="Search sites, server names, pool, certificate"
+           style="flex:1; max-width:480px">
+    <span class="small faint" id="site-count"></span>
+  </div>
+  <div class="empty" id="site-none" hidden>
+    <strong>No site matches that</strong>
+    <p>Search covers the site name, every server name it answers to, the pool
+       it sends to, and the certificate it uses.</p>
+  </div>
+
+  <div class="card">
+    <div class="card-body tight">
+      <div class="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>Site</th>
+            <th>Server names</th>
+            <th>Goes to</th>
+            <th>Certificate</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for h in hosts %}
+            {#- Server names matter as much as the site name here.  People look
+                for the name a visitor types, which is often not what the site
+                is called in this tool. -#}
+            {%- set searchable = [
+                  h.name, h.mode or '', h.document_root or '',
+                  h.pool.name if h.pool else '',
+                  h.cert.name if h.cert else '',
+                  'enabled' if h.enabled else 'disabled',
+                  'https' if h.listen_https else 'http'
+                ] + h.name_list() -%}
+            <tr data-search="{{ searchable|join(' ')|lower }}">
+              <td>
+                <a href="{{ base }}/sites/{{ h.id }}"><strong>{{ h.name }}</strong></a>
+                {% if h.admin_only %}
+                  <span class="badge info">management only</span>
+                {% endif %}
+              </td>
+              <td class="mono small">{{ h.name_list()|join(', ') }}</td>
+              <td>
+                {% if h.mode == 'proxy' and h.pool %}
+                  {{ h.pool.name }}
+                  {% if h.pool.status_summary == 'down' %}
+                    <span class="badge bad">all down</span>
+                  {% elif h.pool.status_summary == 'degraded' %}
+                    <span class="badge warn">degraded</span>
+                  {% endif %}
+                {% elif h.mode == 'static' %}
+                  <span class="faint mono">{{ h.document_root or 'no root set' }}</span>
+                {% elif h.mode == 'redirect' %}
+                  <span class="faint">redirects to {{ h.redirect_target }}</span>
+                {% else %}
+                  <span class="faint">nothing set</span>
+                {% endif %}
+              </td>
+              <td>
+                {% if h.cert %}
+                  {% if h.cert.status == 'valid' %}
+                    <span class="badge ok">{{ h.cert.days_left }}d left</span>
+                  {% elif h.cert.status == 'expiring' %}
+                    <span class="badge warn">{{ h.cert.days_left }}d left</span>
+                  {% elif h.cert.status == 'critical' %}
+                    <span class="badge bad">{{ h.cert.days_left }}d left</span>
+                  {% elif h.cert.status == 'expired' %}
+                    <span class="badge bad">expired</span>
+                  {% else %}
+                    <span class="badge neutral">not issued</span>
+                  {% endif %}
+                {% elif h.listen_https %}
+                  <span class="badge bad">none attached</span>
+                {% else %}
+                  <span class="faint">http only</span>
+                {% endif %}
+              </td>
+              <td>
+                {% if h.enabled %}
+                  <span class="badge ok">enabled</span>
+                {% else %}
+                  <span class="badge neutral">disabled</span>
+                {% endif %}
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      </div>
+    </div>
+  </div>
+{% else %}
+  <div class="card">
+    <div class="empty">
+      <strong>No sites yet</strong>
+      <p>A site is one server block.  It answers on a set of names and either
+         proxies to a pool, serves files off the disk, or redirects somewhere.</p>
+      {% if can('edit_sites') %}
+        <p class="mt"><button class="btn primary" id="new-site-empty">Make the first one</button></p>
+      {% endif %}
+    </div>
+  </div>
+{% endif %}
+
+<div class="notice info">
+  <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 3a.9.9 0 1 1 0 1.8A.9.9 0 0 1 8 4zm1.2 8H6.8v-.9h.7V7.9h-.7V7h2.1v4.1h.3V12z"/></svg>
+  <div>
+    Saving a site does not change nginx on its own.  Hit <strong>Apply
+    config</strong> when you are ready, and every node stages and tests it
+    before any of them go live.
+  </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script nonce="{{ csp_nonce }}">
+document.addEventListener("DOMContentLoaded", function () {
+
+  const pools = [
+    {% for p in pools %}{id: {{ p.id }}, name: {{ p.name|tojson }}},{% endfor %}
+  ];
+  const certs = [
+    {% for c in certs %}{id: {{ c.id }}, name: {{ c.name|tojson }}},{% endfor %}
+  ];
+
+  function newSite() {
+    const poolOptions = pools.map(function (p) {
+      return '<option value="' + p.id + '">' + NFM.escapeHtml(p.name) + "</option>";
+    }).join("");
+    const certOptions = certs.map(function (c) {
+      return '<option value="' + c.id + '">' + NFM.escapeHtml(c.name) + "</option>";
+    }).join("");
+
+    NFM.openModal("New site", "server block", `
+      <div class="field">
+        <label for="s-name">Name</label>
+        <input type="text" id="s-name" placeholder="www-example" autofocus>
+        <div class="hint">Just a label for you.  It becomes the config filename.</div>
+      </div>
+
+      <div class="field">
+        <label for="s-names">
+          Server names
+          <button class="help-btn" data-help-static="help-servername"
+                  data-help-title="Server names" aria-label="Help">?</button>
+        </label>
+        <input type="text" id="s-names" placeholder="www.example.com example.com">
+        <div class="hint">Space separated.  These are the hostnames this site answers to.</div>
+      </div>
+
+      <div class="field">
+        <label for="s-mode">What it does</label>
+        <select id="s-mode">
+          <option value="proxy">Proxy to a backend pool</option>
+          <option value="static">Serve files off the disk</option>
+          <option value="redirect">Redirect somewhere else</option>
+        </select>
+      </div>
+
+      <div class="field" id="wrap-pool">
+        <label for="s-pool">Backend pool</label>
+        <select id="s-pool"><option value="">Pick one</option>${poolOptions}</select>
+        ${pools.length ? "" : '<div class="hint">No pools exist yet.  Make one on the Backend Pools page first.</div>'}
+      </div>
+
+      <div class="field" id="wrap-root" style="display:none">
+        <label for="s-root">Document root</label>
+        <input type="text" id="s-root" placeholder="/var/www/example">
+      </div>
+
+      <div class="field" id="wrap-redirect" style="display:none">
+        <label for="s-target">Redirect to</label>
+        <input type="text" id="s-target" placeholder="https://www.example.com">
+      </div>
+
+      <div class="field">
+        <label for="s-cert">Certificate</label>
+        <select id="s-cert"><option value="">None, http only</option>${certOptions}</select>
+        <div class="hint">
+          Without a certificate the https server block is left out entirely.
+          nginx will not start with an ssl listener and no cert.
+        </div>
+      </div>
+
+      <div class="checkline">
+        <input type="checkbox" id="s-force" checked>
+        <label for="s-force">Redirect http to https</label>
+      </div>
+
+      <div class="checkline">
+        <input type="checkbox" id="s-admin">
+        <label for="s-admin">
+          Management network only
+          <button class="help-btn" data-help-static="help-adminonly"
+                  data-help-title="Management only sites" aria-label="Help">?</button>
+        </label>
+      </div>
+
+      <div class="mt"><button class="btn primary" id="s-save">Create site</button></div>
+    `);
+
+    const modeSelect = document.getElementById("s-mode");
+    modeSelect.addEventListener("change", function () {
+      document.getElementById("wrap-pool").style.display =
+        modeSelect.value === "proxy" ? "" : "none";
+      document.getElementById("wrap-root").style.display =
+        modeSelect.value === "static" ? "" : "none";
+      document.getElementById("wrap-redirect").style.display =
+        modeSelect.value === "redirect" ? "" : "none";
+    });
+
+    document.getElementById("s-save").addEventListener("click", async function () {
+      const mode = modeSelect.value;
+      const body = {
+        name: document.getElementById("s-name").value.trim(),
+        server_names: document.getElementById("s-names").value.trim(),
+        mode: mode,
+        force_https: document.getElementById("s-force").checked,
+        admin_only: document.getElementById("s-admin").checked,
+        listen_https: !!document.getElementById("s-cert").value
+      };
+
+      const certId = document.getElementById("s-cert").value;
+      if (certId) body.cert_id = parseInt(certId, 10);
+
+      if (mode === "proxy") {
+        const poolId = document.getElementById("s-pool").value;
+        if (!poolId) { NFM.toast("Pick a backend pool", "bad"); return; }
+        body.pool_id = parseInt(poolId, 10);
+      } else if (mode === "static") {
+        body.document_root = document.getElementById("s-root").value.trim();
+      } else if (mode === "redirect") {
+        body.redirect_target = document.getElementById("s-target").value.trim();
+      }
+
+      if (!body.name) { NFM.toast("A site needs a name", "bad"); return; }
+      if (!body.server_names) { NFM.toast("A site needs at least one server name", "bad"); return; }
+
+      try {
+        await NFM.api("/hosts", { method: "POST", body: body });
+        NFM.closeModal();
+        NFM.toast("Site created.  Apply the config to send it live.", "ok");
+        setTimeout(function () { window.location.reload(); }, 900);
+      } catch (err) {
+        NFM.toast(err.message, "bad");
+      }
+    });
+  }
+
+  const b1 = document.getElementById("new-site");
+  if (b1) b1.addEventListener("click", newSite);
+  const b2 = document.getElementById("new-site-empty");
+  if (b2) b2.addEventListener("click", newSite);
+});
+</script>
+
+<div hidden id="help-servername">
+  <div class="help-section">
+    <p>The hostnames this site answers to.  nginx matches the Host header a
+       browser sends against these to work out which server block to use.</p>
+  </div>
+  <div class="help-section">
+    <h4>Examples</h4>
+    <ul>
+      <li><code>www.example.com</code> matches only that exact name</li>
+      <li><code>www.example.com example.com</code> matches both</li>
+      <li><code>*.example.com</code> matches any subdomain</li>
+      <li><code>_</code> is the catch all, used for the default site</li>
+    </ul>
+  </div>
+  <div class="help-section">
+    <h4>Worth knowing</h4>
+    <p>If a request comes in for a name no site claims, nginx uses whichever
+       server block is marked as the default, or the first one it loaded.  That
+       is usually not what you want, so it is worth having one site set as the
+       default that returns a plain 404.</p>
+  </div>
+</div>
+
+<div hidden id="help-adminonly">
+  <div class="help-section">
+    <p>Locks this whole site down so only the management networks can reach it.</p>
+  </div>
+  <div class="help-section">
+    <h4>What it writes</h4>
+    <p>An allow line for every node in the cluster, plus your management
+       networks, then a deny all.  The node list is generated from the cluster
+       roster, so when you add a node later it lands in here on its own without
+       anybody having to remember.</p>
+  </div>
+  <div class="help-section">
+    <h4>When to use it</h4>
+    <ul>
+      <li>An admin panel or a staging site that should never face the internet</li>
+      <li>An internal API that only your own systems call</li>
+      <li>A metrics or status endpoint</li>
+    </ul>
+  </div>
+</div>
+{% endblock %}

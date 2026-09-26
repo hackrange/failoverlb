@@ -1,0 +1,29 @@
+[Unit]
+Description=Put the previous nginx build back
+Documentation=file:///opt/nginx-installer.sh
+
+# The other half of nginx-rebuild.service, and unconfined for the same reason:
+# a revert copies a binary back over /usr/sbin/nginx and unpacks a saved
+# /etc/nginx over the top of the live one.  The agent's sandbox blocks the first
+# of those, so a revert driven from the GUI would half work, which is the worst
+# outcome available here.  Half a revert is an old binary beside a new perl
+# module, and nginx then will not start at all.
+#
+# Kept as its own unit rather than a parameter on the rebuild one so that
+# neither file has a command line that changes.  Each does exactly one thing and
+# you can see which from the ExecStart.
+
+[Service]
+Type=oneshot
+ExecStart=/opt/nginx-installer.sh revert
+
+StandardOutput=append:/var/log/nginx-fleet-manager-upgrade.log
+StandardError=append:/var/log/nginx-fleet-manager-upgrade.log
+
+# A revert is a file copy and a restart, so it is quick.  If it has not finished
+# in five minutes something is badly wrong and waiting longer will not fix it.
+TimeoutStartSec=300
+RemainAfterExit=no
+
+[Install]
+WantedBy=multi-user.target

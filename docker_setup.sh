@@ -1,0 +1,317 @@
+#!/usr/bin/env bash
+# =============================================================================
+# Docker setup for Ubuntu 22.04 and newer.
+#
+# Author: Tim Rice
+#
+# Installs Docker CE from Docker's own apt repository, which is what you want.
+# The docker.io package Ubuntu ships is usually a long way behind and does not
+# come with the compose plugin.
+#
+#   sudo bash docker_setup.sh
+#
+# If Docker is already here this leaves it alone.  It will not reinstall over
+# the top of a working setup and it will not restart the daemon out from under
+# containers that are running, unless you ask for it with --force.
+#
+# The whole thing is wrapped in a { } block so "curl | bash" reads the entire
+# file before running any of it.  Without that, a dropped connection halfway
+# through leaves you running half a script.
+# =============================================================================
+{
+set -euo pipefail
+
+# --------------------------------------------------------------------- config
+COMPOSE_MIN_VERSION="2"
+DOCKER_USER="${SUDO_USER:-}"
+LOG_FILE="/tmp/docker-setup-$(date +%Y%m%d-%H%M%S).log"
+
+FORCE=false
+SKIP_DAEMON_CONFIG=false
+ADD_USER=true
+
+# ---------------------------------------------------------------- output bits
+c_reset=$'\033[0m'; c_red=$'\033[31m'; c_grn=$'\033[32m'
+c_ylw=$'\033[33m'; c_cyn=$'\033[36m'
+log()     { echo "${c_cyn}[docker]${c_reset} $*" | tee -a "$LOG_FILE"; }
+info()    { echo "         $*" | tee -a "$LOG_FILE"; }
+warn()    { echo "${c_ylw}[warn]${c_reset} $*" | tee -a "$LOG_FILE"; }
+success() { echo "${c_grn}$*${c_reset}" | tee -a "$LOG_FILE"; }
+fail()    { echo "${c_red}[error]${c_reset} $*" | tee -a "$LOG_FILE"; exit 1; }
+header()  { echo | tee -a "$LOG_FILE"; echo "${c_cyn}== $* ==${c_reset}" | tee -a "$LOG_FILE"; }
+
+usage() {
+    cat <<USAGE
+Docker setup for Ubuntu 22.04 and newer
+
+Usage: sudo bash docker_setup.sh [options]
+
+      --force              Reinstall even if Docker is already here
+      --no-daemon-config   Do not write /etc/docker/daemon.json
+      --no-user            Do not add your user to the docker group
+  -h, --help               This message
+
+What it does:
+
+  1. Checks you are on a version of Ubuntu this works on
+  2. Removes the old unofficial packages if they are in the way
+  3. Adds Docker's apt key and repository properly
+  4. Installs the engine, the CLI, containerd, buildx and compose
+  5. Writes a daemon.json that rotates logs, so containers cannot fill the disk
+  6. Puts your user in the docker group so you can drop the sudo
+  7. Runs hello-world to prove it works
+
+Being careful about an existing install:
+
+  If Docker is already installed this stops and tells you, rather than
+  reinstalling.  On a box with containers running, a reinstall can restart the
+  daemon and take everything down with it.  Use --force only when you know
+  what is running.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --force)            FORCE=true; shift ;;
+        --no-daemon-config) SKIP_DAEMON_CONFIG=true; shift ;;
+        --no-user)          ADD_USER=false; shift ;;
+        -h|--help)          usage; exit 0 ;;
+        *)                  fail "Do not know the option $1.  Try --help." ;;
+    esac
+done
+
+# ------------------------------------------------------------------ pre flight
+header "Checks"
+
+[[ "$(id -u)" -eq 0 ]] || fail "Run this with sudo."
+
+# We only claim this works on Ubuntu.  It will very likely work on Debian too,
+# but the repository path is different and untested here, so we say so.
+if [[ ! -f /etc/os-release ]]; then
+    fail "Cannot tell what distribution this is.  No /etc/os-release."
+fi
+
+# shellcheck disable=SC1091
+. /etc/os-release
+
+if [[ "${ID:-}" != "ubuntu" ]]; then
+    warn "This is written for Ubuntu.  Found '${ID:-unknown}'."
+    warn "Carrying on, but you are off the tested path."
+fi
+
+UBUNTU_VERSION="${VERSION_ID:-0}"
+UBUNTU_MAJOR="${UBUNTU_VERSION%%.*}"
+
+if [[ "${ID:-}" == "ubuntu" ]] && (( UBUNTU_MAJOR < 22 )); then
+    fail "This needs Ubuntu 22.04 or newer.  Found ${UBUNTU_VERSION}."
+fi
+
+log "Ubuntu ${UBUNTU_VERSION} (${VERSION_CODENAME:-unknown})"
+
+ARCH="$(dpkg --print-architecture)"
+log "Architecture: ${ARCH}"
+
+# ------------------------------------------------- is Docker already here
+if command -v docker >/dev/null 2>&1 && ! $FORCE; then
+    header "Docker is already installed"
+
+    docker --version | tee -a "$LOG_FILE"
+    if docker compose version >/dev/null 2>&1; then
+        docker compose version | tee -a "$LOG_FILE"
+    else
+        warn "The compose plugin is missing.  Installing just that."
+        apt-get update -qq
+        apt-get install -y docker-compose-plugin
+        success "Compose plugin installed."
+    fi
+
+    RUNNING="$(docker ps -q 2>/dev/null | wc -l)"
+    if (( RUNNING > 0 )); then
+        info "There are ${RUNNING} containers running right now."
+        info "Not touching anything.  Reinstalling would restart the daemon and"
+        info "take those down with it."
+    fi
+
+    echo
+    success "Nothing to do.  Use --force if you really want to reinstall."
+    exit 0
+fi
+
+# ------------------------------------------------ clear out the old packages
+header "Clearing out old packages"
+
+# Ubuntu's own docker packages conflict with Docker's.  They install to the
+# same paths, so having both is a mess.  These are safe to remove because they
+# are the ones we are replacing, and remove keeps any config and volumes.
+OLD_PACKAGES=(docker.io docker-doc docker-compose docker-compose-v2 podman-docker containerd runc)
+REMOVED=false
+for pkg in "${OLD_PACKAGES[@]}"; do
+    if dpkg -l "$pkg" 2>/dev/null | grep -q '^ii'; then
+        log "Removing ${pkg}"
+        apt-get remove -y "$pkg" >>"$LOG_FILE" 2>&1 || true
+        REMOVED=true
+    fi
+done
+$REMOVED || info "None of the old packages were here."
+
+# --------------------------------------------------------------- dependencies
+header "Dependencies"
+
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -qq
+apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    gnupg \
+    >>"$LOG_FILE" 2>&1
+success "Dependencies installed."
+
+# ----------------------------------------------------------- apt key and repo
+header "Docker apt repository"
+
+# The key goes in /etc/apt/keyrings, not the old apt-key store.  apt-key has
+# been deprecated for years because a key added that way is trusted for every
+# repository on the box, not just the one you added it for.
+install -m 0755 -d /etc/apt/keyrings
+
+if [[ ! -f /etc/apt/keyrings/docker.asc ]]; then
+    log "Fetching Docker's signing key"
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+        -o /etc/apt/keyrings/docker.asc \
+        || fail "Could not download the Docker signing key.  Check the network."
+    chmod a+r /etc/apt/keyrings/docker.asc
+else
+    info "The signing key is already here."
+fi
+
+# Pin the repo to this one key with signed-by.  Without it, any key in the
+# keyring can sign for this repo.
+CODENAME="${VERSION_CODENAME:-jammy}"
+
+# Ubuntu releases the installer sometimes runs on are newer than what Docker
+# has built packages for.  Falling back to the most recent one they do have is
+# better than failing outright, and the packages work fine.
+if ! curl -fsSI "https://download.docker.com/linux/ubuntu/dists/${CODENAME}/Release" >/dev/null 2>&1; then
+    warn "Docker has no repository for '${CODENAME}' yet."
+    for fallback in noble jammy; do
+        if curl -fsSI "https://download.docker.com/linux/ubuntu/dists/${fallback}/Release" >/dev/null 2>&1; then
+            warn "Falling back to the '${fallback}' packages, which will work fine."
+            CODENAME="$fallback"
+            break
+        fi
+    done
+fi
+
+echo "deb [arch=${ARCH} signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu ${CODENAME} stable" \
+    > /etc/apt/sources.list.d/docker.list
+
+log "Repository set to ${CODENAME} stable"
+apt-get update -qq
+
+# -------------------------------------------------------------------- install
+header "Installing Docker"
+
+apt-get install -y \
+    docker-ce \
+    docker-ce-cli \
+    containerd.io \
+    docker-buildx-plugin \
+    docker-compose-plugin \
+    >>"$LOG_FILE" 2>&1 \
+    || fail "The install failed.  Look at ${LOG_FILE}."
+
+success "Docker installed."
+
+# --------------------------------------------------------------- daemon.json
+if ! $SKIP_DAEMON_CONFIG; then
+    header "Daemon settings"
+
+    if [[ -f /etc/docker/daemon.json ]]; then
+        warn "/etc/docker/daemon.json already exists, leaving it alone."
+        info "Check that it has log rotation in it, or a chatty container can"
+        info "fill the disk.  Without a limit, json-file logs grow forever."
+    else
+        mkdir -p /etc/docker
+
+        # Log rotation is the important part here.  The default json-file driver
+        # has no size limit at all.  One container logging steadily will
+        # eventually eat the whole filesystem, and the first sign of trouble is
+        # usually everything on the box breaking at once.
+        cat > /etc/docker/daemon.json <<'DAEMON'
+{
+  "log-driver": "json-file",
+  "log-opts": {
+    "max-size": "20m",
+    "max-file": "5"
+  },
+  "live-restore": true,
+  "userland-proxy": false,
+  "default-address-pools": [
+    { "base": "172.20.0.0/16", "size": 24 }
+  ]
+}
+DAEMON
+        log "Wrote /etc/docker/daemon.json"
+        info "  log rotation at 20m x 5 files per container"
+        info "  live-restore keeps containers up across a daemon restart"
+        info "  address pool set so docker networks do not collide with your LAN"
+    fi
+fi
+
+# ------------------------------------------------------------------- start it
+header "Starting Docker"
+
+systemctl enable docker >>"$LOG_FILE" 2>&1
+systemctl restart docker
+
+sleep 2
+systemctl is-active --quiet docker || fail "Docker will not start.  Try: journalctl -u docker -n 50"
+success "Docker is running."
+
+# ------------------------------------------------------------ the docker group
+if $ADD_USER && [[ -n "$DOCKER_USER" ]] && [[ "$DOCKER_USER" != "root" ]]; then
+    header "User access"
+
+    if id -nG "$DOCKER_USER" | grep -qw docker; then
+        info "${DOCKER_USER} is already in the docker group."
+    else
+        usermod -aG docker "$DOCKER_USER"
+        success "Added ${DOCKER_USER} to the docker group."
+        warn "Log out and back in for that to take effect."
+        info "Or run: newgrp docker"
+    fi
+
+    # Worth being straight about this.  Being in the docker group is the same
+    # as being root, because you can mount the host filesystem into a container
+    # and do whatever you like.  It is convenient, and people should know.
+    echo
+    warn "Being in the docker group is effectively root on this box."
+    info "Anybody in it can mount / into a container and take over.  That is"
+    info "how docker works, not a bug, but only add people you would give root."
+fi
+
+# ------------------------------------------------------------------ verify it
+header "Checking it works"
+
+docker --version | tee -a "$LOG_FILE"
+docker compose version | tee -a "$LOG_FILE"
+
+log "Running hello-world"
+if docker run --rm hello-world >>"$LOG_FILE" 2>&1; then
+    success "hello-world ran fine."
+    docker rmi hello-world >/dev/null 2>&1 || true
+else
+    warn "hello-world did not run.  Look at ${LOG_FILE}."
+    warn "Usually this is DNS or a proxy in the way of the registry."
+fi
+
+echo
+success "Docker is set up."
+echo
+info "Log:  ${LOG_FILE}"
+echo
+info "Next, to install Failover LB:"
+info "  sudo bash failoverlb_setup.sh"
+echo
+
+}

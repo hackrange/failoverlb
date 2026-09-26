@@ -1,0 +1,770 @@
+{% extends "base.html" %}
+{% block title %}Tunnel &middot; Failover LB{% endblock %}
+
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <h1>Tunnel</h1>
+    <div class="sub">
+      Reach a backend that has no public address.  The machine dials out to
+      these load balancers, and your pools reach it back down the same tunnel.
+    </div>
+  </div>
+  <div class="page-actions">
+    {% if can('manage_cluster') %}
+      <button class="btn primary" id="add-workload" hidden>Add a workload</button>
+    {% endif %}
+  </div>
+</div>
+
+<div class="notice info">
+  <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 3a.9.9 0 1 1 0 1.8A.9.9 0 0 1 8 4zm1.2 8H6.8v-.9h.7V7.9h-.7V7h2.1v4.1h.3V12z"/></svg>
+  <div>
+    To put a server in a pool it has to be reachable from these load balancers,
+    which normally means a public address and a hole in a firewall.  A tunnel
+    avoids both.  The machine opens the connection outward, so nothing inbound
+    has to be allowed, and it stays reachable from whichever load balancer is
+    serving.
+    <br><br>
+    <strong>It is not a VPN.</strong>  The machine gets a route to these load
+    balancers and nothing else.  It does not change where that machine's own
+    traffic goes and it gives it no way out to the internet.
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head"><h2>Setup</h2></div>
+  <div class="card-body" id="setup-body">
+    <div class="faint">Loading...</div>
+  </div>
+</div>
+
+<div class="card" id="install-card" hidden>
+  <div class="card-head"><h2>Tunnel support</h2></div>
+  <div class="card-body" id="install-body"></div>
+</div>
+
+<div class="card" id="workload-card" hidden>
+  <div class="card-head">
+    <h2>Workloads</h2>
+    <span class="small faint" id="wl-count"></span>
+  </div>
+  <div class="card-body no-pad">
+    {#
+      The search only appears once there are enough workloads to need it.  A
+      search box above three rows is furniture, and it is the sort of thing
+      that makes a page look busier than the job it is doing.
+
+      It matches the note as well as the name and address, which is the point
+      of letting people write notes: "the billing box" is what somebody
+      remembers, not web07.
+    #}
+    <div class="pad" id="wl-search-row" hidden>
+      {#
+        Wide enough for its own placeholder.  At 340px the last words of
+        "by name, address or note" were cut off, which hides the one thing the
+        box is there to tell you: that it searches the note as well, which is
+        the whole reason notes are worth writing.
+      #}
+      <input type="search" id="wl-search" placeholder="Find a workload by name, address or note"
+             style="max-width:420px;width:100%">
+      <span class="small faint" id="wl-search-state"></span>
+    </div>
+    <div id="workload-list"><div class="pad faint">Loading...</div></div>
+  </div>
+</div>
+
+<style>
+  .pad { padding: 1rem; }
+  .wl-row { border-bottom: 1px solid var(--line); padding: 1rem; }
+  .wl-row:last-child { border-bottom: 0; }
+  .wl-head { display: flex; justify-content: space-between;
+             align-items: flex-start; gap: 1rem; }
+  .dot { width: .55rem; height: .55rem; border-radius: 50%;
+         display: inline-block; margin-right: .35rem; }
+  .dot.ok { background: var(--ok, #2e9e4f); }
+  .dot.wait { background: var(--warn, #d0900a); }
+  .dot.off { background: var(--muted, #999); }
+  .cmd { background: var(--code-bg, #f6f7f9); border-radius: 4px;
+         padding: .6rem .75rem; margin-top: .5rem;
+         font-size: .82rem; width: 100%; box-sizing: border-box;
+         border: 1px solid var(--line); resize: vertical;
+         white-space: pre-wrap; word-break: break-all; }
+  .node-line { margin-top: .3rem; }
+  .ep-row { display: flex; align-items: center; gap: .5rem; margin-top: .4rem; }
+  .ep-name { min-width: 5rem; font-weight: 600; font-size: .85rem; }
+  .ep-input { flex: 1; }
+</style>
+
+<script nonce="{{ csp_nonce }}">
+document.addEventListener("DOMContentLoaded", function () {
+  const CAN_EDIT = {{ 'true' if can('manage_cluster') else 'false' }};
+  let STATE = null;
+
+  function el(id) { return document.getElementById(id); }
+  function esc(s) { return NFM.escapeHtml(s == null ? "" : String(s)); }
+
+  async function load() {
+    try {
+      STATE = await NFM.api("/tunnel");
+    } catch (err) {
+      el("setup-body").textContent = "Could not load: " + (err.message || err);
+      return;
+    }
+    drawSetup();
+    drawWorkloads();
+    loadInstall();
+  }
+
+  function drawSetup() {
+    const n = STATE.network;
+    const on = n.enabled;
+
+    let html = '<div><span class="dot ' + (on ? "ok" : "off") + '"></span>' +
+      "<strong>" + (on ? "The tunnel is on" : "The tunnel is off") + "</strong></div>";
+
+    if (on) {
+      html += '<div class="small faint" style="margin-left:1rem">' +
+        "Range " + esc(n.cidr) + ", listening on port " + esc(n.listen_port) +
+        "</div>";
+      // What each load balancer holds, because a workload peers with all of
+      // them and a node missing from here is one it cannot reach.
+      html += '<div style="margin-top:.75rem"><strong class="small">' +
+        "These load balancers:</strong>";
+      (n.nodes || []).forEach(function (node) {
+        html += '<div class="small node-line">' +
+          '<span class="dot ' + (node.public_key ? "ok" : "wait") + '"></span>' +
+          "<strong>" + esc(node.node) + "</strong> " +
+          '<span class="mono faint">' + esc(node.address || "no address yet") +
+          "</span>" +
+          (node.endpoint ? ' <span class="faint">reached at ' +
+            esc(node.endpoint) + "</span>" : "") + "</div>";
+      });
+      html += "</div>";
+    } else {
+      html += '<div class="small faint" style="margin-left:1rem">' +
+        "Turn it on to give workloads a way in without a public address.</div>";
+    }
+
+    if (CAN_EDIT) {
+      html += '<div class="mt"><button class="btn" id="setup-edit">' +
+        (on ? "Change the setup" : "Turn the tunnel on") + "</button>" +
+        (on ? ' <button class="btn danger" id="setup-off">Turn it off</button>' : "") +
+        "</div>";
+    }
+
+    el("setup-body").innerHTML = html;
+    el("workload-card").hidden = !on;
+    const add = el("add-workload");
+    if (add) { add.hidden = !on; }
+
+    const edit = el("setup-edit");
+    if (edit) { edit.addEventListener("click", openSetup); }
+    const off = el("setup-off");
+    if (off) {
+      off.addEventListener("click", async function () {
+        if (!confirm("Turn the tunnel off?\n\nAnything reached through it stops " +
+                     "being reachable.")) { return; }
+        try { await NFM.api("/tunnel", { method: "PUT", body: { enabled: false } }); }
+        catch (err) { NFM.toast(err.message, "bad"); return; }
+        NFM.toast("Turned off", "ok");
+        load();
+      });
+    }
+  }
+
+  function openSetup() {
+    const n = STATE.network;
+    NFM.openModal("Tunnel setup", "", `
+      <div class="field">
+        <label for="t-cidr">Address range</label>
+        <input type="text" id="t-cidr" class="mono" value="${esc(n.cidr)}"
+               placeholder="10.77.0.0/24">
+        <div class="hint">A private range that nothing else on your network
+          uses.  Each load balancer takes one address from it and each workload
+          takes one.  You choose it because you are the only one who knows what
+          is already in use.</div>
+      </div>
+      <div class="field" style="max-width:220px">
+        <label for="t-port">Listening port</label>
+        <input type="number" id="t-port" value="${esc(n.listen_port)}"
+               min="1" max="65535">
+        <div class="hint">Workloads connect out to this port on the load
+          balancers.  It has to be reachable from wherever they are.</div>
+      </div>
+      <div class="checkline">
+        <input type="checkbox" id="t-on" ${n.enabled ? "checked" : ""}>
+        <label for="t-on">Turn the tunnel on</label>
+      </div>
+      ${(n.nodes || []).length ? `
+      <div class="field mt">
+        <label>How workloads reach each load balancer</label>
+        <div class="hint">Worked out from what each box says about itself,
+          which is usually right.  Put a name here when it is not.  A workload
+          resolves it when its tunnel comes up, so a name with both an A and an
+          AAAA record lets each one use whichever of IPv4 or IPv6 it has, which
+          a single address can never do.  No port.</div>
+        ${(n.nodes || []).map(function (node) {
+          return '<div class="ep-row"><span class="ep-name">' + esc(node.node) +
+            '</span><input type="text" class="mono ep-input" data-node="' +
+            esc(node.node) + '" value="' + esc(node.endpoint_override) +
+            '" placeholder="' + esc(node.endpoint || "") + '"></div>';
+        }).join("")}
+      </div>` : ""}
+      <div class="mt"><button class="btn primary" id="t-save">Save</button></div>`,
+      true);
+
+    el("t-save").addEventListener("click", async function () {
+      const endpoints = {};
+      document.querySelectorAll(".ep-input").forEach(function (box) {
+        endpoints[box.dataset.node] = box.value.trim();
+      });
+      const body = {
+        cidr: el("t-cidr").value.trim(),
+        listen_port: parseInt(el("t-port").value, 10) || 51820,
+        enabled: el("t-on").checked,
+        endpoints: endpoints
+      };
+      try { await NFM.api("/tunnel", { method: "PUT", body: body }); }
+      catch (err) { NFM.toast(err.message, "bad"); return; }
+      NFM.closeModal();
+      NFM.toast("Saved.  The load balancers are setting it up now.", "ok");
+      load();
+    });
+  }
+
+  // What each load balancer needs before it can carry a tunnel, and a button
+  // to put it there.
+  //
+  // Only shown when the tunnel is on and something is missing.  A load
+  // balancer is somebody's production box, and installing a network package
+  // on one because a page happened to be open is not a decision this page
+  // gets to make on its own.
+  let INSTALL = null;
+  let INSTALL_POLL = null;
+
+  async function loadInstall() {
+    if (!STATE || !STATE.network || !STATE.network.enabled) {
+      el("install-card").hidden = true;
+      return;
+    }
+    try {
+      INSTALL = await NFM.api("/tunnel/install");
+    } catch (err) {
+      el("install-card").hidden = true;
+      return;
+    }
+    drawInstall();
+  }
+
+  function drawInstall() {
+    const nodes = (INSTALL && INSTALL.nodes) || {};
+    const names = Object.keys(nodes).sort();
+
+    el("install-card").hidden = false;
+
+    // When everything is ready this stays, as one line rather than nothing.
+    // Hiding it would be tidier and would also mean the only place that says
+    // what a load balancer needs disappears exactly when somebody goes
+    // looking to check.
+    if (INSTALL.all_ready && !INSTALL.any_running) {
+      el("install-body").innerHTML = names.map(function (name) {
+        return '<div class="small node-line"><span class="dot ok"></span>' +
+          "<strong>" + esc(name) + '</strong> <span class="faint">' +
+          "can carry the tunnel</span></div>";
+      }).join("");
+      return;
+    }
+
+    let html = "";
+    if (INSTALL.any_running) {
+      html += '<div class="notice info"><div>Installing.  This takes as long ' +
+        "as fetching a package takes, and the page keeps up with it.</div></div>";
+    } else {
+      html += '<div class="notice warn"><div>The tunnel is on, but not every ' +
+        "load balancer can carry it yet.  A workload connects to all of them, " +
+        "so one that cannot is a failover that will not work.</div></div>";
+    }
+
+    names.forEach(function (name) {
+      const n = nodes[name] || {};
+      const state = n.ready ? "ok" : (n.running ? "wait" : "off");
+      const words = n.error ? ("could not be asked: " + esc(n.error))
+        : (n.running ? "installing now"
+          : (n.ready ? "ready" : "cannot carry the tunnel yet"));
+      html += '<div class="small node-line"><span class="dot ' + state +
+        '"></span><strong>' + esc(name) + "</strong> " +
+        '<span class="faint">' + words + "</span></div>";
+      if (!n.ready && n.detail) {
+        html += '<pre class="cmd mono">' + esc(n.detail) + "</pre>";
+      }
+    });
+
+    if (CAN_EDIT && !INSTALL.any_running) {
+      html += '<div class="mt"><button class="btn primary" id="install-go">' +
+        "Install tunnel support</button></div>";
+      html += '<div class="hint">Installs wireguard on each load balancer, and ' +
+        "the userspace version where the kernel has none.  Nothing else is " +
+        "changed and nothing is removed.</div>";
+    }
+
+    el("install-body").innerHTML = html;
+
+    const go = el("install-go");
+    if (go) {
+      go.addEventListener("click", async function () {
+        go.disabled = true;
+        try { await NFM.api("/tunnel/install", { method: "POST" }); }
+        catch (err) { NFM.toast(err.message, "bad"); go.disabled = false; return; }
+        NFM.toast("Installing", "ok");
+        watchInstall();
+      });
+    }
+  }
+
+  // Poll while it runs, and stop when it stops.  An interval left running
+  // after the page has moved on is a page that keeps asking forever.
+  function watchInstall() {
+    if (INSTALL_POLL) { clearInterval(INSTALL_POLL); }
+    INSTALL_POLL = setInterval(async function () {
+      try { INSTALL = await NFM.api("/tunnel/install"); }
+      catch (err) { return; }
+      drawInstall();
+      if (!INSTALL.any_running) {
+        clearInterval(INSTALL_POLL);
+        INSTALL_POLL = null;
+        if (INSTALL.all_ready) {
+          NFM.toast("Every load balancer can carry the tunnel now", "ok");
+          load();
+        } else {
+          NFM.toast("Finished, but not every node is ready.  See the detail.", "bad");
+        }
+      }
+    }, 3000);
+  }
+
+  // The search is always there.
+  //
+  // It was gated to four workloads on the grounds that a search box above
+  // three rows is furniture.  That was wrong in the way that matters: the
+  // owner went looking for it with two and could not find it, and a control
+  // nobody can find is worse than one that is occasionally unnecessary.
+  const SEARCH_FROM = 0;
+
+  function drawWorkloads() {
+    const all = STATE.peers || [];
+    if (!all.length) {
+      el("wl-search-row").hidden = true;
+      el("wl-count").textContent = "";
+      el("workload-list").innerHTML = '<div class="pad faint">' +
+        "No workloads yet.  Add one and you get a single command to run on that " +
+        "machine.</div>";
+      return;
+    }
+
+    el("wl-count").textContent = all.length === 1 ? "1 workload"
+                                                  : all.length + " workloads";
+    el("wl-search-row").hidden = all.length <= SEARCH_FROM;
+
+    const term = (el("wl-search").value || "").trim().toLowerCase();
+    const rows = !term ? all : all.filter(function (p) {
+      return [p.name, p.address, p.description]
+        .some(v => String(v || "").toLowerCase().indexOf(term) !== -1);
+    });
+
+    el("wl-search-state").textContent =
+      term ? (rows.length + " of " + all.length) : "";
+
+    if (!rows.length) {
+      el("workload-list").innerHTML = '<div class="pad faint">' +
+        "No workload matches " + esc(term) + ".</div>";
+      return;
+    }
+
+    el("workload-list").innerHTML = rows.map(function (p) {
+      const state = p.enrolled ? "ok" : (p.waiting_for_enrolment ? "wait" : "off");
+      const words = p.enrolled ? "on the tunnel"
+        : (p.waiting_for_enrolment ? "waiting for the command to be run"
+                                   : "not enrolled, and the link has expired");
+      return '<div class="wl-row"><div class="wl-head"><div>' +
+        '<span class="dot ' + state + '"></span><strong>' + esc(p.name) + "</strong> " +
+        '<span class="mono small faint">' + esc(p.address) + "</span>" +
+        '<div class="small faint">' + words + "</div>" +
+        // Whether this peering survives somebody breaking Curve25519 later.
+        // Per workload, because a fleet is upgraded one at a time and the ones
+        // still without a key are the useful thing to see.
+        (p.enrolled
+          ? (p.has_psk
+             ? '<div class="small"><span class="badge ok">pre-shared key</span> ' +
+               '<span class="faint">breaking the key exchange is not enough on ' +
+               'its own</span></div>'
+             : '<div class="small"><span class="badge warn">no pre-shared key</span> ' +
+               '<span class="faint">Curve25519 alone, so traffic recorded today ' +
+               'is readable to whoever breaks it later</span></div>')
+          : "") +
+        // What breaks if this goes away.  Sites rather than pools, because a
+        // pool nothing serves from breaks nothing and that is not the question
+        // anybody is asking before they press Remove.
+        (function () {
+          const sites = p.sites_using || [];
+          if (!sites.length) return '<div class="small faint">no sites use it</div>';
+          return '<div class="small"><span class="badge ok">' + sites.length +
+            (sites.length === 1 ? " site" : " sites") + "</span> " +
+            '<span class="faint">' + esc(sites.join(", ")) + "</span></div>";
+        })() +
+        (p.description ? "<div class='small faint'>" + esc(p.description) + "</div>" : "") +
+        "</div><div>" +
+        (CAN_EDIT && !p.enrolled
+          ? '<button class="btn small" data-relink="' + p.id + '">' +
+            "Show the command</button> "
+          : "") +
+        (CAN_EDIT && p.enrolled && !p.has_psk
+          ? '<button class="btn small" data-psk="' + p.id + '" data-name="' +
+            esc(p.name) + '">Add a pre-shared key</button> '
+          : "") +
+        (CAN_EDIT && p.enrolled && p.has_psk
+          ? '<button class="btn small" data-dropsk="' + p.id + '" data-name="' +
+            esc(p.name) + '">Remove the key</button> '
+          : "") +
+        (CAN_EDIT
+          ? '<button class="btn small" data-note="' + p.id + '">' +
+            (p.description ? "Edit note" : "Add a note") + "</button> "
+          : "") +
+        (CAN_EDIT
+          ? '<button class="btn small danger" data-del="' + p.id +
+            '" data-name="' + esc(p.name) + '">Remove</button>'
+          : "") +
+        "</div></div></div>";
+    }).join("");
+  }
+
+  // A command with a copy button.  These are one liners meant to be run on
+  // another machine, and a command you cannot copy is one somebody retypes
+  // wrongly, so every command on this page gets one of these.
+  function cmdBlock(id) {
+    return '<textarea id="' + id + '" class="cmd mono" rows="3" readonly ' +
+      'spellcheck="false"></textarea>' +
+      '<div class="mt"><button class="btn small" data-copy="' + id +
+      '">Copy it</button></div>';
+  }
+
+  function fillCmd(id, text) {
+    const box = el(id);
+    if (box) { box.value = text; }
+  }
+
+  document.addEventListener("click", function (ev) {
+    const btn = ev.target.closest("[data-copy]");
+    if (!btn) { return; }
+    const box = el(btn.getAttribute("data-copy"));
+    if (!box) { return; }
+    box.select();
+    // execCommand, not the clipboard API, which needs a secure context the
+    // browser agrees about.  Behind a proxy on a name somebody has not set up
+    // yet, the newer one silently does nothing.
+    try { document.execCommand("copy"); NFM.toast("Copied", "ok"); }
+    catch (e) { NFM.toast("Select it and copy by hand", "bad"); }
+  });
+
+  function showCommand(result) {
+    // Shown once, on screen, because this is the only moment it exists.  The
+    // ticket is single use and its hash is all that is stored, so there is no
+    // way to show it again later and it is better to say so than to let
+    // somebody go looking.
+    // Two commands share this: enrolling a new workload, and putting a
+    // pre-shared key on one that is already here.  Same shape, same warning
+    // about the ticket, different sentence underneath, so they share the modal
+    // rather than having two that drift apart.
+    const upgrade = !result.enrol_command;
+    NFM.openModal("Run this on " + esc(result.name), "", `
+      <p>${upgrade
+        ? "On that workload, run this.  It keeps its address, its own private key and its place in every pool."
+        : "On the machine you want to reach, run this.  Nothing needs to be opened for it inbound."}</p>
+      ${cmdBlock("enrol-cmd")}
+      <div class="hint mt">
+        It works once and expires in ${esc(result.expires_in_minutes)} minutes.
+        Treat it like a password.  Only its hash is kept here, so this exact
+        command cannot be shown again, but you can get a fresh one from the
+        workload list.
+      </div>
+      <div class="hint">
+        ${upgrade
+          ? esc(result.note || "")
+          : "That machine becomes <span class=\"mono\">" + esc(result.address) +
+            "</span>.  Use that address when you add it to a pool."}
+      </div>
+      ${(result.reusing && result.reusing.length) ? `
+      <div class="notice warn mt"><div>
+        <strong>${esc(result.reusing.join(", "))}</strong>
+        ${result.reusing.length === 1 ? "already points" : "already point"} at
+        <span class="mono">${esc(result.address)}</span>, so this machine starts
+        taking that traffic the moment it enrols.  That is the point if you are
+        putting the same thing back, and worth a second look if you are not.
+      </div></div>` : ""}
+      <div class="mt"><button class="btn primary" id="cmd-done">Done</button></div>`,
+      true);
+    fillCmd("enrol-cmd", result.enrol_command || result.command);
+    el("cmd-done").addEventListener("click", function () {
+      NFM.closeModal();
+      load();
+    });
+  }
+
+  // Redraw as they type.  The list is in memory already, so there is no call
+  // to make and no reason to wait for an enter key.
+  const wlSearch = el("wl-search");
+  if (wlSearch) wlSearch.addEventListener("input", drawWorkloads);
+
+  const add = el("add-workload");
+  if (add) {
+    add.addEventListener("click", async function () {
+      // What is actually free, so nobody has to guess.  The counter only goes
+      // up, which is right and is also invisible: somebody adding and removing
+      // workloads while testing watches the numbers climb and reasonably
+      // concludes they are running out.  They are not, and this shows why.
+      let plan = null;
+      try { plan = await NFM.api("/tunnel/addresses"); } catch (err) { plan = null; }
+
+      const gaps = plan && plan.configured
+        ? plan.addresses.filter(a => a.state === "free" && a.in_a_gap) : [];
+
+      NFM.openModal("Add a workload", "", `
+        <div class="field">
+          <label for="w-name">Name</label>
+          <input type="text" id="w-name" placeholder="app01">
+          <div class="hint">Whatever you call that machine.  It only appears
+            here.</div>
+        </div>
+        <div class="field">
+          <label for="w-desc">Note</label>
+          <input type="text" id="w-desc" placeholder="what it runs, who owns it">
+        </div>
+        <div class="field">
+          <label for="w-addr">Address <span class="badge neutral">optional</span></label>
+          <input type="text" id="w-addr" placeholder="${
+            plan && plan.next_automatic
+              ? "leave empty for " + esc(plan.next_automatic)
+              : "leave empty to take the next one"}">
+          <div class="hint">
+            Leave it empty and the next address is used, counting upward and
+            never going back for gaps.  That is on purpose: an address that
+            belonged to something else last week means something different to
+            a pool that still points at it.
+            ${gaps.length ? `
+            <div class="mt"><strong>Free addresses further down</strong>, which
+            the automatic choice skips.  Ask for one by name to put a machine
+            back where it was:</div>
+            <div class="mt">${gaps.map(a =>
+              '<button type="button" class="btn small w-pick" data-a="' +
+              esc(a.address) + '">' + esc(a.address) + "</button> " +
+              (a.pools && a.pools.length
+                ? '<span class="small faint">' + esc(a.pools.join(", ")) +
+                  (a.pools.length === 1 ? " points" : " point") +
+                  " at it</span> "
+                : '<span class="small faint">nothing points at it</span> ')
+            ).join("<br>")}</div>` : ""}
+          </div>
+        </div>
+        <div class="mt"><button class="btn primary" id="w-save">Add it</button></div>`,
+        true);
+
+      document.querySelectorAll(".w-pick").forEach(function (b) {
+        b.addEventListener("click", function () { el("w-addr").value = b.dataset.a; });
+      });
+
+      el("w-save").addEventListener("click", async function () {
+        const body = {
+          name: el("w-name").value.trim(),
+          description: el("w-desc").value.trim(),
+          address: el("w-addr").value.trim(),
+          base_url: window.location.origin + "{{ base }}"
+        };
+        if (!body.name) { NFM.toast("Give it a name", "bad"); return; }
+        let result;
+        try { result = await NFM.api("/tunnel/peers", { method: "POST", body: body }); }
+        catch (err) { NFM.toast(err.message, "bad"); return; }
+        showCommand(result);
+      });
+    });
+  }
+
+  // Removing has two halves and only one of them happens here.  Taking the
+  // workload out stops the load balancers talking to it, but the machine keeps
+  // the interface, the config and the key until somebody clears them, so the
+  // command to do that is on screen and copyable rather than buried in a
+  // confirm box nobody can select text out of.
+  function confirmRemove(peer) {
+    NFM.openModal("Remove " + esc(peer.name) + " from the tunnel", "", `
+      <p>It stops being reachable through the tunnel straight away.</p>
+      ${(peer.used_by && peer.used_by.length) ? `
+      <div class="notice warn">
+        <div><strong>${esc(peer.used_by.join(", "))}</strong>
+        ${peer.used_by.length > 1 ? "point" : "points"} at
+        <span class="mono">${esc(peer.address)}</span>.  Those backends start
+        failing the moment this goes, and the address stays reserved rather
+        than being handed to the next workload, so take the member out of the
+        pool when you are done here.</div>
+      </div>` : `
+      <p>Nothing in a pool points at
+      <span class="mono">${esc(peer.address)}</span> today.</p>`}
+      <p class="mt">The machine keeps its end until you clear it.  Run this
+      there:</p>
+      ${cmdBlock("unenrol-cmd")}
+      <div class="hint mt">
+        This removes the tunnel interface, its config and its key.  It leaves
+        the wireguard package alone, since that machine may be using it for
+        something else, and it changes nothing else about its networking.
+      </div>
+      <div class="mt">
+        <button class="btn danger" id="rm-go">Remove it here</button>
+        <button class="btn" id="rm-cancel">Cancel</button>
+      </div>`, true);
+
+    fillCmd("unenrol-cmd", peer.unenrol_command);
+    el("rm-cancel").addEventListener("click", function () { NFM.closeModal(); });
+
+    el("rm-go").addEventListener("click", async function () {
+      el("rm-go").disabled = true;
+      try { await NFM.api("/tunnel/peers/" + peer.id, { method: "DELETE" }); }
+      catch (err) { NFM.toast(err.message, "bad"); el("rm-go").disabled = false; return; }
+      NFM.toast("Removed", "ok");
+      // The command stays up afterwards.  Closing on success would take away
+      // the one thing they still need, at the exact moment the row it came
+      // from has just disappeared from the list behind the modal.
+      el("rm-go").outerHTML =
+        '<button class="btn primary" id="rm-done">Done</button>';
+      el("rm-cancel").remove();
+      el("rm-done").addEventListener("click", function () {
+        NFM.closeModal(); load();
+      });
+    });
+  }
+
+  el("workload-list").addEventListener("click", async function (ev) {
+    const del = ev.target.closest("[data-del]");
+    if (del) {
+      // String on both sides.  A dataset attribute is always a string and
+      // these ids are numbers, so a strict compare never matched and the
+      // button did nothing at all, without even an error to go on.
+      const peer = (STATE.peers || []).find(function (p) {
+        return String(p.id) === String(del.dataset.del);
+      });
+      if (peer) {
+        confirmRemove(peer);
+      } else {
+        // Whatever is on screen no longer matches what the server has.
+        NFM.toast("That workload is no longer here, reloading the list", "bad");
+        load();
+      }
+      return;
+    }
+
+    // The note.  Editable on its own because it is the only thing here that
+    // goes stale: the name and the address are what pools are matched against,
+    // by eye and in code, so changing those is a rename with consequences and
+    // not a correction.
+    const note = ev.target.closest("[data-note]");
+    if (note) {
+      const peer = (STATE.peers || []).find(function (p) {
+        return String(p.id) === String(note.dataset.note);
+      });
+      if (!peer) {
+        NFM.toast("That workload is no longer here, reloading the list", "bad");
+        load();
+        return;
+      }
+      NFM.openModal("Note on " + esc(peer.name), "", `
+        <div class="field">
+          <label for="w-note">What this machine is</label>
+          <input type="text" id="w-note" maxlength="500"
+                 value="${esc(peer.description || "")}"
+                 placeholder="the billing box, staging api, ...">
+          <div class="hint">
+            For whoever inherits this.  It is searchable, so what somebody
+            actually calls the machine is worth more here than its hostname.
+          </div>
+        </div>
+        <div class="mt"><button class="btn primary" id="w-note-save">Save</button></div>`,
+        true);
+      el("w-note-save").addEventListener("click", async function () {
+        try {
+          await NFM.api("/tunnel/peers/" + peer.id, {
+            method: "PATCH",
+            body: { description: el("w-note").value.trim() }
+          });
+        } catch (err) { NFM.toast(err.message, "bad"); return; }
+        NFM.closeModal();
+        NFM.toast("Note saved", "ok");
+        load();
+      });
+      return;
+    }
+
+    // The one command that puts a pre-shared key on a workload already on the
+    // tunnel.
+    //
+    // It cannot be done from this end alone and that is not a gap: a WireGuard
+    // pre-shared key is never sent over the wire, which is the whole reason it
+    // survives somebody breaking Curve25519 later.  Both ends have to be told
+    // it separately.
+    const psk = ev.target.closest("[data-psk]");
+    if (psk) {
+      NFM.confirmThen(
+        "Add a pre-shared key to " + psk.dataset.name + "?\n\n" +
+        "You will get one command to run on that workload.  Fetching it " +
+        "switches the key on at this end, so run it rather than saving it for " +
+        "later: between the two the workload is offline for a few seconds.\n\n" +
+        "If it cannot get a handshake within a minute it puts itself back.",
+        async function () {
+          try {
+            const r = await NFM.api("/tunnel/peers/" + psk.dataset.psk + "/psk", {
+              method: "POST", body: {},
+            });
+            showCommand(r);
+          } catch (err) { NFM.toast(err.message, "bad"); }
+        });
+      return;
+    }
+
+    const dropsk = ev.target.closest("[data-dropsk]");
+    if (dropsk) {
+      NFM.confirmThen(
+        "Take the pre-shared key off " + dropsk.dataset.name + "?\n\n" +
+        "This is the way out when an upgrade half happened and the workload " +
+        "cannot connect.  It goes back to a plain peering, which is weaker and " +
+        "working rather than stronger and down.\n\n" +
+        "Take the PresharedKey line out of that machine's config too, or it " +
+        "still will not connect.",
+        async function () {
+          try {
+            await NFM.api("/tunnel/peers/" + dropsk.dataset.dropsk + "/psk",
+                          { method: "DELETE" });
+            NFM.toast("Key removed at this end", "ok");
+            load();
+          } catch (err) { NFM.toast(err.message, "bad"); }
+        });
+      return;
+    }
+
+    // A fresh enrolment link for a workload that never ran the command.  The
+    // old ticket is only kept as a hash, so this mints a new one and the old
+    // stops working.
+    const relink = ev.target.closest("[data-relink]");
+    if (!relink) { return; }
+    relink.disabled = true;
+    let result;
+    try {
+      result = await NFM.api("/tunnel/peers/" + relink.dataset.relink + "/enrol", {
+        method: "POST",
+        body: { base_url: window.location.origin + "{{ base }}" }
+      });
+    } catch (err) { NFM.toast(err.message, "bad"); relink.disabled = false; return; }
+    showCommand(result);
+  });
+
+  load();
+});
+</script>
+
+{% endblock %}

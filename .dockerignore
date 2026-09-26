@@ -1,0 +1,100 @@
+# Keep the build context small and keep secrets out of the image.
+#
+# Two reasons this file matters.  A smaller context means faster builds and
+# better layer caching.  More important, anything you COPY into an image stays
+# in that layer forever, even if a later line deletes it.  So a .env that
+# sneaks in here is baked into the image and shows up for anybody who pulls it.
+
+# ==============================================================================
+# Secrets.  These must never land in an image layer.
+# ==============================================================================
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.csr
+*.p12
+*.pfx
+secrets/
+certs/
+ca/
+*.join-token
+join-token*
+
+# ==============================================================================
+# Runtime data.  Lives in a volume, not in the image.
+# ==============================================================================
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+generated/
+staging/
+backups/
+logs/
+*.log
+*.tar.gz
+
+# ==============================================================================
+# Version control and CI
+# ==============================================================================
+.git/
+.gitignore
+.github/
+.gitlab-ci.yml
+
+# ==============================================================================
+# Python leftovers.  The image installs from requirements.txt, so a virtualenv
+# from the host would just be dead weight and might not even be the right
+# architecture.
+# ==============================================================================
+__pycache__/
+*.py[cod]
+*.so
+venv/
+.venv/
+env/
+ENV/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+*.egg-info/
+build/
+dist/
+
+# ==============================================================================
+# Stuff that does not belong in the container
+# ==============================================================================
+
+# The host agent runs on the host, outside the container, on purpose.  Shipping
+# it inside the image would be confusing at best.
+host-agent/
+
+# Docs and the installer are for people, not for the runtime.
+docs/
+README.md
+CHANGELOG.md
+LICENSE
+install.sh
+
+# Compose files describe how to run the image.  The image does not need them.
+docker-compose*.yml
+Dockerfile
+.dockerignore
+
+# Editors and operating systems
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db

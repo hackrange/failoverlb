@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block title %}Audit Log &middot; Failover LB{% endblock %}
+
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <h1>Audit log</h1>
+    <div class="sub">
+      Who did what, when, and from where.  Append only, nothing here gets edited
+      or deleted.
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-body tight">
+    {% if entries %}
+      <div class="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>When</th>
+            <th>Who</th>
+            <th>From</th>
+            <th>Action</th>
+            <th>Object</th>
+            <th>Result</th>
+            <th>Detail</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for e in entries %}
+            <tr>
+              <td class="small faint nowrap">{{ e.timestamp.strftime('%Y-%m-%d %H:%M:%S') }}</td>
+              <td class="small">
+                {{ e.username or 'system' }}
+                {% if e.user_role %}<span class="faint">({{ e.user_role }})</span>{% endif %}
+              </td>
+              <td class="small faint mono">{{ e.source_ip or '' }}</td>
+              <td class="small mono">{{ e.action }}</td>
+              <td class="small">{{ e.object_name or '' }}</td>
+              <td>
+                {% if e.result == 'success' %}
+                  <span class="badge ok">ok</span>
+                {% else %}
+                  <span class="badge bad">{{ e.result }}</span>
+                {% endif %}
+              </td>
+              <td class="small faint">{{ (e.detail or '')[:120] }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      </div>
+    {% else %}
+      <div class="empty">
+        <strong>Nothing logged yet</strong>
+        <p>Every login, config change and certificate action shows up here.</p>
+      </div>
+    {% endif %}
+  </div>
+</div>
+
+<div class="notice info">
+  <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 3a.9.9 0 1 1 0 1.8A.9.9 0 0 1 8 4zm1.2 8H6.8v-.9h.7V7.9h-.7V7h2.1v4.1h.3V12z"/></svg>
+  <div>
+    Passwords, tokens and private keys never reach this log.  Anything whose
+    field name looks like a secret is replaced before the line is written, so an
+    audit export is safe to hand to somebody.
+  </div>
+</div>
+
+{% endblock %}

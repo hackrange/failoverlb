@@ -1,0 +1,918 @@
+{% extends "base.html" %}
+{% block title %}Certificates &middot; Failover LB{% endblock %}
+
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <h1>Certificates</h1>
+    <div class="sub">
+      The manager works out which node can answer the challenge, gets the cert
+      there, and copies it to the rest.
+    </div>
+  </div>
+  <div class="page-actions">
+    {% if can('edit_certs') %}
+      <button class="btn" id="new-cert">Get one from Lets Encrypt</button>
+      {# Only rendered when an authority is set up, because a button that
+         always exists and always says "set one up first" is a button that
+         teaches people to ignore buttons. #}
+      <button class="btn" id="paid-cert" hidden>Get one from a paid authority</button>
+      <button class="btn" id="upload-cert">Upload one</button>
+      <button class="btn" id="self-signed-cert">Make a self signed one</button>
+      <button class="btn" id="csr-cert">Make a signing request</button>
+    {% endif %}
+  </div>
+</div>
+
+{% if certs %}
+  <div class="flex" style="margin-bottom:14px; gap:10px; align-items:center">
+    <input type="search" id="cert-filter" data-filter="tr[data-search]"
+           data-filter-empty="cert-none" data-filter-count="cert-count"
+           placeholder="Search certificates, domains, issuer, which node got it"
+           style="flex:1; max-width:480px">
+    <span class="small faint" id="cert-count"></span>
+  </div>
+  <div class="empty" id="cert-none" hidden>
+    <strong>No certificate matches that</strong>
+    <p>Search covers the name, every domain on it, the issuer, and the node
+       that obtained it.</p>
+  </div>
+
+  <div class="card">
+    <div class="card-body tight">
+      <div class="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>Domains</th>
+            <th>Status</th>
+            <th>Expires</th>
+            <th>Issued by</th>
+            <th>Copied to</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for c in certs %}
+            {#- Domains are the useful one.  A certificate is usually looked for
+                by a name somebody saw in a browser, not by what it is called
+                here, and a wildcard covers names that appear nowhere else. -#}
+            {%- set searchable = [
+                  c.name, c.issuer or '', c.issued_by_node or '',
+                  c.source or '', c.challenge_type or '', c.status or ''
+                ] + c.domain_list() -%}
+            <tr data-search="{{ searchable|join(' ')|lower }}">
+              <td>
+                <strong>{{ c.name }}</strong>
+                {# What kind it is, because how it gets renewed depends entirely
+                   on that and there is no other clue on the row. #}
+                <div class="small faint">
+                  {% if c.source == 'self_signed' %}self signed
+                  {% elif c.csr_pem and not c.not_after %}waiting on an authority
+                  {% elif c.source == 'uploaded' %}uploaded
+                  {% else %}{{ c.challenge_type }}{% endif %}
+                </div>
+                {% if c.dns_warning %}
+                  {# Said here rather than only in a log, because the failure it
+                     warns about is ninety days away and nobody reads a log for
+                     something that has not happened yet. #}
+                  <div class="small" style="margin-top:4px; color:var(--{{ 'bad' if not c.dns_ok else 'warn' }})">
+                    {{ 'DNS does not point here' if not c.dns_ok else 'DNS partly points elsewhere' }}
+                  </div>
+                {% endif %}
+              </td>
+              <td class="mono small">
+                {{ c.domain_list()|join(', ') }}
+                {# Which sites use it, because that is the one thing that decides
+                   whether it can be deleted, and hunting for it across the sites
+                   page is a silly way to find out. #}
+                <div class="small faint" style="margin-top:4px">
+                  {% if c.hosts %}used by {{ c.hosts|map(attribute='name')|join(', ') }}
+                  {% else %}not used by any site{% endif %}
+                </div>
+                {# Names the sites using this certificate serve and it does not
+                   carry.  Said here as well as on the site, because this is the
+                   page somebody is on when they decide what to reissue. #}
+                {% set short = short_of.get(c.id, []) %}
+                {% if short %}
+                  <div class="small" style="margin-top:4px; color:var(--warn)">
+                    does not cover {{ short|join(', ') }}
+                  </div>
+                {% endif %}
+              </td>
+              <td>
+                {% if c.status == 'valid' %}
+                  <span class="badge ok">valid</span>
+                {% elif c.status == 'expiring' %}
+                  <span class="badge warn">expiring</span>
+                {% elif c.status == 'critical' %}
+                  <span class="badge bad">expires very soon</span>
+                {% elif c.status == 'expired' %}
+                  <span class="badge bad">expired</span>
+                {% elif c.csr_pem %}
+                  <span class="badge neutral">request made</span>
+                {% else %}
+                  <span class="badge neutral">not issued yet</span>
+                {% endif %}
+                {% if c.not_after and not c.auto_renew and c.source != 'letsencrypt' %}
+                  {# Nothing renews these, so the page has to be the thing that
+                     says so.  A row that looks like every other row is how
+                     somebody finds out from a browser instead. #}
+                  <div class="small faint" style="margin-top:4px">nothing renews this</div>
+                {% endif %}
+              </td>
+              <td class="small">
+                {% if c.days_left is not none %}
+                  {{ c.days_left }} days
+                {% else %}
+                  <span class="faint">-</span>
+                {% endif %}
+              </td>
+              <td class="small faint">{{ c.issued_by_node or '-'|safe }}</td>
+              <td class="small faint">
+                {% set synced = c.sync_map().keys()|list %}
+                {{ synced|length }} of {{ nodes|length }}
+              </td>
+              <td class="right nowrap">
+                <button class="btn sm" data-where="{{ c.id }}">Where?</button>
+                {% if can('edit_certs') %}
+                  {% if c.csr_pem and not c.not_after %}
+                    <button class="btn sm" data-show-csr="{{ c.id }}">Show the request</button>
+                    <button class="btn sm primary" data-finish-csr="{{ c.id }}">Paste certificate</button>
+                  {% else %}
+                    {% if c.not_after and synced|length < nodes|length %}
+                      <button class="btn sm" data-replicate="{{ c.id }}">Copy to all</button>
+                    {% endif %}
+                    {% if c.source == 'letsencrypt' %}
+                      <button class="btn sm" data-issue="{{ c.id }}">
+                        {{ 'Renew' if c.not_after else 'Get it' }}
+                      </button>
+                    {% endif %}
+                  {% endif %}
+                  {# Deleting has always worked through the API and there was
+                     never a button for it, so the only way to get rid of one
+                     was a request by hand.  Offered only when nothing points at
+                     it, because nginx will not start with an ssl listener and
+                     no certificate, and a button whose only outcome is a
+                     refusal is worse than no button. #}
+                  {% if c.hosts %}
+                    <button class="btn sm" disabled
+                            title="Point {{ c.hosts|map(attribute='name')|join(', ') }} somewhere else first">
+                      Delete</button>
+                  {% else %}
+                    <button class="btn sm danger" data-delete-cert="{{ c.id }}"
+                            data-name="{{ c.name }}">Delete</button>
+                  {% endif %}
+                {% endif %}
+              </td>
+            </tr>
+            {% if c.last_renewal_error %}
+              <tr>
+                <td colspan="7" class="small" style="color:var(--bad); padding-top:0;">
+                  Last attempt failed: {{ c.last_renewal_error[:300] }}
+                </td>
+              </tr>
+            {% endif %}
+          {% endfor %}
+        </tbody>
+      </table>
+      </div>
+    </div>
+  </div>
+{% else %}
+  <div class="card">
+    <div class="empty">
+      <strong>No certificates yet</strong>
+      <p>Add one and the manager handles getting it and keeping it renewed
+         across every node.</p>
+    </div>
+  </div>
+{% endif %}
+
+<div class="card">
+  <div class="card-head">
+    <h2>How this works in a cluster</h2>
+    <button class="help-btn" data-help-static="help-acme"
+            data-help-title="Certificates across several nodes" data-help-wide
+            aria-label="Help">?</button>
+  </div>
+  <div class="card-body">
+    <p class="small muted" style="margin:0">
+      Only the node that currently owns the public address for a domain can
+      answer an http challenge, and which node that is changes when you fail
+      over.  So the manager works it out fresh every time, rather than assuming
+      whoever did it last time can do it again.  Click the ? for the details, or
+      <strong>Where?</strong> on a certificate to see the reasoning for that one.
+    </p>
+  </div>
+</div>
+
+<div hidden id="help-acme">
+  <div class="help-section">
+    <p>Getting a certificate onto several load balancers is more awkward than it
+       looks, and this is the part that makes it work.</p>
+  </div>
+  <div class="help-section">
+    <h4>The problem</h4>
+    <p>Lets Encrypt proves you own a domain by connecting to whatever address
+       that domain points at.  In a two node setup only one of those boxes is on
+       the end of that address at any moment.  Run certbot on the other one and
+       the challenge fails every single time, and the error looks like a DNS
+       problem even though DNS is fine.
+
+Worse, the node that owns the address is not fixed.  Failover moves it.  A
+certificate issued from lb-01 three months ago may need to renew from lb-02
+today.</p>
+  </div>
+  <div class="help-section">
+    <h4>What we do</h4>
+    <ul>
+      <li>Look the domain up against public resolvers, not this box's own
+          resolver, because an internal resolver often gives a private answer
+          that is not what Lets Encrypt will see.</li>
+      <li>Compare that against each node's detected public address, and against
+          the addresses actually sitting on their interfaces, which catches a
+          floating VIP.</li>
+      <li>Give the job to whichever node matches.</li>
+      <li>Push the challenge token to every node before validation starts, so it
+          does not matter which one gets connected to.</li>
+      <li>Copy the finished certificate to every node, because they all serve
+          the same sites.</li>
+    </ul>
+  </div>
+  <div class="help-section">
+    <h4>Renewals</h4>
+    <p>The manager schedules these itself, and the installer turns off the
+       certbot timer on purpose.  The stock timer fires on every box, and on a
+       node that does not own the address it fails every time.  You end up with
+       a mailbox full of failures from two of your three nodes and the real
+       problem buried somewhere in there.</p>
+  </div>
+  <div class="help-section">
+    <h4>When http will not work at all</h4>
+    <p>If the domain points at a cloud load balancer or a CDN rather than at
+       your nodes, no http challenge can reach you.  Use dns-01 instead, which
+       does not need any inbound connection and can also do wildcards.</p>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script nonce="{{ csp_nonce }}">
+// The paid authority button, and the little wizard behind it.
+//
+// Kept beside the Lets Encrypt button rather than replacing it.  Most people
+// want both: something free for the internal names and a bought one for the
+// name that matters.
+document.addEventListener("DOMContentLoaded", function () {
+  const button = document.getElementById("paid-cert");
+  if (!button) { return; }
+
+  let AUTHORITIES = [];
+
+  function esc(s) { return NFM.escapeHtml(s == null ? "" : String(s)); }
+
+  async function findAuthorities() {
+    try {
+      const data = await NFM.api("/authorities");
+      AUTHORITIES = (data.authorities || []).filter(function (a) {
+        return a.enabled && a.eab_hmac_key_set;
+      });
+    } catch (err) {
+      AUTHORITIES = [];
+    }
+    button.hidden = AUTHORITIES.length === 0;
+  }
+
+  function form() {
+    const options = AUTHORITIES.map(function (a) {
+      return '<option value="' + esc(a.id) + '">' + esc(a.name) + "</option>";
+    }).join("");
+    return `
+      <div class="field">
+        <label for="pc-authority">Which authority</label>
+        <select id="pc-authority">${options}</select>
+        <div class="hint">Only the ones you have set up and turned on appear
+          here.  Manage them on the Paid Authorities page.</div>
+      </div>
+
+      <div class="field">
+        <label for="pc-name">Name</label>
+        <input type="text" id="pc-name" placeholder="shop.domain.com">
+        <div class="hint">What you will recognise this certificate by.</div>
+      </div>
+
+      <div class="field">
+        <label for="pc-domains">Domains</label>
+        <textarea id="pc-domains" rows="3"
+                  placeholder="shop.domain.com&#10;www.shop.domain.com"></textarea>
+        <div class="hint">One per line.  Every one of them has to already point
+          at these load balancers, and port 80 has to be reachable, the same as
+          for a free certificate.</div>
+      </div>
+
+      <div class="notice info">
+        <div>
+          <strong>Certificates that name your company.</strong>  If you are
+          buying an OV or EV certificate, your authority has to have checked
+          your organisation before this will issue.  That check is done by a
+          person at their end, so if it has not happened this will sit waiting
+          rather than fail with something you can act on.
+        </div>
+      </div>
+
+      <div class="mt"><button class="btn primary" id="pc-go">Request it</button></div>`;
+  }
+
+  button.addEventListener("click", async function () {
+    await findAuthorities();
+    if (!AUTHORITIES.length) {
+      NFM.toast("No authority is set up and turned on yet", "warn");
+      return;
+    }
+    NFM.openModal("Get a certificate from a paid authority", "", form(), true);
+
+    document.getElementById("pc-go").addEventListener("click", async function () {
+      const domains = document.getElementById("pc-domains").value
+        .split("\n").map(function (s) { return s.trim(); })
+        .filter(Boolean);
+      const body = {
+        name: document.getElementById("pc-name").value.trim() || domains[0],
+        domains: domains,
+        authority_id: parseInt(document.getElementById("pc-authority").value, 10),
+        source: "letsencrypt",
+        challenge_type: "http-01"
+      };
+      if (!body.domains.length) { NFM.toast("Give it at least one domain", "bad"); return; }
+      try {
+        const cert = await NFM.api("/certs", { method: "POST", body: body });
+        NFM.closeModal();
+        NFM.toast("Asking the authority now, this can take a moment.", "ok");
+        await NFM.api("/certs/" + cert.id + "/issue", { method: "POST" });
+        NFM.toast("Issued.", "ok");
+      } catch (err) {
+        NFM.toast(err.message, "bad");
+        return;
+      }
+      window.location.reload();
+    });
+  });
+
+  findAuthorities();
+});
+</script>
+
+<script nonce="{{ csp_nonce }}">
+document.addEventListener("DOMContentLoaded", function () {
+
+  document.body.addEventListener("click", async function (e) {
+    const repBtn = e.target.closest("[data-replicate]");
+    if (repBtn) {
+      const id = repBtn.getAttribute("data-replicate");
+      repBtn.disabled = true;
+      repBtn.textContent = "Copying...";
+      try {
+        const r = await NFM.api("/certs/" + id + "/replicate", { method: "POST", body: {} });
+        const ok = (r.ok || []).length;
+        const bad = r.failed || [];
+        if (bad.length) {
+          // Say which node and why.  "copied to 1 of 2" with no reason is
+          // exactly the dead end this button exists to get out of.
+          NFM.toast("Copied to " + ok + ", failed on " +
+                    bad.map(f => f.node + " (" + f.error + ")").join(", "), "bad");
+        } else {
+          NFM.toast("Copied to every node (" + ok + ")", "ok");
+        }
+        setTimeout(function () { window.location.reload(); }, 1400);
+      } catch (err) {
+        NFM.toast(err.message, "bad");
+        repBtn.disabled = false;
+        repBtn.textContent = "Copy to all";
+      }
+      return;
+    }
+
+    const whereBtn = e.target.closest("[data-where]");
+    if (whereBtn) {
+      try {
+        const r = await NFM.api("/certs/" + whereBtn.getAttribute("data-where") + "/where");
+        const dns = r.dns || {};
+        let html = '<div class="help-section"><h4>What DNS says</h4>';
+        html += dns.resolved
+          ? "<pre>" + NFM.escapeHtml((dns.all || []).join("\n")) + "</pre>"
+          : '<div class="notice bad">' + NFM.icon("warn") +
+            "<div>That domain does not resolve at all right now.</div></div>";
+        html += "</div>";
+
+        html += '<div class="help-section"><h4>Which node would get it</h4><p>' +
+          (r.node ? "<strong>" + NFM.escapeHtml(r.node) + "</strong>" : "none") +
+          "</p></div>";
+
+        const reasons = {
+          public_ip_match: "Its detected public address is one the domain points at.  This is the good case.",
+          local_interface_match: "The address is sitting on one of its interfaces, so it is holding the floating IP.",
+          dns01_any_node: "This one uses a DNS challenge, so no inbound connection is needed and any node can do it.",
+          no_match: "No node reports the address this domain points at.",
+          dns_failed: "The domain did not resolve, so we could not tell."
+        };
+        html += '<div class="help-section"><h4>Why</h4><p>' +
+          NFM.escapeHtml(reasons[r.reason] || r.reason) + "</p></div>";
+
+        if (r.dns_health) {
+          html += '<div class="notice ' + (r.dns_ok ? "warn" : "bad") + '">' + NFM.icon("warn") +
+            "<div>" + NFM.escapeHtml(r.dns_health) + "</div></div>";
+        }
+
+        if (r.warning) {
+          html += '<div class="notice warn">' + NFM.icon("warn") +
+            "<div>" + NFM.escapeHtml(r.warning) + "</div></div>";
+        }
+
+        NFM.openModal("Certificate placement", "confidence: " + r.confidence, html, true);
+      } catch (err) {
+        NFM.toast(err.message, "bad");
+      }
+      return;
+    }
+
+    const issueBtn = e.target.closest("[data-issue]");
+    if (issueBtn) {
+      NFM.confirmThen(
+        "Ask for this certificate now?\n\n" +
+        "This talks to the certificate authority and can take a minute.  If you " +
+        "are still testing, make sure staging mode is on so you do not burn " +
+        "through the rate limits on the real service.",
+        async function () {
+          issueBtn.disabled = true;
+          issueBtn.textContent = "Working...";
+          try {
+            const r = await NFM.api("/certs/" + issueBtn.getAttribute("data-issue") + "/issue",
+                                    { method: "POST", body: {} });
+            NFM.toast("Issued by " + r.issued_by + ", copied to " +
+                      (r.synced_to || []).join(", "), "ok");
+            setTimeout(function () { window.location.reload(); }, 1500);
+          } finally {
+            issueBtn.disabled = false;
+          }
+        }
+      );
+    }
+  });
+
+  const nc = document.getElementById("new-cert");
+  if (nc) nc.addEventListener("click", function () {
+    NFM.openModal("New certificate", "", `
+      <div class="field">
+        <label for="c-domains">Domains</label>
+        <input type="text" id="c-domains" placeholder="www.example.com example.com" autofocus>
+        <div class="hint">
+          Space or comma separated.  One certificate can cover several names.
+          A wildcard like *.example.com needs a DNS challenge.
+        </div>
+        {# Prefilling from a site is the difference between remembering the www
+           and finding out from a visitor.  A certificate is nearly always being
+           made for a site that already exists and already knows its names. #}
+        {% if sites_with_names %}
+          <div class="hint mt">
+            Take the names from a site:
+            <select id="c-fromsite">
+              <option value="">pick one</option>
+              {% for s in sites_with_names %}
+                <option value="{{ s.names|join(' ') }}">{{ s.name }} ({{ s.names|join(', ') }})</option>
+              {% endfor %}
+            </select>
+          </div>
+        {% endif %}
+      </div>
+      <div class="field">
+        <label for="c-challenge">How to prove you own it</label>
+        <select id="c-challenge">
+          <option value="http-01">http, serve a file on port 80</option>
+          <option value="dns-01">dns, add a TXT record</option>
+        </select>
+        <div class="hint">
+          http is simpler and needs port 80 reachable from the internet.
+          dns works behind a CDN or a cloud load balancer and is the only way to
+          get a wildcard, but it needs an API token for your DNS provider.
+        </div>
+      </div>
+      <div class="field">
+        <label for="c-keytype">Key type</label>
+        <select id="c-keytype">
+          <option value="ecdsa">ECDSA, smaller and faster</option>
+          <option value="rsa">RSA, for very old clients</option>
+        </select>
+      </div>
+      <div class="mt"><button class="btn primary" id="c-save">Create</button></div>
+    `);
+
+    const fromSite = document.getElementById("c-fromsite");
+    if (fromSite) {
+      fromSite.addEventListener("change", function () {
+        if (fromSite.value) {
+          document.getElementById("c-domains").value = fromSite.value;
+        }
+      });
+    }
+
+    document.getElementById("c-save").addEventListener("click", async function () {
+      const body = {
+        domains: document.getElementById("c-domains").value.trim(),
+        challenge_type: document.getElementById("c-challenge").value,
+        key_type: document.getElementById("c-keytype").value
+      };
+      if (!body.domains) { NFM.toast("Put in at least one domain", "bad"); return; }
+
+      try {
+        await NFM.api("/certs", { method: "POST", body: body });
+        NFM.closeModal();
+        NFM.toast("Created.  Hit Get it when you are ready to ask for it.", "ok");
+        setTimeout(function () { window.location.reload(); }, 900);
+      } catch (err) {
+        NFM.toast(err.message, "bad");
+      }
+    });
+  });
+
+  // ==========================================================================
+  // Certificates that did not come from Lets Encrypt
+  // ==========================================================================
+
+  // Files come through as data URLs so the same field takes a paste or a file.
+  // A PKCS12 can only ever be a file, and a PEM is nearly always a paste, and
+  // making somebody pick the right box first is a way to get it wrong.
+  function readFile(input) {
+    return new Promise(function (resolve) {
+      const f = input && input.files && input.files[0];
+      if (!f) { resolve(null); return; }
+      const r = new FileReader();
+      r.onload = function () { resolve(r.result); };
+      r.readAsDataURL(f);
+    });
+  }
+
+  function val(id) {
+    const el = document.getElementById(id);
+    return el ? el.value.trim() : "";
+  }
+
+  function subjectFields(prefix) {
+    return `
+      <details class="mt">
+        <summary>Who the certificate is for, for an authority that asks</summary>
+        <div class="form-grid mt">
+          <div class="field"><label for="${prefix}-org">Organisation</label>
+            <input type="text" id="${prefix}-org" placeholder="Example Ltd"></div>
+          <div class="field"><label for="${prefix}-ou">Department</label>
+            <input type="text" id="${prefix}-ou" placeholder="IT"></div>
+          <div class="field"><label for="${prefix}-loc">Town or city</label>
+            <input type="text" id="${prefix}-loc"></div>
+          <div class="field"><label for="${prefix}-st">County or state</label>
+            <input type="text" id="${prefix}-st"></div>
+          <div class="field"><label for="${prefix}-country">Country, two letters</label>
+            <input type="text" id="${prefix}-country" maxlength="2" placeholder="GB"></div>
+        </div>
+      </details>`;
+  }
+
+  function collectSubject(prefix) {
+    return {
+      organization: val(prefix + "-org"),
+      organizational_unit: val(prefix + "-ou"),
+      locality: val(prefix + "-loc"),
+      state: val(prefix + "-st"),
+      country: val(prefix + "-country").toUpperCase()
+    };
+  }
+
+  function summaryHtml(info) {
+    const rows = [
+      ["Names", (info.domains || []).join(", ")],
+      ["Subject", info.subject],
+      ["Issued by", info.issuer],
+      ["Valid from", (info.not_before || "").replace("T", " ").slice(0, 16)],
+      ["Valid until", (info.not_after || "").replace("T", " ").slice(0, 16)],
+      ["Key", info.key],
+      ["Chain", info.chain_length + (info.chain_length === 1
+        ? " certificate, no intermediates" : " certificates")],
+      ["Fingerprint", (info.fingerprint || "").slice(0, 32) + "..."]
+    ];
+    let html = '<table class="table small"><tbody>' + rows.map(function (r) {
+      return "<tr><td class='faint'>" + NFM.escapeHtml(r[0]) + "</td><td class='mono'>" +
+             NFM.escapeHtml(String(r[1] || "")) + "</td></tr>";
+    }).join("") + "</tbody></table>";
+    (info.warnings || []).forEach(function (w) {
+      html += '<div class="notice warn mt"><div>' + NFM.escapeHtml(w) + "</div></div>";
+    });
+    return html;
+  }
+
+  // ---- upload one somebody already has ------------------------------------
+  const up = document.getElementById("upload-cert");
+  if (up) up.addEventListener("click", function () {
+    NFM.openModal("Upload a certificate",
+      "Nothing is stored until the key and the certificate have been checked against each other", `
+      <div class="field">
+        <label for="u-name">Call it</label>
+        <input type="text" id="u-name" placeholder="taken from the certificate if you leave this">
+      </div>
+      <div class="field">
+        <label for="u-cert">Certificate</label>
+        <textarea id="u-cert" rows="5" class="mono" spellcheck="false"
+                  placeholder="-----BEGIN CERTIFICATE-----"></textarea>
+        <input type="file" id="u-cert-file" class="mt">
+        <div class="hint">Paste it or pick the file.  If your file already has the
+          chain in it, that is fine, put the lot in here.</div>
+      </div>
+      <div class="field">
+        <label for="u-key">Private key</label>
+        <textarea id="u-key" rows="4" class="mono" spellcheck="false"
+                  placeholder="-----BEGIN PRIVATE KEY-----"></textarea>
+        <input type="file" id="u-key-file" class="mt">
+      </div>
+      <div class="field">
+        <label for="u-chain">Intermediates, if they came separately</label>
+        <textarea id="u-chain" rows="3" class="mono" spellcheck="false"></textarea>
+        <input type="file" id="u-chain-file" class="mt">
+        <div class="hint">The order does not matter.  The chain gets rebuilt from
+          the certificate up and the root is left off, because sending it costs
+          every handshake and helps nobody.</div>
+      </div>
+      <details>
+        <summary>Or one PKCS12 file with everything in it (.p12 or .pfx)</summary>
+        <div class="field mt">
+          <input type="file" id="u-p12" accept=".p12,.pfx">
+        </div>
+      </details>
+      <div class="field">
+        <label for="u-pass">Password, if the key or the PKCS12 has one</label>
+        <input type="password" id="u-pass" autocomplete="new-password">
+      </div>
+      <div id="u-result" class="mt"></div>
+      <div class="mt">
+        <button class="btn" id="u-check">Check it</button>
+        <button class="btn primary" id="u-save">Save and copy to every node</button>
+      </div>`, true);
+
+    async function gather() {
+      return {
+        name: val("u-name"),
+        certificate: val("u-cert") || await readFile(document.getElementById("u-cert-file")),
+        private_key: val("u-key") || await readFile(document.getElementById("u-key-file")),
+        chain: val("u-chain") || await readFile(document.getElementById("u-chain-file")),
+        pkcs12: await readFile(document.getElementById("u-p12")),
+        password: val("u-pass")
+      };
+    }
+
+    document.getElementById("u-check").addEventListener("click", async function () {
+      const out = document.getElementById("u-result");
+      out.innerHTML = '<div class="faint small">Checking...</div>';
+      try {
+        const info = await NFM.api("/certs/analyse", { method: "POST", body: await gather() });
+        out.innerHTML = summaryHtml(info);
+      } catch (err) {
+        out.innerHTML = '<div class="notice error"><div>' +
+                        NFM.escapeHtml(err.message) + "</div></div>";
+      }
+    });
+
+    document.getElementById("u-save").addEventListener("click", async function () {
+      try {
+        const res = await NFM.api("/certs/upload", { method: "POST", body: await gather() });
+        NFM.closeModal();
+        const failed = (res.placed && res.placed.failed) || [];
+        NFM.toast(failed.length
+          ? "Saved, but it did not reach every node.  The file check retries within the minute."
+          : "Saved and copied to every node.", failed.length ? "bad" : "ok");
+        setTimeout(function () { window.location.reload(); }, 1200);
+      } catch (err) {
+        NFM.toast(err.message, "bad");
+      }
+    });
+  });
+
+  // ---- make a self signed one ---------------------------------------------
+  const ss = document.getElementById("self-signed-cert");
+  if (ss) ss.addEventListener("click", function () {
+    NFM.openModal("Make a self signed certificate",
+      "For a staging box or an internal name no public authority will sign", `
+      <div class="notice warn">
+        <div>Browsers will warn about this one unless every machine that visits
+          has been told to trust it.  It gets a site on https today; it is not
+          something to leave facing the public.</div>
+      </div>
+      <div class="field mt">
+        <label for="s-domains">Names it covers</label>
+        <input type="text" id="s-domains" placeholder="staging.example.com 10.0.0.5" autofocus>
+        <div class="hint">Space or comma separated.  Addresses work too, which is
+          the one thing a public authority will never do for you.</div>
+      </div>
+      <div class="field">
+        <label for="s-name">Call it</label>
+        <input type="text" id="s-name" placeholder="taken from the first name">
+      </div>
+      <div class="form-grid">
+        <div class="field">
+          <label for="s-keytype">Key</label>
+          <select id="s-keytype">
+            <option value="ecdsa">ECDSA P-256, smaller and faster</option>
+            <option value="rsa">RSA</option>
+          </select>
+        </div>
+        <div class="field" id="s-size-wrap" style="display:none">
+          <label for="s-keysize">Key length</label>
+          <select id="s-keysize">
+            <option value="2048">2048</option>
+            <option value="4096">4096</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="s-days">Good for, in days</label>
+          <input type="number" id="s-days" value="825" min="1" max="3650">
+        </div>
+      </div>
+      ${subjectFields("s")}
+      <div class="mt"><button class="btn primary" id="s-save">Make it</button></div>`, true);
+
+    const kt = document.getElementById("s-keytype");
+    function syncSize() {
+      document.getElementById("s-size-wrap").style.display =
+        kt.value === "rsa" ? "" : "none";
+    }
+    kt.addEventListener("change", syncSize);
+    syncSize();
+
+    document.getElementById("s-save").addEventListener("click", async function () {
+      const body = {
+        domains: val("s-domains"),
+        name: val("s-name"),
+        key_type: kt.value,
+        key_size: parseInt(val("s-keysize") || "2048", 10),
+        days: parseInt(val("s-days") || "825", 10),
+        subject: collectSubject("s")
+      };
+      if (!body.domains) { NFM.toast("Put in at least one name", "bad"); return; }
+      try {
+        await NFM.api("/certs/self-signed", { method: "POST", body: body });
+        NFM.closeModal();
+        NFM.toast("Made and copied to every node.", "ok");
+        setTimeout(function () { window.location.reload(); }, 1200);
+      } catch (err) {
+        NFM.toast(err.message, "bad");
+      }
+    });
+  });
+
+  // ---- make a signing request ---------------------------------------------
+  const csr = document.getElementById("csr-cert");
+  if (csr) csr.addEventListener("click", function () {
+    NFM.openModal("Make a signing request",
+      "The key is made here and never leaves this box", `
+      <div class="field">
+        <label for="r-domains">Names it should cover</label>
+        <input type="text" id="r-domains" placeholder="www.example.com example.com" autofocus>
+        <div class="hint">Space or comma separated.  The first one becomes the
+          common name and all of them go in as subject alternative names, which
+          is what every client actually reads.</div>
+      </div>
+      <div class="field">
+        <label for="r-name">Call it</label>
+        <input type="text" id="r-name" placeholder="taken from the first name">
+      </div>
+      <div class="field">
+        <label for="r-keysize">Key length</label>
+        <select id="r-keysize">
+          <option value="2048">RSA 2048</option>
+          <option value="4096">RSA 4096</option>
+        </select>
+        <div class="hint">2048 is what nearly every authority issues against.
+          4096 is slower on every handshake for a margin most people do not
+          need, so pick it because something told you to, not by default.</div>
+      </div>
+      ${subjectFields("r")}
+      <div id="r-result" class="mt"></div>
+      <div class="mt"><button class="btn primary" id="r-save">Make the request</button></div>`,
+      true);
+
+    document.getElementById("r-save").addEventListener("click", async function () {
+      const body = {
+        domains: val("r-domains"),
+        name: val("r-name"),
+        key_size: parseInt(val("r-keysize") || "2048", 10),
+        subject: collectSubject("r")
+      };
+      if (!body.domains) { NFM.toast("Put in at least one name", "bad"); return; }
+      try {
+        const res = await NFM.api("/certs/csr", { method: "POST", body: body });
+        const out = document.getElementById("r-result");
+        out.innerHTML =
+          '<div class="notice info"><div>Send this to your certificate authority.  ' +
+          'The key stays here, so come back to this certificate and paste in what ' +
+          'they send you.</div></div>' +
+          '<textarea rows="12" class="mono mt" readonly id="r-csr"></textarea>' +
+          '<div class="mt"><button class="btn" id="r-copy">Copy it</button></div>';
+        document.getElementById("r-csr").value = res.csr;
+        document.getElementById("r-copy").addEventListener("click", function () {
+          const box = document.getElementById("r-csr");
+          box.select();
+          // execCommand rather than the clipboard API, which needs a secure
+          // context the browser agrees about.  Behind a reverse proxy on a name
+          // somebody has not set up yet, it silently does nothing.
+          try { document.execCommand("copy"); NFM.toast("Copied", "ok"); }
+          catch (e) { NFM.toast("Select it and copy by hand", "bad"); }
+        });
+        document.getElementById("r-save").disabled = true;
+      } catch (err) {
+        NFM.toast(err.message, "bad");
+      }
+    });
+  });
+
+  // ---- finish one an authority has answered -------------------------------
+  document.addEventListener("click", function (ev) {
+    const btn = ev.target.closest("[data-finish-csr]");
+    if (!btn) { return; }
+    const id = btn.getAttribute("data-finish-csr");
+
+    NFM.openModal("Finish this certificate",
+      "Paste what the authority sent back.  It gets checked against the key held here.", `
+      <div class="field">
+        <label for="f-cert">The certificate they issued</label>
+        <textarea id="f-cert" rows="6" class="mono" spellcheck="false"
+                  placeholder="-----BEGIN CERTIFICATE-----" autofocus></textarea>
+        <input type="file" id="f-cert-file" class="mt">
+      </div>
+      <div class="field">
+        <label for="f-chain">Intermediates, if they came separately</label>
+        <textarea id="f-chain" rows="4" class="mono" spellcheck="false"></textarea>
+        <input type="file" id="f-chain-file" class="mt">
+      </div>
+      <div class="mt"><button class="btn primary" id="f-save">Save and copy to every node</button></div>`,
+      true);
+
+    document.getElementById("f-save").addEventListener("click", async function () {
+      try {
+        await NFM.api("/certs/" + id + "/csr/complete", {
+          method: "POST",
+          body: {
+            certificate: val("f-cert") ||
+              await readFile(document.getElementById("f-cert-file")),
+            chain: val("f-chain") ||
+              await readFile(document.getElementById("f-chain-file"))
+          }
+        });
+        NFM.closeModal();
+        NFM.toast("Saved and copied to every node.", "ok");
+        setTimeout(function () { window.location.reload(); }, 1200);
+      } catch (err) {
+        NFM.toast(err.message, "bad");
+      }
+    });
+  });
+
+  // ---- delete one nothing is using ---------------------------------------
+  document.addEventListener("click", async function (ev) {
+    const btn = ev.target.closest("[data-delete-cert]");
+    if (!btn) { return; }
+    const name = btn.getAttribute("data-name");
+    if (!confirm("Delete the certificate " + name + "?\n\n" +
+                 "Its files come off every node, private key included.  " +
+                 "An uploaded or self signed one cannot be got back, so keep a " +
+                 "copy first if you might want it again.")) { return; }
+    try {
+      const res = await NFM.api("/certs/" + btn.getAttribute("data-delete-cert"),
+                                { method: "DELETE" });
+      const left = (res.files && res.files.failed) || [];
+      NFM.toast(left.length
+        ? "Deleted, but the files are still on " +
+          left.map(function (f) { return f.node; }).join(", ") +
+          ".  Those nodes were not reachable."
+        : "Deleted, and the files are off every node.",
+        left.length ? "bad" : "ok");
+      setTimeout(function () { window.location.reload(); }, 1200);
+    } catch (err) {
+      NFM.toast(err.message, "bad");
+    }
+  });
+
+  // Show the request again for anything still waiting on an authority.
+  document.addEventListener("click", async function (ev) {
+    const btn = ev.target.closest("[data-show-csr]");
+    if (!btn) { return; }
+    try {
+      const res = await NFM.api("/certs/" + btn.getAttribute("data-show-csr") + "/csr");
+      NFM.openModal("Signing request for " + res.name,
+        (res.domains || []).join(", "),
+        '<textarea rows="14" class="mono" readonly>' +
+        NFM.escapeHtml(res.csr) + "</textarea>", true);
+    } catch (err) {
+      NFM.toast(err.message, "bad");
+    }
+  });
+});
+</script>
+{% endblock %}

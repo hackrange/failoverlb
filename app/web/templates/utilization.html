@@ -1,0 +1,736 @@
+{% extends "base.html" %}
+{% block title %}Utilization &middot; Failover LB{% endblock %}
+
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <h1>Utilization</h1>
+    <div class="sub">
+      What the boxes are actually doing, over time.  A number on its own tells
+      you this second; a line tells you whether it is normal.
+    </div>
+  </div>
+  <div class="page-actions">
+    <select id="window">
+      <option value="15">Last 15 minutes</option>
+      <option value="60" selected>Last hour</option>
+      <option value="120">Last 2 hours</option>
+      <option value="360">Last 6 hours</option>
+      <option value="1440">Last day</option>
+      <option value="10080">Last week</option>
+      <option value="43200">Last 30 days</option>
+    </select>
+    <button class="btn" id="zoom-out" hidden>Back to the whole window</button>
+    <button class="btn" id="refresh">Refresh</button>
+    <span class="small faint" id="updated-at"></span>
+  </div>
+</div>
+
+<div class="small faint" id="drawn-range" style="margin:-6px 0 12px"></div>
+
+<div class="notice info" id="short-history" hidden>
+  <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 3a.9.9 0 1 1 0 1.8A.9.9 0 0 1 8 4zm1.2 8H6.8v-.9h.7V7.9h-.7V7h2.1v4.1h.3V12z"/></svg>
+  <div id="short-history-text"></div>
+</div>
+
+<div id="tiles" class="tile-row"></div>
+
+<div id="charts"></div>
+
+{# Hidden unless a pool is actually set up to be asked.  Most fleets will never
+   set one, and a heading over a row of cards saying nothing is measured is the
+   same clutter as a panel listing what the page does not do. #}
+<div id="member-section" hidden>
+  <h2 class="section-heading">Backends</h2>
+  <div id="member-charts"></div>
+</div>
+
+<style>
+  .tile-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+              gap: .75rem; margin-bottom: 1.25rem; }
+  .util-tile { border: 1px solid var(--line, #ddd); border-radius: 6px;
+               padding: .75rem .9rem; }
+  .util-tile .who { font-size: .75rem; letter-spacing: .04em;
+                    text-transform: uppercase; opacity: .6; }
+  .util-tile .big { font-size: 1.75rem; font-weight: 650; line-height: 1.15;
+                    margin: .15rem 0 0; font-variant-numeric: tabular-nums; }
+  .util-tile .unit { font-size: .9rem; font-weight: 400; opacity: .55;
+                     margin-left: .15rem; }
+  .util-tile .sub { font-size: .78rem; opacity: .6; margin-top: .1rem; }
+  .chart-card { margin-bottom: 1rem; }
+  .chart-head { display: flex; justify-content: space-between; align-items: baseline;
+                padding: .75rem .9rem .25rem; }
+  .chart-head h3 { margin: 0; font-size: .95rem; }
+  .chart-head .units { font-size: .78rem; opacity: .6; }
+  .legend { display: flex; gap: 1rem; flex-wrap: wrap; padding: 0 .9rem .6rem;
+            font-size: .8rem; }
+  .legend span { display: inline-flex; align-items: center; gap: .35rem; }
+  .swatch { width: 1.6rem; height: 0; border-top-width: 2px; display: inline-block; }
+  /* Sized by the attributes the script writes, not stretched by css.
+     max-width keeps it inside the card if the measurement is ever
+     briefly stale, without scaling it. */
+  svg.chart { display: block; max-width: 100%; height: auto; }
+  svg.chart .grid { stroke: currentColor; opacity: .12; stroke-width: 1; }
+  svg.chart .axis { fill: currentColor; opacity: .55; font-size: 10px; }
+  svg.chart .line { fill: none; stroke-width: 2; stroke-linejoin: round;
+                    stroke-linecap: round; }
+  svg.chart .hit { fill: transparent; }
+  .readout { font-size: .8rem; padding: 0 .9rem .75rem; min-height: 1.2em;
+             font-variant-numeric: tabular-nums; opacity: .8; }
+  .section-heading { font-size: 1.05rem; margin: 1.75rem 0 .75rem; }
+  .pool-note { font-size: .82rem; opacity: .65; padding: 0 .9rem .75rem; }
+  .level-tag { font-size: .68rem; letter-spacing: .04em; text-transform: uppercase;
+               border: 1px solid currentColor; border-radius: 3px; padding: 0 .3rem;
+               opacity: .6; margin-left: .4rem; }
+</style>
+
+<script nonce="{{ csp_nonce }}">
+// Waits for app.js, which the layout loads after this block.
+document.addEventListener("DOMContentLoaded", function () {
+
+  // Two lines is all this page ever draws at once, one per node, so the
+  // palette is small on purpose.  Chosen to stay apart for the common kinds of
+  // colour blindness, and never the only difference between two lines: each
+  // one is named in the legend and the readout says which is which.
+  const COLOURS = ["#1f6feb", "#d97706", "#0f766e", "#9333ea"];
+
+  const CHARTS = [
+    {key: "cpu_percent", title: "CPU", units: "percent of all cores",
+     max: 100, fmt: function (v) { return v.toFixed(0) + "%"; }},
+    {key: "memory_percent", title: "Memory in use", units: "percent",
+     max: 100, fmt: function (v) { return v.toFixed(0) + "%"; }},
+    {key: "requests_per_sec", title: "Requests", units: "per second",
+     fmt: function (v) { return v.toFixed(1) + "/s"; }},
+    {key: "active_connections", title: "Active connections", units: "connections",
+     fmt: function (v) { return v.toFixed(0); }},
+    {key: "load_1m", title: "Load average", units: "one minute",
+     fmt: function (v) { return v.toFixed(2); }},
+  ];
+
+  function el(id) { return document.getElementById(id); }
+
+  // ------------------------------------------------------------------ tiles
+  function tiles(nodes) {
+    const names = Object.keys(nodes).sort();
+    const out = [];
+    names.forEach(function (name) {
+      const d = nodes[name] || {};
+      const l = d.latest || {};
+      const r = d.rates || {};
+
+      // Stored history hands back the last bucket in the range, which on a
+      // zoom into last Tuesday is last Tuesday's number.  Say so, or a tile
+      // reads as the present tense while somebody is looking at the past.
+      let when = "";
+      if (d.as_of && Date.now() / 1000 - d.as_of > 150) {
+        const t = new Date(d.as_of * 1000);
+        when = " at " + String(t.getHours()).padStart(2, "0") + ":" +
+               String(t.getMinutes()).padStart(2, "0");
+      }
+      function tile(who, big, unit, sub) {
+        sub = (sub || "") + (big === null || big === undefined ? "" : when);
+        return '<div class="util-tile"><div class="who">' +
+          NFM.escapeHtml(who) + '</div><div class="big">' +
+          (big === null || big === undefined
+            ? '<span class="unit">no data</span>'
+            : NFM.escapeHtml(String(big)) +
+              (unit ? '<span class="unit">' + NFM.escapeHtml(unit) + "</span>" : "")) +
+          '</div><div class="sub">' + NFM.escapeHtml(sub || "") + "</div></div>";
+      }
+      out.push(tile(name + " cpu", l.cpu_percent, "%",
+                    l.load_1m !== undefined ? "load " + l.load_1m : ""));
+      out.push(tile(name + " memory", l.memory_percent, "%",
+                    l.memory_total
+                      ? Math.round(l.memory_used / 1048576) + " of " +
+                        Math.round(l.memory_total / 1048576) + " MB"
+                      : ""));
+      out.push(tile(name + " requests",
+                    r.requests_per_sec === null || r.requests_per_sec === undefined
+                      ? null : r.requests_per_sec, "/s",
+                    l.active_connections !== undefined
+                      ? l.active_connections + " connections open" : ""));
+    });
+    el("tiles").innerHTML = out.join("");
+  }
+
+  // ----------------------------------------------------------------- charts
+  //
+  // Inline SVG rather than a charting library, because the GUI has no build
+  // step and no CDN by design: this is a tool somebody opens when the network
+  // is the problem.  A few hundred points and a couple of lines is well within
+  // what SVG draws properly, with real axes rather than a sparkline.
+  function niceMax(value) {
+    // Round the top of the scale up to something a person would choose, so the
+    // gridlines land on readable numbers instead of 37.4.
+    if (value <= 1) { return 1; }
+    const mag = Math.pow(10, Math.floor(Math.log10(value)));
+    const scaled = value / mag;
+    const step = scaled <= 1 ? 1 : scaled <= 2 ? 2 : scaled <= 5 ? 5 : 10;
+    return step * mag;
+  }
+
+  // How wide to draw, in real pixels.
+  //
+  // The viewBox has to match the size the SVG is actually displayed at.  A
+  // fixed viewBox stretched to fit with preserveAspectRatio="none" scales x and
+  // y by different amounts, which makes a 2px line an ellipse and squashes the
+  // axis text sideways.  It looks fine at the width it was designed for and
+  // gets worse the wider the window, which is exactly when somebody notices.
+  //
+  // Measuring instead means the geometry is always right, at any size, and the
+  // cost is redrawing on resize.
+  function chartWidth() {
+    const box = el("charts");
+    const w = box ? box.clientWidth : 0;
+    // A floor so the maths stays sane on a very narrow phone, and a ceiling so
+    // an ultrawide monitor does not get a line one pixel tall stretched across
+    // three thousand points.
+    return Math.max(360, Math.min(w || 1000, 2400));
+  }
+
+  function drawChart(spec, nodes) {
+    const names = Object.keys(nodes).sort();
+    const seriesByNode = {};
+    let peak = 0;
+    let from = Infinity, to = -Infinity;
+
+    names.forEach(function (n) {
+      const s = ((nodes[n] || {}).series || {})[spec.key] || [];
+      seriesByNode[n] = s;
+      s.forEach(function (p) {
+        if (p.value > peak) { peak = p.value; }
+        if (p.at < from) { from = p.at; }
+        if (p.at > to) { to = p.at; }
+      });
+    });
+
+    const any = names.some(function (n) { return seriesByNode[n].length > 1; });
+    if (!any) {
+      return '<div class="card chart-card"><div class="chart-head"><h3>' +
+        NFM.escapeHtml(spec.title) + '</h3><span class="units">' +
+        NFM.escapeHtml(spec.units) + '</span></div>' +
+        '<div class="readout">Not enough samples yet.  A rate needs two ' +
+        'readings, and they are taken every fifteen seconds.</div></div>';
+    }
+
+    // Zero based unless the numbers are a percentage with its own ceiling.
+    // Starting an axis at the minimum makes ordinary noise look like a crisis,
+    // which is the most common way a chart lies.
+    const top = spec.max ? spec.max : niceMax(peak * 1.15 || 1);
+    const W = chartWidth(), H = 190, padL = 46, padR = 12, padT = 12, padB = 26;
+    const plotW = W - padL - padR, plotH = H - padT - padB;
+    const span = Math.max(1, to - from);
+
+    const x = function (at) { return padL + (at - from) / span * plotW; };
+    const y = function (v) { return padT + plotH - (v / top) * plotH; };
+
+    // No preserveAspectRatio override, so it keeps its proportions, and the
+    // viewBox is the real pixel size so there is nothing to distort.
+    let svg = '<svg class="chart" viewBox="0 0 ' + W + " " + H +
+              '" width="' + W + '" height="' + H +
+              '" role="img" aria-label="' + NFM.escapeHtml(spec.title) + '">';
+
+    for (let i = 0; i <= 4; i++) {
+      const v = top * i / 4;
+      const yy = y(v);
+      svg += '<line class="grid" x1="' + padL + '" y1="' + yy +
+             '" x2="' + (W - padR) + '" y2="' + yy + '"/>';
+      svg += '<text class="axis" x="' + (padL - 6) + '" y="' + (yy + 3) +
+             '" text-anchor="end">' + NFM.escapeHtml(spec.fmt(v)) + "</text>";
+    }
+
+    // Time labels at both ends, which is all a chart this wide needs.
+    const started = new Date(from * 1000), ended = new Date(to * 1000);
+    const hhmm = function (d) {
+      return String(d.getHours()).padStart(2, "0") + ":" +
+             String(d.getMinutes()).padStart(2, "0");
+    };
+    svg += '<text class="axis" x="' + padL + '" y="' + (H - 8) + '">' +
+           hhmm(started) + "</text>";
+    svg += '<text class="axis" x="' + (W - padR) + '" y="' + (H - 8) +
+           '" text-anchor="end">' + hhmm(ended) + "</text>";
+
+    names.forEach(function (n, i) {
+      const pts = seriesByNode[n];
+      if (pts.length < 2) { return; }
+
+      // A gap longer than a few sample intervals is a gap, not a straight line
+      // across it.  Joining them would invent numbers for exactly the moments
+      // worth looking at: a restart, or a node nobody could reach.
+      //
+      // **The interval has to be measured, not assumed.**  This was a fixed 45
+      // seconds, which is right for the fifteen second live samples it was
+      // written against and wrong for everything else.  Stored history arrives
+      // in one minute buckets, and five minute ones further back, so every
+      // single point was more than 45 seconds from the last and counted as a
+      // gap.  The path came out as nothing but moveto commands and the chart
+      // drew no line at all, while the data sat there and the page cheerfully
+      // reported how many minutes it covered.
+      //
+      // The middle gap is used rather than the average, so one real outage in
+      // the middle of the window does not stretch the threshold far enough to
+      // hide the next one.
+      const steps = [];
+      for (let k = 1; k < pts.length; k++) { steps.push(pts[k].at - pts[k - 1].at); }
+      steps.sort(function (a, b) { return a - b; });
+      const typical = steps[Math.floor(steps.length / 2)] || 15;
+      const gapAt = typical * 2.5;
+
+      let d = "", pen = false;
+      for (let k = 0; k < pts.length; k++) {
+        const p = pts[k];
+        const jumped = k > 0 && (p.at - pts[k - 1].at) > gapAt;
+        // A missing value is a hole, not a zero.  One NaN in the path data
+        // makes the browser throw the whole line away, so a single gap in one
+        // series would blank an entire chart.
+        if (p.value === null || p.value === undefined || isNaN(p.value)) {
+          pen = false;
+          continue;
+        }
+        if (!pen || jumped) {
+          d += "M" + x(p.at).toFixed(1) + " " + y(p.value).toFixed(1);
+          pen = true;
+        } else {
+          d += "L" + x(p.at).toFixed(1) + " " + y(p.value).toFixed(1);
+        }
+      }
+      svg += '<path class="line" d="' + d + '" stroke="' + COLOURS[i % COLOURS.length] +
+             '" data-node="' + NFM.escapeHtml(n) + '"/>';
+    });
+
+    svg += '<rect class="hit" x="' + padL + '" y="' + padT + '" width="' + plotW +
+           '" height="' + plotH + '" data-from="' + from + '" data-to="' + to + '"/>';
+    svg += "</svg>";
+
+    const legend = names.map(function (n, i) {
+      return '<span><i class="swatch" style="border-top:2px solid ' +
+             COLOURS[i % COLOURS.length] + '"></i>' + NFM.escapeHtml(n) + "</span>";
+    }).join("");
+
+    return '<div class="card chart-card" data-chart="' + spec.key + '">' +
+      '<div class="chart-head"><h3>' + NFM.escapeHtml(spec.title) +
+      '</h3><span class="units">' + NFM.escapeHtml(spec.units) + "</span></div>" +
+      '<div class="legend">' + legend + "</div>" + svg +
+      '<div class="readout" data-readout>&nbsp;</div></div>';
+  }
+
+  let LAST = {};
+  let LAST_MEMBERS = {};
+
+  function draw(data) {
+    lastPayload = data;
+    const stamp = el("updated-at");
+    if (stamp) {
+      const now = new Date();
+      stamp.textContent = "updated " +
+        String(now.getHours()).padStart(2, "0") + ":" +
+        String(now.getMinutes()).padStart(2, "0") + ":" +
+        String(now.getSeconds()).padStart(2, "0");
+    }
+    const nodes = data.nodes || {};
+    LAST = nodes;
+    tiles(nodes);
+    el("charts").innerHTML = CHARTS.map(function (s) {
+      return drawChart(s, nodes);
+    }).join("");
+
+    // How far back the numbers really go, said out loud.  A window of an hour
+    // drawn from four minutes of samples is not an hour of history, and a
+    // chart that does not say so is one somebody draws conclusions from.
+    let oldest = Infinity, count = 0;
+    Object.keys(nodes).forEach(function (n) {
+      const s = ((nodes[n] || {}).series || {}).cpu_percent || [];
+      if (s.length) { oldest = Math.min(oldest, s[0].at); count += s.length; }
+    });
+    const box = el("short-history");
+    if (count && oldest !== Infinity) {
+      const mins = Math.round((Date.now() / 1000 - oldest) / 60);
+      if (mins < data.minutes - 2) {
+        el("short-history-text").textContent =
+          "These charts cover about " + mins + " minute" + (mins === 1 ? "" : "s") +
+          ", not the " + data.minutes + " asked for.  The numbers are kept in " +
+          "memory, so the history starts again whenever the manager restarts.";
+        box.hidden = false;
+      } else {
+        box.hidden = true;
+      }
+    }
+  }
+
+  // Hovering reads out the value under the pointer for every line at once,
+  // which is what somebody actually wants: the question is nearly always
+  // whether one node differs from the other at that moment.
+  el("charts").addEventListener("mousemove", function (ev) {
+    const hit = ev.target.closest(".hit");
+    if (!hit) { return; }
+    const card = hit.closest("[data-chart]");
+    const spec = CHARTS.filter(function (c) { return c.key === card.dataset.chart; })[0];
+    if (!spec) { return; }
+
+    const box = hit.getBoundingClientRect();
+    const frac = Math.max(0, Math.min(1, (ev.clientX - box.left) / box.width));
+    const from = parseFloat(hit.dataset.from), to = parseFloat(hit.dataset.to);
+    const at = from + frac * (to - from);
+
+    // A member chart's lines are backends, not nodes, so look in whichever
+    // set this card was drawn from.
+    let source = LAST;
+    if (card.closest("#member-charts")) {
+      source = {};
+      Object.keys(LAST_MEMBERS).forEach(function (pool) {
+        Object.keys(LAST_MEMBERS[pool]).forEach(function (label) {
+          source[label] = {series: LAST_MEMBERS[pool][label].series || {}};
+        });
+      });
+    }
+
+    const parts = Object.keys(source).sort().map(function (n) {
+      const s = ((source[n] || {}).series || {})[spec.key] || [];
+      if (!s.length) { return null; }
+      let best = s[0];
+      for (let i = 1; i < s.length; i++) {
+        if (Math.abs(s[i].at - at) < Math.abs(best.at - at)) { best = s[i]; }
+      }
+      // Too far from any real sample to claim a value for this moment.
+      if (Math.abs(best.at - at) > 60) { return n + " no data"; }
+      return n + " " + spec.fmt(best.value);
+    }).filter(Boolean);
+
+    const when = new Date(at * 1000);
+    card.querySelector("[data-readout]").textContent =
+      String(when.getHours()).padStart(2, "0") + ":" +
+      String(when.getMinutes()).padStart(2, "0") + ":" +
+      String(when.getSeconds()).padStart(2, "0") + "   " + parts.join("   ");
+  });
+
+  el("charts").addEventListener("mouseleave", function () {
+    document.querySelectorAll("[data-readout]").forEach(function (r) {
+      r.innerHTML = "&nbsp;";
+    });
+  }, true);
+
+  // ------------------------------------------------------- the backends
+  //
+  // A chart per pool with a line per backend, rather than a chart per backend.
+  // The question about a pool is nearly always whether one member is working
+  // harder than the others, and that is a comparison, so they belong on one
+  // pair of axes.
+  function drawMembers(data) {
+    lastMembers = data;
+    LAST_MEMBERS = data.pools || {};
+    const configured = data.configured || {};
+
+    // Only the pools somebody has actually pointed at an endpoint.  A pool
+    // that publishes nothing is the normal case and has nothing to say here,
+    // so the whole section stays out of the way rather than filling the page
+    // with cards explaining their own absence.  The pool's own page is where
+    // it says how to turn this on.
+    const poolNames = Object.keys(configured).filter(function (p) {
+      return configured[p];
+    }).sort();
+
+    const section = el("member-section");
+    if (!poolNames.length) {
+      section.hidden = true;
+      el("member-charts").innerHTML = "";
+      return;
+    }
+    section.hidden = false;
+
+    const out = [];
+
+    poolNames.forEach(function (pool) {
+      const members = LAST_MEMBERS[pool] || {};
+      const labels = Object.keys(members).sort();
+
+      const errors = labels.filter(function (l) { return members[l].error; });
+      const level = (members[labels[0]] || {}).level;
+
+      ["cpu_percent", "memory_percent"].forEach(function (key) {
+        const spec = {
+          key: key,
+          title: pool + (key === "cpu_percent" ? " cpu" : " memory in use"),
+          units: level === "process" ? "percent, one process" : "percent",
+          max: 100,
+          fmt: function (v) { return v.toFixed(0) + "%"; }
+        };
+        // Reuse the node chart drawer by handing it the same shape.
+        const shaped = {};
+        labels.forEach(function (l) {
+          shaped[l] = {series: (members[l].series || {})};
+        });
+        let html = drawChart(spec, shaped);
+        if (level === "process") {
+          html = html.replace("</h3>",
+            '</h3><span class="level-tag">one process, not the machine</span>');
+        }
+        out.push(html);
+      });
+
+      if (errors.length) {
+        out.push('<div class="card chart-card"><div class="pool-note">' +
+          errors.map(function (l) {
+            return NFM.escapeHtml(l) + ": " + NFM.escapeHtml(members[l].error);
+          }).join("<br>") + "</div></div>");
+      }
+    });
+
+    el("member-charts").innerHTML = out.join("");
+  }
+
+  // The range currently drawn.  null means "the last N minutes", which is what
+  // the picker means and is what keeps refreshing forward in time.  A zoom
+  // sets an explicit start and end and stops the clock, because a chart that
+  // slides while somebody is reading the spike they zoomed into is useless.
+  let zoom = null;
+
+  function describe(from, to) {
+    const span = to - from;
+    const fmt = function (t) {
+      const d = new Date(t * 1000);
+      return span > 86400
+        ? d.toLocaleDateString() + " " + d.toTimeString().slice(0, 5)
+        : d.toTimeString().slice(0, 8);
+    };
+    return fmt(from) + " to " + fmt(to);
+  }
+
+  // How far back a payload actually reaches, in minutes.
+  function coverage(payload) {
+    var oldest = Infinity;
+    var nodes = (payload && payload.nodes) || {};
+    Object.keys(nodes).forEach(function (n) {
+      var s = ((nodes[n] || {}).series || {}).cpu_percent || [];
+      if (s.length) { oldest = Math.min(oldest, s[0].at); }
+    });
+    if (oldest === Infinity) { return 0; }
+    return (Date.now() / 1000 - oldest) / 60;
+  }
+
+  // Swap in the stored history when it has more to say than memory does.
+  async function preferStored(payload, minutes) {
+    if (coverage(payload) >= minutes * 0.8) { return payload; }
+    var now = Math.floor(Date.now() / 1000);
+    try {
+      var fromDisk = await NFM.api(
+        "/metrics/history?start=" + (now - minutes * 60) + "&end=" + now);
+      if (coverage(fromDisk) > coverage(payload)) { return fromDisk; }
+    } catch (err) {
+      // Keep the live payload.  A missing history is not a reason to draw
+      // nothing when there is something in memory.
+    }
+    return payload;
+  }
+
+  async function load() {
+    const minutes = parseInt(el("window").value, 10);
+
+    // Under two hours the live in memory samples are finer than anything
+    // stored, so they stay the source for the short windows this page was
+    // built for.  Anything longer, or any zoom, comes from what was written
+    // down.  Both arrive in the same shape, so one drawing routine covers
+    // them and a zoomed chart cannot render differently from a live one.
+    const stored = zoom !== null || minutes > 120;
+
+    let url;
+    if (zoom) {
+      url = "/metrics/history?start=" + Math.round(zoom.from) +
+            "&end=" + Math.round(zoom.to);
+    } else if (stored) {
+      const now = Math.floor(Date.now() / 1000);
+      url = "/metrics/history?start=" + (now - minutes * 60) + "&end=" + now;
+    } else {
+      url = "/metrics/series?minutes=" + minutes;
+    }
+
+    try {
+      let payload = await NFM.api(url);
+
+      // Use what was written down when memory does not cover the window.
+      //
+      // The in memory samples start again from nothing when the manager
+      // restarts, so a minute after a restart this drew one minute and said it
+      // could not cover the window asked for, while the history sat on disk
+      // unread.  That is the whole reason the history exists.
+      //
+      // Live is still preferred when it does cover the window, because fifteen
+      // second samples are finer than one minute buckets.
+      if (!stored) {
+        payload = await preferStored(payload, minutes);
+      }
+      draw(payload);
+      const note = el("drawn-range");
+      if (note) {
+        const from = payload.start || 0, to = payload.end || 0;
+        note.textContent = stored && from && to
+          ? "Showing " + describe(from, to) +
+            (payload.resolution === "5m"
+              ? ".  Each point is a five minute average, so a flat line here " +
+                "is an average and not necessarily a quiet period."
+              : ".  Each point is a one minute average.")
+          : "";
+      }
+    } catch (err) {
+      el("charts").textContent =
+        "Could not load: " + (err && err.message ? err.message : err);
+    }
+
+    // The backends only have live numbers, so a zoom into last Tuesday has
+    // nothing to show for them.  Said rather than drawn as an empty chart,
+    // which reads as zero traffic.
+    try {
+      if (zoom) {
+        el("member-charts").innerHTML =
+          '<div class="small faint">Backend numbers are live only, so they ' +
+          "are not shown for a past range.</div>";
+      } else {
+        drawMembers(await NFM.api("/metrics/members?minutes=" + Math.min(minutes, 120)));
+      }
+    } catch (err) {
+      el("member-charts").textContent =
+        "Could not load the backends: " + (err && err.message ? err.message : err);
+    }
+
+    const out = el("zoom-out");
+    if (out) { out.hidden = zoom === null; }
+  }
+
+  // Redraw when the window changes size, because the geometry is measured
+  // rather than scaled.  Debounced: a drag across the screen fires this
+  // continuously and redrawing five charts on every pixel is wasteful.
+  let resizeTimer = null;
+  let lastPayload = null;
+  let lastMembers = null;
+  window.addEventListener("resize", function () {
+    if (resizeTimer) { clearTimeout(resizeTimer); }
+    resizeTimer = setTimeout(function () {
+      if (lastPayload) { draw(lastPayload); }
+      if (lastMembers) { drawMembers(lastMembers); }
+    }, 150);
+  });
+
+  el("window").addEventListener("change", function () { zoom = null; load(); });
+
+  // Refresh says when it last fetched.
+  //
+  // The button always worked and looked broken, which is a fair conclusion:
+  // it redraws the same window, and over fifteen seconds the numbers barely
+  // move, so pressing it changed nothing anybody could see.  Changing the
+  // window looked like it worked only because the chart obviously changed.
+  //
+  // So the page now says when the numbers were last fetched, which is worth
+  // knowing on a monitoring page anyway, and the button greys out while it is
+  // working so a slow fetch is visible rather than looking like a dead click.
+  el("refresh").addEventListener("click", async function () {
+    const button = el("refresh");
+    button.disabled = true;
+    try {
+      await load();
+    } finally {
+      button.disabled = false;
+    }
+  });
+
+  const zoomOut = el("zoom-out");
+  if (zoomOut) {
+    zoomOut.addEventListener("click", function () { zoom = null; load(); });
+  }
+
+  // Drag across any chart to zoom every chart to that range.
+  //
+  // Every chart, not the one under the pointer.  Half the value of this page is
+  // seeing that a request rate spike and a memory climb happened at the same
+  // moment, and that comparison is destroyed the instant each chart carries its
+  // own window.
+  (function dragToZoom() {
+    const area = el("charts");
+    if (!area) return;
+    let dragging = null;
+
+    // The measurements are read once, at mousedown, rather than taken from the
+    // element again at mouseup.  Every chart is replaced on each refresh, so a
+    // drag that spans one would otherwise measure an element that has been
+    // thrown away, and a detached element reports zero width.
+    function timeAt(clientX) {
+      const frac = Math.max(0, Math.min(1,
+        (clientX - dragging.left) / dragging.width));
+      return dragging.from + frac * (dragging.to - dragging.from);
+    }
+
+    // The band showing what is being selected.
+    //
+    // Without it the drag worked and gave no sign of working, which is the
+    // same problem the Refresh button had: doing the job invisibly is
+    // indistinguishable from not doing it.
+    //
+    // Parented to the body rather than the chart, because the charts are
+    // replaced wholesale on every refresh and anything inside one would be
+    // thrown away mid drag.
+    function marker() {
+      let box = document.getElementById("zoom-marker");
+      if (!box) {
+        box = document.createElement("div");
+        box.id = "zoom-marker";
+        document.body.appendChild(box);
+      }
+      return box;
+    }
+
+    area.addEventListener("mousedown", function (ev) {
+      const hit = ev.target.closest(".hit");
+      if (!hit) return;
+      const box = hit.getBoundingClientRect();
+      if (!box.width) return;
+      dragging = {
+        left: box.left, width: box.width,
+        top: box.top, height: box.height,
+        from: parseFloat(hit.dataset.from),
+        to: parseFloat(hit.dataset.to),
+        startX: ev.clientX,
+      };
+      dragging.start = timeAt(ev.clientX);
+      ev.preventDefault();
+    });
+
+    window.addEventListener("mousemove", function (ev) {
+      if (!dragging) return;
+      const box = marker();
+      const a = Math.min(dragging.startX, ev.clientX);
+      const b = Math.max(dragging.startX, ev.clientX);
+      box.style.display = "block";
+      box.style.left = a + "px";
+      box.style.width = (b - a) + "px";
+      box.style.top = (dragging.top + window.scrollY) + "px";
+      box.style.height = dragging.height + "px";
+    });
+
+    window.addEventListener("mouseup", function (ev) {
+      if (!dragging) return;
+      const end = timeAt(ev.clientX);
+      const from = Math.min(dragging.start, end), to = Math.max(dragging.start, end);
+      dragging = null;
+      const band = document.getElementById("zoom-marker");
+      if (band) band.style.display = "none";
+
+      // A click is a drag of nothing.  Below a minute there is no finer data to
+      // fetch, so zooming in would magnify one bucket rather than reveal
+      // anything, and the reset would be the only way out of a chart showing a
+      // single point.
+      if (!(to - from > 60)) return;
+
+      zoom = { from: from, to: to };
+      load();
+    });
+  })();
+
+  load();
+
+  // Only keep refreshing while looking at the present.  A zoomed range is a
+  // fixed window somebody is reading, and refetching it every fifteen seconds
+  // redraws the same picture and fights the pointer.
+  setInterval(function () { if (!zoom) load(); }, 15000);
+});
+</script>
+
+{% endblock %}
