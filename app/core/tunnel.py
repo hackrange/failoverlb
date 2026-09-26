@@ -1,30 +1,17 @@
 """
-The tunnel, so a backend never needs a public address.
+WireGuard tunnel so backends do not need a public address.
 
-A workload dials out to the load balancers over WireGuard, and the pools reach
-it back down the same tunnel.  Nothing inbound has to be opened at the customer
-end, and the data centre never has to put the machine on the internet.
+A workload dials out to the load balancers and pools reach it back over the
+same tunnel, so nothing inbound has to be opened on the workload side.
 
-What this deliberately does not do
-----------------------------------
+It is not a VPN: the workload only gets routes to the cluster's tunnel
+addresses, with no default route or change to its own egress.  It is not a
+mesh either: each peer's AllowedIPs is its single host address, on both ends,
+so workloads cannot reach each other or the cluster network.
 
-**It is not a VPN.**  The workload gets a route to the cluster's tunnel
-addresses and nothing else.  No default route, no outbound internet, no change
-to where the workload's own traffic goes.  A tunnel that quietly becomes
-somebody's gateway breaks their monitoring and their egress rules, and it is
-the fastest way to have this banned by a security team.
-
-**It is not a mesh.**  Each peer is allowed exactly one address, its own.  A
-workload cannot reach another workload, and it cannot reach anything on the
-cluster's own network.  That is enforced at both ends: AllowedIPs here is a
-single host, and the script writes the same on the workload.
-
-Every node, not just the active one
------------------------------------
-
-Both nodes hold a peer entry for every workload, because a pool is used by
-whichever node is serving.  A workload peered with only the active node goes
-dark at the first failover and looks exactly like a backend that has died.
+Every node holds a peer entry for every workload, since a pool is served by
+whichever node is active.  Peering with only the active node would break at
+the first failover.
 """
 import ipaddress
 import logging
@@ -35,9 +22,8 @@ from app.models import TunnelNetwork, TunnelNodeKey, TunnelPeer
 
 log = logging.getLogger("nfm.tunnel")
 
-# How long an enrolment ticket is good for.  Long enough to walk to another
-# machine and paste a command, short enough that one left in a chat log is not
-# a way in next week.
+# Enrollment ticket lifetime.  Long enough to paste a command on another
+# machine, short enough that a leaked ticket soon stops working.
 ENROL_MINUTES = 120
 
 
@@ -48,11 +34,9 @@ def private_ranges():
 
 def check_cidr(value: str):
     """
-    The tunnel range has to be private, and big enough to be worth having.
-
-    Refused rather than warned about.  A tunnel handing out public addresses is
-    a routing accident that will be blamed on something else entirely, and it
-    is not the kind of mistake somebody spots by reading a settings page.
+    Validate the tunnel range: IPv4, RFC 1918 private, and /29 or larger.
+    A public range is refused outright since it causes hard-to-trace routing
+    problems.
     """
     try:
         network = ipaddress.ip_network(value, strict=True)
@@ -87,13 +71,10 @@ def node_addresses(session, network):
 
 def addresses_pools_point_at(session, network):
     """
-    Tunnel addresses that a backend pool still names.
+    Tunnel addresses still referenced by a pool member.
 
-    A pool member is an address, not a machine.  Remove a workload and the
-    member pointing at it is left behind, and the moment that address is given
-    to a different workload the pool starts sending production traffic there,
-    silently.  The Tunnel page tells people to put the address in a pool, so
-    this is the normal case rather than a corner of one.
+    Pool members outlive the workload they pointed at, so handing such an
+    address to a new workload would silently send it production traffic.
     """
     from app.models import PoolMember
 
@@ -111,23 +92,13 @@ def addresses_pools_point_at(session, network):
 
 def address_problem(session, network, wanted: str) -> str:
     """
-    Why this address cannot be given to a workload, or empty when it can.
+    Why this address cannot be assigned to a workload, or "" if it can.
 
-    Asking for a specific one is allowed, and it has an obvious use: putting a
-    machine back where it was.  A pool member is an address rather than a
-    machine, so re-adding web01 at the address web01 used to have is the one
-    case where reuse is not just safe but the thing you actually want.
-
-    Two things are still refused outright, because neither has a good outcome:
-
-      * an address a load balancer holds, which would make the fleet argue with
-        a workload about who it is
-      * an address another workload already has, which is two machines claiming
-        one identity and whichever handshakes last wins
-
-    A pool pointing at it is **not** refused, only reported.  That is the
-    re-adding case, and telling somebody which pools will start reaching this
-    machine is more use than refusing and making them guess.
+    Requesting a specific address is allowed, mainly to put a re-added
+    workload back at its old address.  Refused: addresses outside the range,
+    network/broadcast, a load balancer's address, or one another workload
+    holds.  An address a pool still names is allowed (that is the re-add
+    case); callers report it via pools_naming().
     """
     net = ipaddress.ip_network(network.cidr)
     try:
@@ -169,18 +140,12 @@ def pools_naming(session, network, address: str) -> list:
 
 def next_free_address(session, network):
     """
-    The next address a workload can have.
+    Next address for a new workload.
 
-    Counts upward and does not go back for gaps, until the top of the range is
-    reached.  Reuse was the old rule, on the grounds that a deployment which
-    only counts upward runs out of a /24 while mostly empty.  True, and 250
-    workloads away; what reuse costs is immediate.  An address that belonged to
-    a workload last week means something different this week, to a pool that
-    still points at it, to a firewall rule somebody wrote, and to whoever
-    remembers what used to be there.  None of that announces itself.
-
-    Two things are never handed out, whichever way we are looking: an address
-    in use, and one a pool still names even though the workload has gone.
+    Allocates upward from a high water mark and only falls back to gaps once
+    the top of the range is used, so a freed address is not quickly reused
+    while pools or firewall rules may still refer to it.  Addresses in use or
+    still named by a pool are never returned.
     """
     net = ipaddress.ip_network(network.cidr)
     hosts = list(net.hosts())
@@ -191,9 +156,7 @@ def next_free_address(session, network):
     taken |= set(node_addresses(session, network).values())
     taken |= addresses_pools_point_at(session, network)
 
-    # Where the counting is up to.  Zero on a fleet that predates this, which
-    # reads as "start after the nodes" and is right: everything below is either
-    # in use or was never used at all.
+    # Unset on older installs, which means "start after the node addresses".
     mark = max(int(network.address_high_water or 0), node_count)
 
     for index in range(mark, len(hosts)):
@@ -201,8 +164,7 @@ def next_free_address(session, network):
             network.address_high_water = index + 1
             return str(hosts[index])
 
-    # The top of the range is used up, so gaps are all there is.  Say so,
-    # because from here on an address may have belonged to something else.
+    # Range exhausted above the mark; reuse a gap and log it.
     for index in range(node_count, mark):
         if str(hosts[index]) not in taken:
             log.warning("tunnel range %s is full above %s, reusing the gap at %s",
@@ -214,16 +176,10 @@ def next_free_address(session, network):
 
 async def install_on_fleet():
     """
-    Ask every node to install what the tunnel needs.
-
-    Every node, not the one somebody happens to be looking at.  A workload
-    peers with all of them so it can survive one going away, and a node that
-    cannot carry the tunnel is a failover that does not work, discovered at
-    the worst moment.
+    Install the tunnel packages on every node, not just this one, so the
+    tunnel survives a failover.
     """
-    # Imported here rather than at the top, like every other function that
-    # reaches the cluster.  These pull in the manager and the manager pulls in
-    # this, so a top level import is a circular one.
+    # Local imports: the cluster manager imports this module.
     from app.config import get_settings
     from app.core.agent_client import get_agent
     from app.core.cluster import PeerClient, get_cluster
@@ -255,9 +211,6 @@ async def install_on_fleet():
 
 async def install_status():
     """What each node has, and how any install in flight is going."""
-    # Imported here rather than at the top, like every other function that
-    # reaches the cluster.  These pull in the manager and the manager pulls in
-    # this, so a top level import is a circular one.
     from app.config import get_settings
     from app.core.agent_client import get_agent
     from app.core.cluster import PeerClient, get_cluster
@@ -282,9 +235,7 @@ async def install_status():
                 "/peer/agent", {"verb": "tunnel_install_status", "payload": {}})
             nodes[node_name] = (answer.get("data") or answer)
         except Exception as exc:
-            # A node we cannot ask is not a node that is ready.  Saying so
-            # beats leaving it out and letting the page imply everything is
-            # fine because nothing said otherwise.
+            # Unreachable counts as not ready rather than being omitted.
             nodes[node_name] = {"error": str(exc), "ready": False, "running": False}
 
     return {
@@ -296,20 +247,12 @@ async def install_status():
 
 def endpoint_host(node) -> str:
     """
-    Pick the address a workload should dial to reach this node.
+    The address a workload should dial to reach this node.
 
-    A peer gets exactly one endpoint, so this is a choice and not a list, and
-    it has to be the one the most machines can actually reach.
-
-    public_ip is whatever the box goes out as, and a dual stack box goes out
-    over IPv6.  That is the right answer for almost everything else we use it
-    for and the wrong one here, because a workload on an IPv4 only network has
-    no way to reach it at all.  It cost a full afternoon of a tunnel that was
-    correct at both ends and carried nothing: one load balancer was published
-    as IPv6 only, so the workload silently never had a route to it.
-
-    So: a public IPv4 first, then the joining address if that is a public IPv4,
-    then whatever is left.  IPv6 is a last resort rather than a preference.
+    Prefers a public IPv4 (public_ip, then the join address) over anything
+    else.  A dual stack node reports an IPv6 public_ip, which a workload on
+    an IPv4-only network cannot reach, and the tunnel then silently carries
+    nothing.
     """
     candidates = [c for c in (node.public_ip, node.address) if c]
 
@@ -317,7 +260,7 @@ def endpoint_host(node) -> str:
         try:
             addr = ipaddress.ip_address(value)
         except ValueError:
-            return False        # a name, which resolves to whatever it resolves to
+            return False        # a hostname
         return addr.version == 4 and addr.is_global
 
     for c in candidates:
@@ -328,10 +271,8 @@ def endpoint_host(node) -> str:
 
 def new_enrol_token(peer) -> str:
     """
-    A ticket that lets one machine onto the tunnel, once.
-
-    Only the hash is stored, the same as the cluster join token, because
-    anybody holding one of these can put a machine on your tunnel.
+    One-time enrollment ticket for a workload.  Only the hash is stored,
+    like the cluster join token.
     """
     from datetime import timedelta
 
@@ -345,12 +286,10 @@ def new_enrol_token(peer) -> str:
 
 def new_psk_token(peer) -> str:
     """
-    A ticket for the one command that puts a key on a workload already on the
-    tunnel.
+    Ticket for adding a pre-shared key to an already enrolled workload.
 
-    Deliberately not the enrolment ticket.  A workload being upgraded keeps its
-    address, its own private key and its place in every pool that points at it,
-    and re-enrolling it would change the first and regenerate the second.
+    Separate from enrollment, which would change its address and regenerate
+    its private key.
     """
     from datetime import timedelta
 
@@ -392,13 +331,11 @@ def peer_for_token(session, token: str):
 
 def new_psk() -> str:
     """
-    A WireGuard pre-shared key: 32 random bytes, base64, same as `wg genpsk`.
+    WireGuard pre-shared key: 32 random bytes, base64, like `wg genpsk`.
 
-    Generated here rather than on the workload because both ends need the same
-    value and this end is the one that can hand it to every load balancer.  It
-    never crosses the wire in a handshake; it is only ever configured at both
-    ends, which is what makes it useful against somebody who has recorded the
-    traffic and later breaks Curve25519.
+    Generated here because every load balancer needs the same value.  It is
+    never sent in a handshake, which is what protects recorded traffic if
+    Curve25519 is later broken.
     """
     import base64
     return base64.b64encode(secrets.token_bytes(32)).decode()
@@ -421,12 +358,9 @@ def set_peer_psk(peer, value: str = None) -> str:
 def wanted_peers(session, network):
     """What every node's interface should contain."""
     return [
-        # The key travels to the agent in the clear, over the peer link, which
-        # is mutual TLS between nodes holding certificates from the same
-        # private CA with a signature on every message.  Same trade the pool
-        # tokens and the private keys already make, and for the same reason: a
-        # key that does not reach every node is a workload that cannot connect
-        # to whichever one is active.
+        # The PSK is sent in the clear to each node's agent, inside the
+        # mutual TLS peer link with signed messages.  Every node needs it for
+        # the workload to connect after a failover.
         {"name": p.name, "address": p.address, "public_key": p.public_key,
          "psk": peer_psk(p)}
         for p in session.query(TunnelPeer)
@@ -439,12 +373,8 @@ def wanted_peers(session, network):
 
 async def apply_to_fleet(session=None):
     """
-    Push the interface and the peer list to every node.
-
-    Every node, always, rather than only the one that happens to be active.
-    The whole point is that a pool member stays reachable across a failover,
-    and a peer list that exists on one box only is exactly the failure this is
-    meant to prevent.
+    Push the interface and peer list to every node, so pool members stay
+    reachable after a failover.
     """
     from app.config import get_settings
     from app.core.agent_client import get_agent
@@ -505,10 +435,9 @@ async def apply_to_fleet(session=None):
 
 async def ensure_node_keys():
     """
-    Make sure every node has a tunnel key and knows its address.
+    Make sure every node has a tunnel key and address.
 
-    Asked of each node rather than generated centrally, because the private
-    half must never exist anywhere but the box that uses it.
+    Each node generates its own key so the private half never leaves it.
     """
     from app.config import get_settings
     from app.core.agent_client import get_agent
@@ -557,12 +486,10 @@ async def ensure_node_keys():
                 session.add(row)
             row.public_key = public_key
             row.address = str(hosts[i])
-            # An operator's answer beats ours.  Ours is worked out from what
-            # the box says about itself, which is right until it is not.
+            # A manual endpoint override wins over the detected address.
             host = (row.endpoint_override or "").strip() or \
                 endpoints.get(node_name) or ""
-            # Brackets around IPv6, or the colon before the port is just
-            # another colon in the address and wg refuses the whole endpoint.
+            # IPv6 needs brackets or wg cannot tell the port apart.
             if ":" in host and not host.startswith("["):
                 host = f"[{host}]"
             row.endpoint = f"{host}:{network.listen_port}"

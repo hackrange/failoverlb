@@ -38,9 +38,8 @@
 
 <div id="charts"></div>
 
-{# Hidden unless a pool is actually set up to be asked.  Most fleets will never
-   set one, and a heading over a row of cards saying nothing is measured is the
-   same clutter as a panel listing what the page does not do. #}
+{# Hidden unless a pool is set up to be polled. Most fleets never set one, and
+   an empty heading over cards saying nothing is measured is just clutter. #}
 <div id="member-section" hidden>
   <h2 class="section-heading">Backends</h2>
   <div id="member-charts"></div>
@@ -89,10 +88,9 @@
 // Waits for app.js, which the layout loads after this block.
 document.addEventListener("DOMContentLoaded", function () {
 
-  // Two lines is all this page ever draws at once, one per node, so the
-  // palette is small on purpose.  Chosen to stay apart for the common kinds of
-  // colour blindness, and never the only difference between two lines: each
-  // one is named in the legend and the readout says which is which.
+  // Only two lines per chart, one per node, so the palette is small. Chosen
+  // to stay distinct for common color blindness, and never the only cue:
+  // the legend and readout name each line.
   const COLOURS = ["#1f6feb", "#d97706", "#0f766e", "#9333ea"];
 
   const CHARTS = [
@@ -119,9 +117,8 @@ document.addEventListener("DOMContentLoaded", function () {
       const l = d.latest || {};
       const r = d.rates || {};
 
-      // Stored history hands back the last bucket in the range, which on a
-      // zoom into last Tuesday is last Tuesday's number.  Say so, or a tile
-      // reads as the present tense while somebody is looking at the past.
+      // Stored history returns the last bucket in the range, which for a
+      // zoom into the past is a past number. Say so.
       let when = "";
       if (d.as_of && Date.now() / 1000 - d.as_of > 150) {
         const t = new Date(d.as_of * 1000);
@@ -156,13 +153,12 @@ document.addEventListener("DOMContentLoaded", function () {
 
   // ----------------------------------------------------------------- charts
   //
-  // Inline SVG rather than a charting library, because the GUI has no build
-  // step and no CDN by design: this is a tool somebody opens when the network
-  // is the problem.  A few hundred points and a couple of lines is well within
-  // what SVG draws properly, with real axes rather than a sparkline.
+  // Inline SVG rather than a charting library: the GUI has no build step and
+  // no CDN by design, since it gets opened when the network is the problem.
+  // A few hundred points is well within what SVG handles.
   function niceMax(value) {
-    // Round the top of the scale up to something a person would choose, so the
-    // gridlines land on readable numbers instead of 37.4.
+    // Round the top of the scale up to a number a person would pick, so
+    // gridlines land on readable values.
     if (value <= 1) { return 1; }
     const mag = Math.pow(10, Math.floor(Math.log10(value)));
     const scaled = value / mag;
@@ -172,20 +168,15 @@ document.addEventListener("DOMContentLoaded", function () {
 
   // How wide to draw, in real pixels.
   //
-  // The viewBox has to match the size the SVG is actually displayed at.  A
-  // fixed viewBox stretched to fit with preserveAspectRatio="none" scales x and
-  // y by different amounts, which makes a 2px line an ellipse and squashes the
-  // axis text sideways.  It looks fine at the width it was designed for and
-  // gets worse the wider the window, which is exactly when somebody notices.
-  //
-  // Measuring instead means the geometry is always right, at any size, and the
-  // cost is redrawing on resize.
+  // The viewBox has to match the displayed size. A fixed viewBox with
+  // preserveAspectRatio="none" scales x and y differently, turning a 2px line
+  // into an ellipse and squashing the axis text, worse the wider the window.
+  // Measuring keeps the geometry right; the cost is redrawing on resize.
   function chartWidth() {
     const box = el("charts");
     const w = box ? box.clientWidth : 0;
-    // A floor so the maths stays sane on a very narrow phone, and a ceiling so
-    // an ultrawide monitor does not get a line one pixel tall stretched across
-    // three thousand points.
+    // A floor for very narrow phones, and a ceiling so an ultrawide monitor
+    // does not stretch a few thousand points absurdly.
     return Math.max(360, Math.min(w || 1000, 2400));
   }
 
@@ -214,9 +205,8 @@ document.addEventListener("DOMContentLoaded", function () {
         'readings, and they are taken every fifteen seconds.</div></div>';
     }
 
-    // Zero based unless the numbers are a percentage with its own ceiling.
-    // Starting an axis at the minimum makes ordinary noise look like a crisis,
-    // which is the most common way a chart lies.
+    // Zero based unless it is a percentage with its own ceiling. Starting at
+    // the minimum makes ordinary noise look like a crisis.
     const top = spec.max ? spec.max : niceMax(peak * 1.15 || 1);
     const W = chartWidth(), H = 190, padL = 46, padR = 12, padT = 12, padB = 26;
     const plotW = W - padL - padR, plotH = H - padT - padB;
@@ -255,22 +245,15 @@ document.addEventListener("DOMContentLoaded", function () {
       const pts = seriesByNode[n];
       if (pts.length < 2) { return; }
 
-      // A gap longer than a few sample intervals is a gap, not a straight line
-      // across it.  Joining them would invent numbers for exactly the moments
-      // worth looking at: a restart, or a node nobody could reach.
+      // A gap longer than a few sample intervals is drawn as a gap, not
+      // joined, so restarts and unreachable nodes are not papered over.
       //
-      // **The interval has to be measured, not assumed.**  This was a fixed 45
-      // seconds, which is right for the fifteen second live samples it was
-      // written against and wrong for everything else.  Stored history arrives
-      // in one minute buckets, and five minute ones further back, so every
-      // single point was more than 45 seconds from the last and counted as a
-      // gap.  The path came out as nothing but moveto commands and the chart
-      // drew no line at all, while the data sat there and the page cheerfully
-      // reported how many minutes it covered.
+      // The interval is measured, not assumed. A fixed 45 seconds suited the
+      // fifteen second live samples, but stored history comes in one and five
+      // minute buckets, so every point counted as a gap and no line was drawn.
       //
-      // The middle gap is used rather than the average, so one real outage in
-      // the middle of the window does not stretch the threshold far enough to
-      // hide the next one.
+      // Median rather than mean, so one real outage does not stretch the
+      // threshold enough to hide the next.
       const steps = [];
       for (let k = 1; k < pts.length; k++) { steps.push(pts[k].at - pts[k - 1].at); }
       steps.sort(function (a, b) { return a - b; });
@@ -281,9 +264,8 @@ document.addEventListener("DOMContentLoaded", function () {
       for (let k = 0; k < pts.length; k++) {
         const p = pts[k];
         const jumped = k > 0 && (p.at - pts[k - 1].at) > gapAt;
-        // A missing value is a hole, not a zero.  One NaN in the path data
-        // makes the browser throw the whole line away, so a single gap in one
-        // series would blank an entire chart.
+        // A missing value is a hole, not a zero. One NaN in the path data
+        // makes the browser drop the whole line.
         if (p.value === null || p.value === undefined || isNaN(p.value)) {
           pen = false;
           continue;
@@ -335,9 +317,8 @@ document.addEventListener("DOMContentLoaded", function () {
       return drawChart(s, nodes);
     }).join("");
 
-    // How far back the numbers really go, said out loud.  A window of an hour
-    // drawn from four minutes of samples is not an hour of history, and a
-    // chart that does not say so is one somebody draws conclusions from.
+    // Say how far back the data really goes. An hour window drawn from four
+    // minutes of samples is not an hour of history.
     let oldest = Infinity, count = 0;
     Object.keys(nodes).forEach(function (n) {
       const s = ((nodes[n] || {}).series || {}).cpu_percent || [];
@@ -358,8 +339,7 @@ document.addEventListener("DOMContentLoaded", function () {
     }
   }
 
-  // Hovering reads out the value under the pointer for every line at once,
-  // which is what somebody actually wants: the question is nearly always
+  // Hover reads out every line at the pointer, since the usual question is
   // whether one node differs from the other at that moment.
   el("charts").addEventListener("mousemove", function (ev) {
     const hit = ev.target.closest(".hit");
@@ -412,20 +392,17 @@ document.addEventListener("DOMContentLoaded", function () {
 
   // ------------------------------------------------------- the backends
   //
-  // A chart per pool with a line per backend, rather than a chart per backend.
-  // The question about a pool is nearly always whether one member is working
-  // harder than the others, and that is a comparison, so they belong on one
-  // pair of axes.
+  // One chart per pool with a line per backend. The usual question is
+  // whether one member works harder than the rest, which needs one set of
+  // axes.
   function drawMembers(data) {
     lastMembers = data;
     LAST_MEMBERS = data.pools || {};
     const configured = data.configured || {};
 
-    // Only the pools somebody has actually pointed at an endpoint.  A pool
-    // that publishes nothing is the normal case and has nothing to say here,
-    // so the whole section stays out of the way rather than filling the page
-    // with cards explaining their own absence.  The pool's own page is where
-    // it says how to turn this on.
+    // Only pools pointed at an endpoint. Most pools publish nothing, so the
+    // section stays hidden rather than filling up with empty cards. The pool
+    // page explains how to turn it on.
     const poolNames = Object.keys(configured).filter(function (p) {
       return configured[p];
     }).sort();
@@ -479,10 +456,9 @@ document.addEventListener("DOMContentLoaded", function () {
     el("member-charts").innerHTML = out.join("");
   }
 
-  // The range currently drawn.  null means "the last N minutes", which is what
-  // the picker means and is what keeps refreshing forward in time.  A zoom
-  // sets an explicit start and end and stops the clock, because a chart that
-  // slides while somebody is reading the spike they zoomed into is useless.
+  // The range being drawn. null means "the last N minutes" and keeps moving
+  // forward. A zoom sets explicit start and end and stops the clock, so the
+  // chart does not slide while someone is reading it.
   let zoom = null;
 
   function describe(from, to) {
@@ -517,8 +493,7 @@ document.addEventListener("DOMContentLoaded", function () {
         "/metrics/history?start=" + (now - minutes * 60) + "&end=" + now);
       if (coverage(fromDisk) > coverage(payload)) { return fromDisk; }
     } catch (err) {
-      // Keep the live payload.  A missing history is not a reason to draw
-      // nothing when there is something in memory.
+      // Keep the live payload rather than draw nothing.
     }
     return payload;
   }
@@ -526,11 +501,9 @@ document.addEventListener("DOMContentLoaded", function () {
   async function load() {
     const minutes = parseInt(el("window").value, 10);
 
-    // Under two hours the live in memory samples are finer than anything
-    // stored, so they stay the source for the short windows this page was
-    // built for.  Anything longer, or any zoom, comes from what was written
-    // down.  Both arrive in the same shape, so one drawing routine covers
-    // them and a zoomed chart cannot render differently from a live one.
+    // Under two hours the in memory samples are finer than anything stored,
+    // so they stay the source for short windows. Longer windows and zooms use
+    // stored history. Both have the same shape, so one routine draws both.
     const stored = zoom !== null || minutes > 120;
 
     let url;
@@ -547,14 +520,11 @@ document.addEventListener("DOMContentLoaded", function () {
     try {
       let payload = await NFM.api(url);
 
-      // Use what was written down when memory does not cover the window.
+      // Use stored history when memory does not cover the window. The in
+      // memory samples reset when the manager restarts, so right after a
+      // restart memory covers only a minute or two.
       //
-      // The in memory samples start again from nothing when the manager
-      // restarts, so a minute after a restart this drew one minute and said it
-      // could not cover the window asked for, while the history sat on disk
-      // unread.  That is the whole reason the history exists.
-      //
-      // Live is still preferred when it does cover the window, because fifteen
+      // Live is still preferred when it does cover the window, since fifteen
       // second samples are finer than one minute buckets.
       if (!stored) {
         payload = await preferStored(payload, minutes);
@@ -576,9 +546,8 @@ document.addEventListener("DOMContentLoaded", function () {
         "Could not load: " + (err && err.message ? err.message : err);
     }
 
-    // The backends only have live numbers, so a zoom into last Tuesday has
-    // nothing to show for them.  Said rather than drawn as an empty chart,
-    // which reads as zero traffic.
+    // Backends only have live numbers, so a zoom into the past has nothing
+    // for them. Say so rather than draw an empty chart that reads as zero.
     try {
       if (zoom) {
         el("member-charts").innerHTML =
@@ -596,9 +565,8 @@ document.addEventListener("DOMContentLoaded", function () {
     if (out) { out.hidden = zoom === null; }
   }
 
-  // Redraw when the window changes size, because the geometry is measured
-  // rather than scaled.  Debounced: a drag across the screen fires this
-  // continuously and redrawing five charts on every pixel is wasteful.
+  // Redraw on resize, since the geometry is measured rather than scaled.
+  // Debounced so dragging the window edge does not redraw every pixel.
   let resizeTimer = null;
   let lastPayload = null;
   let lastMembers = null;
@@ -612,16 +580,11 @@ document.addEventListener("DOMContentLoaded", function () {
 
   el("window").addEventListener("change", function () { zoom = null; load(); });
 
-  // Refresh says when it last fetched.
+  // Show when data was last fetched.
   //
-  // The button always worked and looked broken, which is a fair conclusion:
-  // it redraws the same window, and over fifteen seconds the numbers barely
-  // move, so pressing it changed nothing anybody could see.  Changing the
-  // window looked like it worked only because the chart obviously changed.
-  //
-  // So the page now says when the numbers were last fetched, which is worth
-  // knowing on a monitoring page anyway, and the button greys out while it is
-  // working so a slow fetch is visible rather than looking like a dead click.
+  // Refresh redraws the same window, and over fifteen seconds the numbers
+  // barely move, so the button looked broken. Showing the fetch time, and
+  // graying the button while working, makes it visibly do something.
   el("refresh").addEventListener("click", async function () {
     const button = el("refresh");
     button.disabled = true;
@@ -637,36 +600,26 @@ document.addEventListener("DOMContentLoaded", function () {
     zoomOut.addEventListener("click", function () { zoom = null; load(); });
   }
 
-  // Drag across any chart to zoom every chart to that range.
-  //
-  // Every chart, not the one under the pointer.  Half the value of this page is
-  // seeing that a request rate spike and a memory climb happened at the same
-  // moment, and that comparison is destroyed the instant each chart carries its
-  // own window.
+  // Drag across any chart to zoom every chart to that range. All of them,
+  // because the point is seeing that a request spike and a memory climb
+  // happened at the same moment.
   (function dragToZoom() {
     const area = el("charts");
     if (!area) return;
     let dragging = null;
 
-    // The measurements are read once, at mousedown, rather than taken from the
-    // element again at mouseup.  Every chart is replaced on each refresh, so a
-    // drag that spans one would otherwise measure an element that has been
-    // thrown away, and a detached element reports zero width.
+    // Measure once at mousedown. Charts are replaced on each refresh, and a
+    // detached element reports zero width at mouseup.
     function timeAt(clientX) {
       const frac = Math.max(0, Math.min(1,
         (clientX - dragging.left) / dragging.width));
       return dragging.from + frac * (dragging.to - dragging.from);
     }
 
-    // The band showing what is being selected.
+    // The band showing the selection, so the drag visibly does something.
     //
-    // Without it the drag worked and gave no sign of working, which is the
-    // same problem the Refresh button had: doing the job invisibly is
-    // indistinguishable from not doing it.
-    //
-    // Parented to the body rather than the chart, because the charts are
-    // replaced wholesale on every refresh and anything inside one would be
-    // thrown away mid drag.
+    // Attached to the body rather than the chart, because charts are replaced
+    // on every refresh and anything inside one would vanish mid drag.
     function marker() {
       let box = document.getElementById("zoom-marker");
       if (!box) {
@@ -713,10 +666,8 @@ document.addEventListener("DOMContentLoaded", function () {
       const band = document.getElementById("zoom-marker");
       if (band) band.style.display = "none";
 
-      // A click is a drag of nothing.  Below a minute there is no finer data to
-      // fetch, so zooming in would magnify one bucket rather than reveal
-      // anything, and the reset would be the only way out of a chart showing a
-      // single point.
+      // A click is a zero width drag. Below a minute there is no finer data,
+      // so zooming would just magnify one bucket.
       if (!(to - from > 60)) return;
 
       zoom = { from: from, to: to };
@@ -726,9 +677,9 @@ document.addEventListener("DOMContentLoaded", function () {
 
   load();
 
-  // Only keep refreshing while looking at the present.  A zoomed range is a
-  // fixed window somebody is reading, and refetching it every fifteen seconds
-  // redraws the same picture and fights the pointer.
+  // Only auto refresh while showing the present. A zoomed range is a fixed
+  // window, and refetching it just redraws the same picture and fights the
+  // pointer.
   setInterval(function () { if (!zoom) load(); }, 15000);
 });
 </script>

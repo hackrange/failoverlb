@@ -1,14 +1,10 @@
 """
 The JSON API.
 
-Every route in here follows the same three steps and in the same order:
-
-  1. Work out who is asking (the session cookie).
-  2. Check CSRF, for anything that changes something.
-  3. Fetch objects only through ObjectGuard, which does the permission check.
-
-Step three is what keeps the BOLA and IDOR bugs out.  There is no route that
-queries a table by id directly, so there is no route that can forget the check.
+Every route works out who is asking from the session cookie, checks CSRF for
+anything that writes, and fetches objects only through ObjectGuard, which does
+the permission check.  No route queries a table by id directly, so none can
+forget the check (this is what keeps BOLA/IDOR bugs out).
 """
 
 import asyncio
@@ -125,15 +121,11 @@ async def changing(request: Request, db: DBSession = Depends(get_db)) -> ObjectG
 
 def _name_peers(model):
     """
-    Everything a name has to be unique against, which is not always one table.
+    The tables a name must be unique across.
 
-    nginx keeps a single list of shared memory zones for the whole http block,
-    so a rate limit zone and a connection limit zone called the same thing are
-    not two names, they are one name declared twice for different uses.  nginx
-    refuses that outright, and it refuses it on every node, so the fleet stops
-    being able to apply anything at all until somebody works out which of the
-    two zones is the new one.  Checking only within a kind, which is what
-    creating used to do, lets that straight through.
+    nginx has one namespace for shared memory zones in the http block, so rate
+    limit, connection limit and cache zones cannot share a name.  A clash makes
+    nginx refuse the config on every node.
     """
     zones = (RateLimitZone, ConnLimitZone, CacheZone)
     return zones if model in zones else (model,)
@@ -141,29 +133,22 @@ def _name_peers(model):
 
 def claim_name(session, model, name, what, exclude_id=None):
     """
-    Refuse a name something else is already using.
+    Refuse a name something else is already using (create and rename).
 
-    Creating has always checked this.  Renaming never did, and the two go
-    through different code, so a rename onto a name in use went straight
-    through.  For a pool that is worse than a duplicate create would have been,
-    because nothing fails: the render keys its files by the name, so the second
-    pool written wins, the first one's upstream is simply not in the config, and
-    the apply succeeds.  A site pointed at the pool that lost then sends its
-    traffic to the other pool's backends and nobody is told.
+    A pool renamed onto a taken name is silent: the render keys files by name,
+    so one upstream overwrites the other and sites quietly route to the wrong
+    backends.
 
-    The comparison is on the rendered form of the name rather than the name as
-    typed, because that is what decides whether two objects collide.  For a pool
-    it is stricter again: sticky sessions turn the name into an nginx variable,
-    and a variable cannot hold a dot or a dash, so two pools called `shop-eu`
-    and `shop_eu` are different rows sharing one `$sticky_shop_eu`.
+    We compare rendered names, since that is what collides.  Pools are also
+    checked on the sticky-session variable form, which folds dots and dashes,
+    so `shop-eu` and `shop_eu` would share `$sticky_shop_eu`.
     """
     wanted = safe_name(name)
     wanted_var = safe_var(name) if model is Pool else None
 
     for peer in _name_peers(model):
         for other in session.query(peer).all():
-            # Only the row being renamed is allowed to keep its own name, and
-            # ids only mean anything within their own table.
+            # Skip the row being renamed.  Ids only match within one table.
             if exclude_id is not None and peer is model and other.id == exclude_id:
                 continue
             if safe_name(other.name) == wanted:
@@ -190,10 +175,10 @@ def claim_name(session, model, name, what, exclude_id=None):
 
 def render_current(session, ignore_health: bool = False) -> tuple:
     """
-    Turn everything in the database into config files.
+    Render everything in the database into config files.
 
-    Gives back (files, checksum, snapshot).  The snapshot is what gets stored
-    against the version so you can see what the config looked like then.
+    Returns (files, checksum, snapshot).  The snapshot is stored with the
+    version so you can see what the config looked like at the time.
     """
     settings = get_settings()
 
@@ -210,9 +195,8 @@ def render_current(session, ignore_health: bool = False) -> tuple:
     nodes = session.query(Node).all()
 
     # Every node's address goes into the management allow list, so our own
-    # health checks and peer traffic never get blocked by an ACL somebody wrote
-    # for the public.  This is the bit that means adding a node later does not
-    # need anybody to remember to update a list.
+    # health checks and peer traffic are never blocked by a user ACL, and new
+    # nodes are covered automatically.
     node_addresses = []
     for node in nodes:
         if node.address:
@@ -222,10 +206,8 @@ def render_current(session, ignore_health: bool = False) -> tuple:
             if addr and entry.get("scope") == "global":
                 node_addresses.append(addr)
 
-    # Read out as plain dictionaries rather than handed to the renderer as
-    # rows.  The renderer outlives this session in some callers, and a row read
-    # after its session closes is a 500 on one path only, which is a bug this
-    # project has already spent an afternoon on.
+    # Plain dicts, not rows.  Some callers use the renderer after this
+    # session closes, and touching a detached row there raises.
     waf_profiles = [
         {
             "name": p.name,
@@ -234,9 +216,8 @@ def render_current(session, ignore_health: bool = False) -> tuple:
                  "message": e.message or ""}
                 for e in p.exclusions
             ],
-            # The positive model, if this profile has one.  A profile can carry
-            # exclusions, a surface, or both, because they are two halves of
-            # one policy for one application.
+            # Positive model, if any.  A profile may have exclusions, a
+            # surface, or both.
             "surface": [
                 {"path": e.path, "methods": e.method_list()}
                 for e in p.surface
@@ -245,13 +226,9 @@ def render_current(session, ignore_health: bool = False) -> tuple:
         for p in session.query(WafProfile).all()
     ]
 
-    # Sessions that are recording the surface right now.
-    #
-    # The renderer needs these because a recording session changes the config:
-    # full audit logging is switched on for the tester addresses and for nobody
-    # else, so what the log holds is the shape of the application rather than
-    # the shape of the attacks against it.  It goes off again when the session
-    # ends, which is why this is read per render rather than stored on the site.
+    # Sessions recording the surface right now.  While one runs, full audit
+    # logging is on for the tester addresses only, so the renderer has to know.
+    # Read per render because it goes away when the session ends.
     waf_recording = {}
     for row in session.query(WafSession).filter(WafSession.ended_at.is_(None)).all():
         host = session.get(VirtualHost, row.host_id)
@@ -266,9 +243,8 @@ def render_current(session, ignore_health: bool = False) -> tuple:
         waf_recording=waf_recording,
         settings={
             "node_name": settings.node_name,
-            # What an admin typed on the settings page, falling back to the GUI
-            # allow list when nothing has been set there yet.  Those are two
-            # different things, but the allow list is a sensible starting guess.
+            # Falls back to the GUI allow list until set on the settings
+            # page.  Not the same thing, but a sensible default.
             "management_networks": (
                 settings_store.get("management_networks")
                 or [str(n) for n in settings.admin_networks]
@@ -281,9 +257,8 @@ def render_current(session, ignore_health: bool = False) -> tuple:
         error_templates=error_templates,
     )
 
-    # The objects themselves, not a count of them.  This is what lets a node
-    # that was a standby put the config back when it gets promoted, and it used
-    # to be four numbers, which restored nothing.
+    # Full objects, not counts, so a standby promoted later can restore the
+    # config from this.
     snapshot = snapshot_capture(session)
     snapshot["counts"] = {
         "hosts": len(hosts),
@@ -298,16 +273,15 @@ def render_current(session, ignore_health: bool = False) -> tuple:
 async def apply_current_config(author: str = "system", summary: str = "",
                                force: bool = False) -> dict:
     """
-    Render everything and push it out to the fleet.
+    Render everything and push it to the fleet.
 
-    This is the one path everything uses.  The health checker calls it when a
-    backend changes state, and the API calls it when somebody saves.  Having one
-    path means the two phase apply and the queueing behave the same either way.
+    The single path used by both the health checker and API saves, so the two
+    phase apply and queueing behave the same either way.
     """
     with session_scope() as session:
         files, checksum, snapshot = render_current(session)
-        # The same render with health ignored, stored alongside, so the
-        # "saved but not live" banner has something honest to compare against.
+        # Same render with health ignored, for the "saved but not live"
+        # banner to compare against.
         _f, user_checksum, _s = render_current(session, ignore_health=True)
 
     return await get_cluster().apply_config(
@@ -370,34 +344,25 @@ async def status(request: Request, db: DBSession = Depends(get_db)):
 
 def _pending_config(session) -> dict:
     """
-    Is there anything saved that nginx has not been given yet.
+    Is there saved config that nginx has not been given yet.
 
-    Saving and applying are deliberately separate, so you can make three related
-    changes and push them out together rather than reloading nginx three times
-    and living through two half finished states.  The cost of that split is that
-    saving looks finished when it is not, and the config quietly drifts from
-    what is running until somebody notices.
-
-    Worked out by rendering what the config would be now and comparing it to the
-    version that actually went out.  A stored flag would be cheaper and would
-    lie the moment anything changed a row without going through the page that
-    sets it.  This cannot drift, because it is the same render the apply itself
-    would do.
+    Saving and applying are separate so related changes can go out together.
+    We work this out by rendering now and comparing to the last applied
+    version, rather than keeping a flag that could drift.
     """
     try:
         _files, _checksum, _snapshot = render_current(session, ignore_health=True)
         checksum = _checksum
     except Exception as exc:
-        # A render that blows up is its own problem and the apply will report it
-        # properly.  Do not take the whole status endpoint down over it.
+        # The apply will report a broken render properly.  Don't fail the
+        # status endpoint over it.
         log.warning("could not work out whether config is pending: %s", exc)
         return {"dirty": False, "error": str(exc)[:200]}
 
     latest = session.query(ConfigVersion).order_by(ConfigVersion.version.desc()).first()
 
-    # An older row has no user_checksum, from before this existed.  Treat that
-    # as nothing pending rather than showing a banner nobody can clear, since
-    # the next apply fills it in.
+    # Rows from before user_checksum existed: treat as nothing pending, since
+    # the next apply fills it in and a banner nobody can clear is worse.
     known = latest.user_checksum if latest else None
     return {
         "dirty": bool(latest is None or (known is not None and known != checksum)),
@@ -409,15 +374,10 @@ def _pending_config(session) -> dict:
 @router.get("/config/pending")
 async def pending_config_diff(g: ObjectGuard = Depends(guard)):
     """
-    Show what applying would actually change, line by line.
-
-    Knowing that something is unapplied is only half an answer.  The other half
-    is what, and without it the only way to find out is to apply and watch,
-    which is the wrong order for anything that touches a load balancer.
+    Show what applying would change, line by line.
 
     Diffed against the files the last applied version actually shipped, not a
-    fresh render of it, so this is a genuine before and after rather than two
-    guesses about the same thing.
+    re-render of it.
     """
     files, _checksum, _snapshot = render_current(g.session)
     latest = g.session.query(ConfigVersion).order_by(ConfigVersion.version.desc()).first()
@@ -445,8 +405,7 @@ async def pending_config_diff(g: ObjectGuard = Depends(guard)):
             lineterm="",
             n=2,
         ))
-        # A whole new file diffs as one huge block of additions, which is true
-        # and unreadable.  Enough to see what it is, not the entire thing.
+        # New files would diff as one huge addition, so just show the start.
         changes.append({
             "path": path,
             "kind": kind,
@@ -466,25 +425,13 @@ async def pending_config_diff(g: ObjectGuard = Depends(guard)):
 # The feature catalog, which is also where the help text comes from
 # ==============================================================================
 
-# Settings whose choices are rows in the database rather than a list in the
-# catalog.
+# Settings whose choices are database rows rather than catalog options.  The
+# catalog is static, so these features have `options=[]` and are filled in at
+# request time.
 #
-# The catalog is deliberately static: it describes nginx, and nginx does not
-# change while the process is running.  A zone is something somebody made an
-# hour ago, so these three features carry `options=[]` and get their choices
-# filled in at request time.
-#
-# **Both sides have to know that, and for a long time only one did.**  The
-# catalog endpoint filled the dropdowns from the database, so the site editor
-# offered real zones.  The validator did not, so `validate_value` ran the
-# select check against an empty option list and refused every value, including
-# the ones the page had just offered.  Caching, rate limiting and connection
-# limiting could each be chosen and none of them could be saved: the answer was
-# a 400 reading "has to be one of:" with nothing after the colon.
-#
-# One dict now, read by both, so the two cannot drift apart again.  Adding a
-# fourth means adding it here and nowhere else, and checks/catalog_sweep.py
-# fails if a select with no options is missing from it.
+# Both the catalog endpoint and the validator read this dict.  They used to
+# disagree, so the editor offered zones the save then refused with an empty
+# "has to be one of:".  Any select with no options must be listed here.
 ZONE_CHOICES = {
     "limit_req_zone_name": (RateLimitZone, "rate limit zone", "Rate limits"),
     "limit_conn_zone_name": (ConnLimitZone, "connection limit zone", "Rate limits"),
@@ -496,26 +443,19 @@ ZONE_CHOICES = {
 async def catalog(request: Request, context: str = "server",
                   db: DBSession = Depends(get_db)):
     """
-    Every setting available in this context, on this box.
+    Every setting available in this context on this box.
 
-    The GUI builds its forms from this, and the ? popups read the same data, so
-    the help can never end up describing something the form does not do.
+    The forms and the ? help popups both come from this, so they cannot
+    disagree.
     """
     get_user(request, db)
-    # The fleet view, not this node's.  Offering something only some of your
-    # boxes were built with produces a change that will not apply and no
-    # obvious reason why.
+    # Fleet-wide capabilities, not this node's.  Offering something only some
+    # nodes support gives a change that will not apply.
     caps = fleet_capabilities()
     version = caps.version_tuple
 
-    # The zone pickers have no fixed choices, they are whatever you have made.
-    # Filling them here means the site editor offers real zones rather than an
-    # empty dropdown nobody can use.
-    #
-    # The keys come from ZONE_CHOICES, which the validator also reads, so a
-    # picker can never again offer something the save refuses.  Only the label
-    # is written out per zone type, because what is worth showing beside a name
-    # differs: a rate for a rate limit, a size for a cache.
+    # Zone pickers are filled from the database.  Keys come from ZONE_CHOICES,
+    # which the validator also uses; only the label differs per zone type.
     _blank = {"limit_req_zone_name": "no rate limit",
               "limit_conn_zone_name": "no connection limit",
               "proxy_cache_zone": "no caching"}
@@ -538,8 +478,7 @@ async def catalog(request: Request, context: str = "server",
             continue
         if context not in feature.contexts:
             continue
-        # Has a card of its own on the page that uses it, so it is not in the
-        # long list of advanced settings as well.
+        # Has its own card elsewhere, so keep it out of the advanced list.
         if feature.own_screen:
             continue
 
@@ -555,11 +494,8 @@ async def catalog(request: Request, context: str = "server",
             "unit": feature.unit,
             "placeholder": feature.placeholder,
             "advanced": feature.advanced,
-            # Whether SSL offload only mode decides this one, so the form can
-            # grey it out and say why rather than letting somebody set a value
-            # the renderer is going to override.  Read from the renderer's own
-            # list, because two copies of it would drift the first time the mode
-            # covered one more setting.
+            # Forced by SSL offload only mode, so the form can gray it out.
+            # Read from the renderer's own list so the two cannot drift.
             "offload_forced": feature.key in OFFLOAD_ONLY_FORCES,
             "confirm": feature.confirm,
             "depends_on": feature.depends_on,
@@ -598,11 +534,8 @@ async def catalog(request: Request, context: str = "server",
 @router.get("/geoip")
 async def geoip_state(request: Request, db: DBSession = Depends(get_db)):
     """
-    What the fleet has, and every country somebody could pick.
-
-    The country list goes with it rather than in its own call, because the page
-    needs both to draw anything and two round trips would let it render half a
-    picker.
+    The fleet's country database state, plus the country list, in one call so
+    the page never renders half a picker.
     """
     get_user(request, db)
 
@@ -618,7 +551,7 @@ async def geoip_state(request: Request, db: DBSession = Depends(get_db)):
 
 @router.post("/geoip/install")
 async def geoip_install(request: Request, g: ObjectGuard = Depends(changing)):
-    """Fetch the database and put it on every node, now."""
+    """Download the database and install it on every node now."""
     g.require("manage_settings")
 
     from app.core import geoip
@@ -657,7 +590,7 @@ async def waf_rules_state(request: Request, db: DBSession = Depends(get_db)):
 
 @router.post("/waf/rules/install")
 async def waf_rules_install(request: Request, g: ObjectGuard = Depends(changing)):
-    """Fetch the rule set and put it on every node, now."""
+    """Download the rule set and install it on every node now."""
     g.require("manage_settings")
 
     from app.core import waf_rules
@@ -735,10 +668,8 @@ def _profile_users(session, name):
 @router.get("/waf/sessions/{host_id}")
 async def waf_session_state(host_id: int, g: ObjectGuard = Depends(guard)):
     """The learning sessions for one site, newest first."""
-    # Through the guard, which checks the permission and answers 404 rather
-    # than 403, so an id cannot be probed for existence.  This used to fetch
-    # the row itself behind get_user, which only asks whether somebody is
-    # signed in.
+    # Through the guard, so it answers 404 rather than 403 and an id cannot be
+    # probed for existence.
     g.get(VirtualHost, host_id)
     db = g.session
 
@@ -752,32 +683,21 @@ async def waf_session_state(host_id: int, g: ObjectGuard = Depends(guard)):
 async def waf_session_start(host_id: int, request: Request,
                             g: ObjectGuard = Depends(changing)):
     """
-    Begin watching, with the addresses that count as testers.
+    Start a learning session with the given tester addresses.
 
-    **Starting a session never lowers protection.**  A site that is blocking
-    keeps blocking: ModSecurity logs every rule that fires whether or not the
-    score reaches the threshold, so there is nothing to gain by weakening it
-    and a great deal to lose.  Only a site with the firewall off is changed,
-    and it is changed to watching, which refuses nothing.
-
-    A button labelled "start watching" that quietly turned a site's firewall
-    off is the sort of thing that gets found out during an incident.
+    Never lowers protection.  ModSecurity logs every rule that fires regardless
+    of the blocking threshold, so a blocking site keeps blocking.  Only a site
+    with the firewall off is changed, and only up to watching.
     """
     from app.core.waf_hits import parse_addresses
 
     g.require("edit_sites")
     host = g.get(VirtualHost, host_id)
 
-    # There has to be an engine to learn from.
-    #
-    # This is the second door to the same setting and it was not locked.
-    # Setting waf_mode directly is refused on a fleet without the module, but
-    # starting a session writes waf_mode itself, further down, and went round
-    # the check.  It answered success, stored "watching" on a site that cannot
-    # watch anything, and the person running the round would exercise their
-    # whole application before finding out that nothing had been collected.
-    # The stored mode is the worse half: it sits there doing nothing until
-    # somebody builds the module, and then that site quietly starts watching.
+    # Needs the WAF module on the fleet.  Setting waf_mode directly already
+    # checks this, but this path writes waf_mode itself, and used to store
+    # "watching" on a fleet that could not watch: nothing got collected, and
+    # the site would silently start watching if the module was added later.
     feature = get_feature("waf_mode")
     caps = fleet_capabilities()
     if feature and not feature.is_available(caps.modules, caps.version_tuple):
@@ -836,12 +756,10 @@ async def waf_session_start(host_id: int, request: Request,
 async def waf_session_stop(session_id: int, request: Request,
                            g: ObjectGuard = Depends(changing)):
     """
-    Stop watching, and hand back everything the session found.
+    Stop a session and return what it found.
 
-    Collects and presents; it does not save.  Stopping and whitelisting in one
-    step would rest the whole safeguard on nobody having wandered past during
-    the window, and the point of naming testers is that a person looks at the
-    result before it becomes policy.
+    Does not save anything.  A person should review the results before they
+    become policy, in case someone other than the testers passed through.
     """
     from app.core import waf_hits as hits_mod
 
@@ -856,7 +774,7 @@ async def waf_session_stop(session_id: int, request: Request,
     row.ended_at = utcnow()
     row.ended_by = g.user.username
 
-    # Put the site back where it was, if starting had moved it.
+    # Put the site back to its old mode if starting changed it.
     restored = None
     if (row.previous_mode or "off") in ("", "off"):
         cfg = host.setting_map()
@@ -887,11 +805,9 @@ async def waf_hits_for_host(host_id: int, addresses: str = "",
                             since: float = None, until: float = None,
                             g: ObjectGuard = Depends(guard)):
     """
-    What fired for one site, split into what a tester produced and what did not.
+    What fired for one site, split into tester traffic and everything else.
 
-    `until` is how a session that has already stopped can still be read.  The
-    window was open ended, so the page could only ever ask about the session
-    running right now, and stopping one hid the evidence it had just gathered.
+    `until` lets a stopped session still be read.
     """
     from app.core import waf_hits as hits_mod
 
@@ -916,11 +832,9 @@ async def login_watch_get(host_id: int, g: ObjectGuard = Depends(guard)):
 
 def _login_watch_json(watch):
     if watch is None:
-        # The defaults, so the form has something to draw before anybody saves.
-        # 401 and 403 rather than 200, because guessing that a 200 is a failure
-        # would report every successful login on a form based application as an
-        # attack, and a detector that cries wolf on day one is switched off on
-        # day one.
+        # Defaults so the form can draw before anything is saved.  401 and
+        # 403 rather than 200: treating 200 as failure would flag every
+        # successful form login as an attack.
         return {"configured": False, "enabled": False, "paths": [],
                 "methods": ["POST"], "fail_statuses": [401, 403],
                 "window_seconds": 300, "brute_threshold": 10,
@@ -950,10 +864,8 @@ async def login_watch_save(host_id: int, request: Request,
     """
     Save what counts as a login on this site, and what counts as too many.
 
-    The paths are checked the same way an exclusion path is, because they end
-    up in a comparison rather than in config, and a value nobody validated
-    reaching a comparison is only ever one refactor away from reaching
-    somewhere worse.
+    Paths are validated like exclusion paths even though they only end up in
+    a comparison, not in config.
     """
     g.require("edit_sites")
     host = g.get(VirtualHost, host_id)
@@ -1026,12 +938,10 @@ async def login_watch_save(host_id: int, request: Request,
 @router.get("/login-watch/{host_id}/findings")
 async def login_watch_findings(host_id: int, g: ObjectGuard = Depends(guard)):
     """
-    What the log says right now, over both windows.
+    Current findings over both windows.
 
-    Two windows on purpose.  The short one catches a burst.  The long one
-    catches the same attack run slowly, which is what somebody does once they
-    know detectors use five minute windows, and it is the one most likely to be
-    quietly missing from anybody else's.
+    The short window catches bursts; the long one catches the same attack run
+    slowly to stay under five minute detectors.
     """
     import time as _time
 
@@ -1073,13 +983,11 @@ async def waf_surface_for_host(host_id: int, addresses: str = "",
                                since: float = None, until: float = None,
                                g: ObjectGuard = Depends(guard)):
     """
-    The application's own shape, split by who produced it.
+    The application's surface for a site, split by who produced it.
 
-    The positive model's version of the hits endpoint.  Same window arguments,
-    same split, and the split matters more here: an exclusion learned from a
-    stranger switches one rule off, while a surface entry learned from a
-    stranger permanently allows a path they found, which is the exact thing a
-    positive model exists to stop.
+    Same window arguments and split as the hits endpoint.  The split matters
+    more here: a surface entry learned from a stranger permanently allows a
+    path they found, which is what a positive model is meant to prevent.
     """
     from app.core import waf_hits as hits_mod
 
@@ -1097,13 +1005,10 @@ async def waf_surface_for_host(host_id: int, addresses: str = "",
 async def waf_surface_save(profile_id: int, request: Request,
                            g: ObjectGuard = Depends(changing)):
     """
-    Put a reviewed surface into a profile.
+    Merge a reviewed surface into a profile.
 
-    Merged rather than replaced, because a walk is rarely done in one sitting.
-    Somebody exercises the admin pages on Tuesday and the reporting pages on
-    Thursday, and a save that replaced would throw Tuesday away without saying
-    so.  Removing a path is its own action on the profiles page, where the
-    consequence is visible.
+    Merged, not replaced, since walks are often done over several sittings.
+    Removing a path is a separate action on the profiles page.
     """
     g.require("edit_sites")
     profile = g.get(WafProfile, profile_id)
@@ -1135,9 +1040,8 @@ async def waf_surface_save(profile_id: int, request: Request,
 
         existing = have.get(path)
         if existing:
-            # Methods are added to, never narrowed by a later save.  A second
-            # walk that only did GET must not quietly remove the POST somebody
-            # proved on the first.
+            # Methods only accumulate.  A later GET-only walk must not drop
+            # a POST proven earlier.
             merged = sorted(set(existing.method_list()) | set(methods))
             if merged != existing.method_list():
                 existing.methods = json_set(merged)
@@ -1165,10 +1069,8 @@ async def waf_surface_edit(profile_id: int, entry_id: int, request: Request,
     """
     Change a surface path or the methods it answers.
 
-    The same job as editing an exclusion path and for the same reason: learning
-    produces one row per object it saw, and the useful rule is the pattern
-    behind them.  On a positive model it matters more, because a path that was
-    never generalised means every object created after the walk is refused.
+    Learning produces one row per object seen; editing lets you generalize to
+    the pattern.  Without that, objects created after the walk are refused.
     """
     g.require("edit_sites")
     profile = g.get(WafProfile, profile_id)
@@ -1211,14 +1113,11 @@ async def waf_surface_edit(profile_id: int, entry_id: int, request: Request,
 async def waf_surface_delete(profile_id: int, entry_id: int,
                              g: ObjectGuard = Depends(changing)):
     """
-    Take a path out of the allowed surface.
+    Remove a path from the allowed surface.
 
-    Refused when the profile is enforcing on a live site, which is the opposite
-    of how removing an exclusion works, and the difference is which way the
-    risk runs.  Removing an exclusion puts a rule back into force, so the
-    firewall checks more.  Removing a path from a surface **refuses traffic
-    that is currently being served**, and it does it the moment the config is
-    applied.
+    Refused while the profile is enforcing on a live site.  Unlike removing
+    an exclusion (which makes the firewall check more), this starts refusing
+    traffic that is being served now, as soon as the config is applied.
     """
     g.require("edit_sites")
     profile = g.get(WafProfile, profile_id)
@@ -1249,12 +1148,10 @@ async def waf_surface_delete(profile_id: int, entry_id: int,
 @router.post("/waf/hits/{host_id}/clear")
 async def waf_hits_clear(host_id: int, g: ObjectGuard = Depends(changing)):
     """
-    Throw away what was learned for one site, on every node.
+    Discard the learned evidence for one site, on every node.
 
-    Only the evidence.  Exclusions already saved into a profile are decisions
-    taken from that evidence and are left alone, because a clear that quietly
-    removed them would put a site back to refusing traffic somebody had
-    explicitly allowed.
+    Exclusions already saved into a profile are left alone; removing them
+    would start refusing traffic someone explicitly allowed.
     """
     from app.core import waf_hits as hits_mod
 
@@ -1286,16 +1183,11 @@ async def waf_log_state(request: Request, db: DBSession = Depends(get_db)):
 async def metrics_history(request: Request, start: int = None, end: int = None,
                           db: DBSession = Depends(get_db)):
     """
-    Stored telemetry between two times, at the finest resolution that covers it.
+    Stored telemetry between two times, at the finest resolution covering it.
 
-    Takes a range rather than a window name, because the page lets somebody drag
-    across a chart to zoom and "the last hour" cannot express "twenty past two
-    until half past".
-
-    The answer carries the resolution it drew from and the oldest bucket held,
-    so the page can say a flat line is a five minute average rather than
-    nothing happening, and can say when the history is shorter than the window
-    asked for instead of drawing a short line somebody reads as a quiet period.
+    Takes a range, not a window name, so dragging to zoom works.  The response
+    includes the resolution used and the oldest bucket held, so the page can
+    explain averaged values and history shorter than the requested window.
     """
     from app.core import metrics_store
 
@@ -1304,23 +1196,17 @@ async def metrics_history(request: Request, start: int = None, end: int = None,
     end = int(end or now)
     start = int(start or (end - 3600))
 
-    # A month is the most that is kept, so asking for more is asking for
-    # something that cannot exist.  Clamped rather than refused: somebody
-    # dragging a chart should get what there is.
+    # We keep at most a month.  Clamp rather than refuse, so a zoom gets
+    # whatever there is.
     span = end - start
     if span > metrics_store.KEEP_COARSE:
         start = end - metrics_store.KEEP_COARSE
 
     raw = metrics_store.series(start, end)
 
-    # Reshaped into what the charts already read, rather than teaching the page
-    # a second shape.  One drawing routine for live and stored history means a
-    # zoomed chart cannot quietly render differently from a live one.
-    #
-    # value is the mean, with min and max carried alongside.  A five minute
-    # bucket drawn as its mean alone is where a spike goes to die, so the
-    # numbers that keep it are on every point whether the chart draws them yet
-    # or not.
+    # Same shape the live charts read, so zoomed and live charts share one
+    # drawing routine.  value is the mean; min and max ride along so spikes
+    # are not lost in five minute averages.
     nodes = {}
     for node, points in (raw.get("nodes") or {}).items():
         series = {}
@@ -1337,19 +1223,9 @@ async def metrics_history(request: Request, start: int = None, end: int = None,
                 })
 
         # The tiles above the charts read `latest` and `rates`, not `series`.
-        #
-        # They were left out of this answer when it was written, so every
-        # window drawn from stored history showed three tiles reading "no data"
-        # while the charts underneath drew correctly.  It looked like CPU,
-        # memory and requests had stopped being collected, and it only looked
-        # right on the shortest window, which is the one served from memory.
-        #
-        # The numbers come from the last bucket in the range, so on a zoom into
-        # last Tuesday the tiles say what it was at the end of last Tuesday
-        # rather than what it is now.  `as_of` carries that timestamp so the
-        # page can say which, because a tile that reads as the present tense
-        # while somebody is looking at the past is the same bug wearing a
-        # different hat.
+        # Without these, every stored-history window showed "no data" tiles.
+        # Values come from the last bucket in the range, and `as_of` says when
+        # that was, so a zoom into the past is not shown as current.
         latest, rates, as_of = {}, {}, None
         for key, points_for_key in series.items():
             if not points_for_key:
@@ -1375,18 +1251,12 @@ async def metrics_history(request: Request, start: int = None, end: int = None,
 @router.post("/auth/oidc/test")
 async def oidc_test(request: Request, g: ObjectGuard = Depends(changing)):
     """
-    Fetch the discovery document and say what came back.
+    Fetch the discovery document and report what came back.
 
-    **Honest about what it proves.**  It proves the address resolves, the TLS
-    is acceptable to this node, and the document is an OpenID one with the
-    endpoints in it.  It does not prove the client id is right, the secret is
-    right, the redirect address is registered, or that anybody is in the
-    groups.  Only a real login proves those, which is why the mode that turns
-    local passwords off wants one to have happened.
-
-    Worth having anyway, because a typo in the discovery URL is the single most
-    common way this is set up wrong, and finding it here beats finding it on
-    the login page in front of somebody who cannot get in.
+    Only proves the URL resolves, TLS is accepted, and the document has the
+    OpenID endpoints.  Client id, secret, redirect registration and group
+    membership are only proven by a real login.  Still catches the most
+    common mistake, a typo in the discovery URL.
     """
     import httpx
 
@@ -1401,11 +1271,9 @@ async def oidc_test(request: Request, g: ObjectGuard = Depends(changing)):
                             detail="save a discovery URL first, then test it")
 
     try:
-        # Redirects are not followed.  This reflects what it fetched back to
-        # the caller, so following one turns any open redirect on a permitted
-        # host into a way to reach one that is not.  Reporting the redirect is
-        # also more useful to whoever is configuring the provider than quietly
-        # following it and describing somewhere else.
+        # Don't follow redirects.  We echo what we fetched back to the
+        # caller, so following one would let an open redirect reach a host
+        # that is not allowed.  Reporting the redirect is more useful anyway.
         async with httpx.AsyncClient(timeout=15, follow_redirects=False) as client:
             response = await client.get(url)
             if response.is_redirect:
@@ -1445,12 +1313,10 @@ async def oidc_test(request: Request, g: ObjectGuard = Depends(changing)):
 @router.get("/waf/rule-ids")
 async def waf_rule_ids(request: Request, db: DBSession = Depends(get_db)):
     """
-    Every rule id the installed rule set defines, so exclusions can be checked.
+    Every rule id the installed rule set defines, for checking exclusions.
 
-    Asked of this node only.  The rule set is installed identically on every
-    node and the settings page already says loudly when they disagree, so
-    asking the whole fleet for a list that should be the same everywhere would
-    cost a round trip per node to answer the same question.
+    Asks this node only.  The rule set should be identical everywhere, and
+    the settings page already flags nodes that disagree.
     """
     from app.core.agent_client import get_agent
 
@@ -1458,11 +1324,8 @@ async def waf_rule_ids(request: Request, db: DBSession = Depends(get_db)):
     try:
         answer = await get_agent().call("crs_rule_ids")
     except Exception as exc:
-        # The only place here that hands an unclassified exception's text to a
-        # caller.  Everything else in this file catches a named type whose
-        # message was written for a person; this catches anything at all, so
-        # its text can carry absolute paths and internal state.  Logged in full
-        # and summarised out, the same way the agent already does it.
+        # This catches any exception, so its text may contain paths and
+        # internal state.  Log it in full and return a summary instead.
         log.exception("could not read the rule ids from the agent")
         raise HTTPException(
             status_code=502,
@@ -1484,9 +1347,8 @@ async def waf_profile_create(request: Request, g: ObjectGuard = Depends(changing
     """
     Save a set of ticked hits as a named profile.
 
-    The provenance travels with it, which site, which addresses, which
-    request and what date, because an exclusion nobody can explain is one nobody
-    will dare remove, and a WAF full of those checks nothing.
+    Provenance (site, addresses, request, date) is kept with each exclusion.
+    An exclusion nobody can explain is one nobody will dare remove.
     """
     g.require("edit_sites")
     payload = await request.json() if await request.body() else {}
@@ -1499,10 +1361,8 @@ async def waf_profile_create(request: Request, g: ObjectGuard = Depends(changing
                             detail=f"there is already a profile called {name}")
 
     entries = payload.get("exclusions") or []
-    # A profile can start life holding a surface and no exclusions, which is a
-    # perfectly good policy: this application is these paths, and the rules
-    # underneath have never been wrong about it.  The caller says so, because
-    # an empty profile created by accident is still worth refusing.
+    # A surface-only profile with no exclusions is a valid policy, but the
+    # caller has to say so, to catch empty profiles created by accident.
     if not entries and not payload.get("allow_empty"):
         raise HTTPException(status_code=400,
                             detail="tick at least one entry to put in it")
@@ -1548,10 +1408,8 @@ async def waf_profile_delete(profile_id: int, g: ObjectGuard = Depends(changing)
     """
     Delete a profile, unless a site is using it.
 
-    Refused with the list rather than allowed, the same as deleting a pool a
-    site points at.  A site whose profile vanished would fall back to an
-    untuned rule set and start refusing traffic it was tuned to allow, which is
-    an outage produced by a tidy up.
+    A site whose profile vanished would fall back to the untuned rule set and
+    start refusing traffic it was tuned to allow.
     """
     g.require("edit_sites")
     profile = g.get(WafProfile, profile_id)
@@ -1570,17 +1428,15 @@ async def waf_profile_delete(profile_id: int, g: ObjectGuard = Depends(changing)
     return {"ok": True, "deleted": name}
 
 
-# The path an exclusion applies to, which people edit by hand.
-#
-# A quote or a line break would end the ModSecurity directive early and start
-# writing rules of its own, and a rule that switches off checking is the worst
-# possible thing to let somebody inject.  Same reasoning as the catalog's own
-# breakout check, applied here because these do not go through the catalog.
+# Characters not allowed in a hand-edited exclusion path.  A quote or line
+# break would end the ModSecurity directive and let someone inject rules,
+# e.g. one that turns checking off.  These do not go through the catalog's
+# own breakout check, so we check here.
 _WAF_PATH_BAD = re.compile(r'["\'\\\n\r;{}]')
 
 
 def _waf_path_problem(path: str) -> str:
-    """Why this exclusion path cannot be stored, or empty when it can."""
+    """Why this exclusion path cannot be stored, or "" if it can."""
     if not path:
         return ""            # blank means the whole site, which is allowed
     if not path.startswith("/"):
@@ -1600,10 +1456,8 @@ async def waf_exclusion_add(profile_id: int, request: Request,
     """
     Add an exclusion to a profile by hand.
 
-    Learning produces these from evidence, which is the right way round, but it
-    can only produce what somebody exercised.  A repository created next week
-    is not in any learned path, so there has to be a way to write the general
-    case yourself.
+    Learning only covers what was exercised, so this lets people write the
+    general case (e.g. for things created later).
     """
     g.require("edit_sites")
     profile = g.get(WafProfile, profile_id)
@@ -1643,21 +1497,14 @@ async def waf_exclusion_edit(profile_id: int, exclusion_id: int, request: Reques
     """
     Change the path an exclusion covers.
 
-    This is what makes learning usable on anything with a path per object.  A
-    git server produces one row per repository, so a learning round gives
-    `/trice/apache2.git/git-upload-pack` and will give another for every
-    repository that ever exists.  Editing that to `/trice/*.git/*` turns
-    dozens of rows into one that also covers the repository somebody makes
-    next week.
+    Learning on a per-object site (e.g. a git server) gives one row per object,
+    such as `/team/apache2.git/git-upload-pack`.  Editing it to
+    `/team/*.git/*` collapses those into one rule that also covers future
+    objects.
 
-    The star is kept as a star.  What is stored is what the page shows and
-    what a person edits; the translation into a regular expression happens in
-    the renderer, because asking somebody to maintain
-    `^/trice/[^/]*\\.git/` is how a tuned profile stops being reviewed.
-
-    The evidence is deliberately not editable.  Which address it was learned
-    from, and what the rule said, are the record of why somebody decided this,
-    and a note that can be rewritten is not a record.
+    The star is stored as typed; the renderer turns it into a regex, so people
+    never have to maintain `^/team/[^/]*\\.git/` by hand.  The evidence fields
+    are not editable, since they are the record of why the rule exists.
     """
     g.require("edit_sites")
     profile = g.get(WafProfile, profile_id)
@@ -1696,14 +1543,10 @@ async def waf_exclusion_edit(profile_id: int, exclusion_id: int, request: Reques
 async def waf_exclusion_delete(profile_id: int, exclusion_id: int,
                                g: ObjectGuard = Depends(changing)):
     """
-    Take one exclusion out of a profile.
+    Remove one exclusion from a profile.
 
-    Not refused when sites are using the profile, unlike deleting the profile
-    itself, and the difference is which way the risk runs.  Deleting a profile
-    a site points at leaves it pointing at nothing, which is an outage.
-    Removing one exclusion puts a rule back into force, which is the firewall
-    checking more rather than less.  It may well break the application again,
-    and that is a thing somebody can see and undo, not a fleet going dark.
+    Allowed even while sites use the profile.  It puts a rule back into force,
+    so the worst case is the app breaking visibly, which can be undone.
     """
     g.require("edit_sites")
     profile = g.get(WafProfile, profile_id)
@@ -1727,11 +1570,9 @@ async def waf_exclusion_delete(profile_id: int, exclusion_id: int,
 @router.get("/catalog/plus")
 async def catalog_plus(request: Request, db: DBSession = Depends(get_db)):
     """
-    The paid only features, and what we built instead.
+    The NGINX Plus-only features, and what we built instead.
 
-    Shown on its own page.  It looks odd to advertise what you cannot have, but
-    the alternative is somebody spending an hour looking for sticky sessions
-    before finding out it is not in the free version.
+    Saves people from hunting for something that is not in the free version.
     """
     get_user(request, db)
 
@@ -1783,24 +1624,14 @@ def _seed_security_headers(host):
     """
     Write the catalog's header defaults onto a brand new site.
 
-    X-Frame-Options and Referrer-Policy are the two whose "do not send the
-    header" option is the empty string, which the forms cannot store: an empty
-    value means cleared and the key is left out.  So the renderer treats a
-    missing key as no header, and the value a new site gets has to be written
-    down here instead of living in a fallback nobody can override.
+    For X-Frame-Options and Referrer-Policy, "don't send" is the empty string,
+    which the forms cannot store, so a missing key renders as no header.  That
+    means a new site's default has to be written here, or the form would show
+    SAMEORIGIN while the config sent nothing.
 
-    The form already shows the catalog default selected on a new site, so
-    without this the dropdown would say SAMEORIGIN while the rendered config
-    sent nothing, which is the same class of lie the fallback was.
-
-    Only on create, and only for keys nobody set.  Doing it in
-    _apply_host_fields would put the header back every time somebody saved after
-    choosing not to send it, which is the bug this is fixing.
-
-    Deliberately not for an imported site: those are built straight from
-    somebody's existing nginx config and do not come through here, so a config
-    that never sent these headers does not start sending them because we
-    imported it.
+    Create only, and only for unset keys; doing it on every save would put
+    back a header someone chose to remove.  Imported sites do not come through
+    here, so they keep whatever their original config did.
     """
     settings = host.setting_map()
     changed = False
@@ -1821,8 +1652,8 @@ async def create_host(request: Request, g: ObjectGuard = Depends(changing)):
     g.require("edit_sites")
     payload = pick_fields(await request.json(), HOST_FIELDS)
 
-    # The name check lives in _apply_host_fields, which runs below, so that
-    # creating and renaming cannot drift apart the way they already did once.
+    # The name uniqueness check is in _apply_host_fields below, shared with
+    # rename.
     name = validate_name(payload.get("name"), "site name")
     host = VirtualHost(name=name)
     _apply_host_fields(g, host, payload)
@@ -1840,33 +1671,19 @@ async def create_host(request: Request, g: ObjectGuard = Depends(changing)):
 async def duplicate_host(host_id: str, request: Request,
                          g: ObjectGuard = Depends(changing)):
     """
-    Copy a site, with everything that makes it behave the way it does.
+    Copy a site, including its settings, paths and hand written config.
 
-    Most sites in a fleet are the fifth one like the other four.  Rebuilding
-    the settings, the paths and the hand written config by eye is how the fifth
-    one ends up subtly different from the rest, and the difference is found
-    months later by whoever is debugging only that site.
+    Three things are deliberately not copied:
 
-    **Three things are deliberately not copied**, and each of them would be a
-    bug if it were:
-
-      * **The certificate itself.**  It is issued for names this copy does not
-        have, and pointing a new site at it would serve a certificate that does
-        not match the address people typed, which browsers refuse loudly.  What
-        *can* be copied is how it was obtained, the challenge type, key type,
-        authority and DNS credentials, so asking for a certificate for the new
-        names is a tick rather than a form.  It is created and attached here
-        and issued by the normal certificate flow, because issuing needs DNS to
-        already point at this fleet and the site to be serving, and neither is
-        true in the second a clone is made.
-      * **The names it answers to.**  Asked for as part of the clone rather
-        than copied, because two server blocks claiming the same server_name
-        means nginx quietly serves whichever it parsed first and the other site
-        looks broken for no visible reason.  A hostname already claimed by
-        another site is refused here rather than discovered later.
-      * **Being switched on.**  A copy arrives disabled.  It is a starting
-        point somebody is about to edit, and a half edited site taking traffic
-        the moment it is created is not what anybody meant by duplicate.
+      * The certificate.  It covers the wrong names.  We copy how it was
+        obtained (challenge, key type, authority, DNS credentials) and create
+        and attach a certificate for the new names, but do not issue it: DNS
+        and serving are usually not ready yet when a clone is made.
+      * The hostnames.  They are asked for as part of the clone, since two
+        server blocks with the same server_name means nginx silently serves
+        whichever it parsed first.  Names already in use are refused.
+      * Being enabled.  A copy starts disabled so a half edited site does not
+        take traffic.
     """
     original = g.get(VirtualHost, host_id, "edit_sites")
     payload = await request.json() if await request.body() else {}
@@ -1876,10 +1693,8 @@ async def duplicate_host(host_id: str, request: Request,
         raise HTTPException(status_code=400,
                             detail=f"there is already a site called {name}")
 
-    # The hostnames are asked for at clone time rather than left to be fixed
-    # afterwards.  Changing the name and the names it answers to are the same
-    # job, and splitting them across two screens is how a clone ends up live on
-    # the original's hostname for the minute in between.
+    # Ask for hostnames at clone time so the copy is never live on the
+    # original's hostname, even briefly.
     raw_names = payload.get("server_names")
     if isinstance(raw_names, str):
         raw_names = [n.strip() for n in raw_names.replace(",", "\n").splitlines()]
@@ -1926,9 +1741,7 @@ async def duplicate_host(host_id: str, request: Request,
     g.session.add(copy)
     g.session.flush()
 
-    # The paths as well.  A site whose behaviour lives in its locations would
-    # come back as an empty shell without these, which looks like the copy
-    # worked and is the least useful half of it.
+    # Copy the paths too; many sites keep most of their behavior there.
     for loc in original.locations:
         g.session.add(Location(
             host_id=copy.id,
@@ -1948,27 +1761,18 @@ async def duplicate_host(host_id: str, request: Request,
             enabled=loc.enabled,
         ))
 
-    # A certificate for the new names, if asked for.
-    #
-    # Created and attached, not issued.  Issuing reaches Lets Encrypt, needs
-    # the new hostname already resolving to this fleet and the site already
-    # serving the challenge, and a clone is disabled and usually made before
-    # the DNS exists.  Trying anyway would fail most of the time and leave
-    # somebody unpicking a half made clone rather than pressing one button on
-    # the certificates page when they are ready.
+    # A certificate for the new names, if asked for.  Created and attached but
+    # not issued: issuing needs the hostname resolving here and the site
+    # serving the challenge, and neither is usually true yet.  They can issue
+    # it from the certificates page when ready.
     made_cert = None
     if payload.get("create_certificate"):
         source = original.cert
 
-        # A certificate for this hostname may already exist, and the name is
-        # unique.  Creating one regardless meant an unhandled database error
-        # and a bare 500 on the clone dialog, with nothing saying why.  It is
-        # easy to reach: clone a site, delete it, clone it again, and the
-        # certificate outlives the site that was deleted.
-        #
-        # Reuse it when it is a certificate for these names, since that is the
-        # thing the tick was asking for.  Refuse clearly when it is not, rather
-        # than attaching a certificate for somewhere else.
+        # Certificate names are unique, and one may already exist (e.g. clone,
+        # delete, clone again; the certificate outlives the site).  Creating
+        # another used to raise a bare 500.  Reuse it if it covers these
+        # names, otherwise refuse clearly.
         existing_cert = g.session.query(Certificate).filter(
             Certificate.name == names[0]).first()
         if existing_cert is not None:
@@ -2003,10 +1807,8 @@ async def duplicate_host(host_id: str, request: Request,
             auto_renew=bool(source.auto_renew) if source else True,
         )
         if source is not None:
-            # Renew from wherever the original came from.  A clone of a site on
-            # a bought certificate that quietly renewed from somewhere else is
-            # a change nobody asked for and nobody sees until a browser
-            # complains about the issuer.
+            # Renew from the same authority as the original, so a bought
+            # certificate does not silently switch issuer.
             cert.authority_id = source.authority_id
             cert.dns_plugin = source.dns_plugin
             cert.dns_credentials_encrypted = source.dns_credentials_encrypted
@@ -2032,23 +1834,16 @@ async def duplicate_host(host_id: str, request: Request,
 
 async def _refuse_second_default_server(session, host, payload):
     """
-    Somebody is making this site the default one.  Is that going to work?
+    Refuse making this site the default server if it would clash.
 
-    nginx allows one default server per address and port and refuses to start
-    with two, and an apply is all or nothing, so a second one does not break
-    the site that asked for it, it stops **the whole fleet applying anything**.
+    nginx allows one default server per address and port, and an apply is all
+    or nothing, so a second one blocks every apply on the fleet.
 
-    Two ways that happens.  Another managed site already has it, which we can
-    see in our own database.  Or something outside the managed tree has it,
-    which we cannot: `nginx-installer.sh` writes a catch all at
-    sites-enabled/default.conf with `listen 80 default_server`, and nothing in
-    the manager knew that file was there.  So the tick box saved, redisplayed,
-    rendered correctly, and then every apply was refused with "a duplicate
-    default server for 0.0.0.0:80" naming a file the person never wrote.
-
-    Asked of the node rather than assumed, because the answer is about what is
-    on disk today, and refused here rather than at apply time so it costs one
-    save instead of everybody's next change.
+    The clash can be another managed site, or a file outside the managed tree.
+    `nginx-installer.sh` writes sites-enabled/default.conf with
+    `listen 80 default_server`, which used to make every apply fail with a
+    "duplicate default server" error naming a file the user never wrote.  We
+    ask the node what is on disk and refuse at save time instead.
     """
     if not payload.get("default_server"):
         return
@@ -2071,16 +1866,14 @@ async def _refuse_second_default_server(session, host, payload):
     try:
         answer = await get_agent().call("default_server_conflict")
     except Exception:
-        # If the node cannot be asked, do not invent an answer.  The apply
-        # still checks the config on every node before anything goes live, so
-        # the worst case is the old behaviour rather than a wrong refusal.
+        # Don't guess if the node cannot be asked.  The apply still tests the
+        # config on every node, so this just falls back to the old behavior.
         log.warning("could not ask this node about the default site")
         return
 
-    # Only the ones the manager cannot take over.  A symlink in sites-enabled
-    # is stood down at apply time and put back when no managed site wants the
-    # role, so it is not a reason to refuse the setting.  Anything else is
-    # somebody's own file and an apply does not get to move it quietly.
+    # Only files we cannot take over count.  A sites-enabled symlink is
+    # stood down at apply time and restored later, so it is fine; anything
+    # else is someone's own file and we won't move it.
     blocked = answer.get("blocked")
     if blocked is None:                     # an agent from before this existed
         blocked = answer.get("files") or []
@@ -2126,9 +1919,8 @@ def _apply_host_fields(g, host, payload):
     """
     Copy the allowed fields onto a site, checking each one.
 
-    Settings get checked against the catalog, which is the same thing the
-    renderer reads.  A value that would produce config nginx will not load gets
-    refused here rather than at apply time.
+    Settings are checked against the catalog, which the renderer also reads,
+    so config nginx would reject is refused here rather than at apply time.
     """
     if "name" in payload:
         name = validate_name(payload["name"], "site name")
@@ -2160,8 +1952,8 @@ def _apply_host_fields(g, host, payload):
             raise HTTPException(status_code=400, detail="that site type is not one we know")
         host.mode = payload["mode"]
 
-    # Foreign keys go through the guard too, so pointing a site at a pool you
-    # are not allowed to see fails the same way as asking for it directly.
+    # Foreign keys go through the guard too, so referencing an object you
+    # cannot see fails the same as fetching it directly.
     for field, model in (("pool_id", Pool), ("cert_id", Certificate),
                          ("access_list_id", AccessList),
                          ("error_page_template_id", ErrorPageTemplate)):
@@ -2186,26 +1978,17 @@ def _apply_host_fields(g, host, payload):
     if "config_mode" in payload:
         if payload["config_mode"] not in ("gui", "raw"):
             raise HTTPException(status_code=400, detail="config mode is gui or raw")
-        # Writing a whole server block by hand is an admin thing.  An operator
-        # can change any setting they like through the forms, where every value
-        # is checked, but hand written config is a much bigger door.
+        # Raw server blocks are admin only.  Operators can change anything
+        # through the forms, where every value is checked.
         if payload["config_mode"] == "raw":
             g.require("raw_config")
 
-        # Going back to the form has to take the hand written file with it.
-        #
-        # `custom_config` means two different things depending on the mode.  In
-        # raw mode it is the whole file, `server { ... }` and all.  In form mode
-        # it is a snippet pasted **inside** the generated server block, which is
-        # where the importer puts directives it could not represent.  So
-        # switching back left a complete file being injected inside a server
-        # block, nginx said `"server" directive is not allowed here`, and
-        # because an apply is all or nothing, that one site stopped the whole
-        # fleet applying anything at all.  The error named a filename, not the
-        # switch that caused it.
-        #
-        # Only when it really is a whole file.  An importer snippet is a
-        # fragment and stays, because that one is doing its job.
+        # Leaving raw mode has to drop the hand written file.  In raw mode
+        # `custom_config` is the whole file; in form mode it is a snippet
+        # inserted inside the generated server block (where the importer puts
+        # directives it could not represent).  Keeping a whole file there gave
+        # `"server" directive is not allowed here` and blocked every apply.
+        # Importer snippets are fragments and are kept.
         if (payload["config_mode"] == "gui"
                 and host.config_mode == "raw"
                 and _is_whole_file(host.custom_config)):
@@ -2225,10 +2008,8 @@ def _is_whole_file(text) -> bool:
     """
     Is this a complete config file rather than a snippet?
 
-    A `server` block at the start of a line is the tell.  A snippet meant to go
-    inside a server block never has one, and a whole file always does.  Used
-    when a site leaves raw config mode, so the file it was being served from
-    does not get pasted inside the generated block afterwards.
+    A `server` block at the start of a line gives it away; snippets never
+    have one.
     """
     if not text:
         return False
@@ -2239,9 +2020,8 @@ def _validate_settings(raw, context: str) -> dict:
     """
     Check a settings blob against the catalog.
 
-    Anything we do not recognize is dropped rather than stored.  Keeping unknown
-    keys around would mean a typo silently does nothing forever while the person
-    who made it swears they set the value.
+    Unknown keys are dropped rather than stored, so a typo does not sit there
+    silently doing nothing.
     """
     if not isinstance(raw, dict):
         raise HTTPException(status_code=400, detail="settings has to be an object")
@@ -2262,22 +2042,17 @@ def _validate_settings(raw, context: str) -> dict:
             problems.append(f"{feature.label} cannot go in a {context} block")
             continue
         if not feature.is_available(caps.modules, caps.version_tuple):
-            # Refusing to turn something off that cannot be on is nonsense, and
-            # it used to take the whole save with it.  The GUI sends the entire
-            # settings blob, a disabled checkbox still reads as false, so every
-            # save on a fleet missing any module was refused with a message
-            # naming a feature the person had not touched.  A value that asks
-            # for nothing is accepted and dropped; only actually asking for the
-            # feature is refused.
+            # The GUI sends the whole settings blob, so disabled checkboxes
+            # arrive as false.  Accept and drop values that ask for nothing;
+            # only refuse actually enabling a missing feature.  Refusing these
+            # used to fail every save on a fleet missing any module.
             if not value or value == feature.default:
                 continue
             problems.append(f"{feature.label} {feature.unavailable_reason(caps.modules, caps.version_tuple)}")
             continue
 
-        # A zone picker, whose choices are rows rather than catalog options.
-        # Checked against what exists, and the message names what does, because
-        # the usual cause is a zone that was renamed or deleted after a site
-        # was pointed at it.
+        # Zone picker: check against zones that exist.  The message lists
+        # them, since the usual cause is a zone renamed or deleted later.
         zone = ZONE_CHOICES.get(key)
         if zone and value:
             model, what, page = zone
@@ -2292,20 +2067,11 @@ def _validate_settings(raw, context: str) -> dict:
             cleaned[key] = value
             continue
 
-        # WAF strictness is a level or the name of a tuned profile, and only
-        # the levels can be in the catalog.
-        #
-        # The catalog is static by design and a profile is a database row that
-        # did not exist when it was written, so `custom:whatever` failed the
-        # select check and every attempt to apply a profile came back 400.  The
-        # picker offered profiles, the renderer understood them, the save was
-        # the one link in the chain that did not, so the feature had never
-        # worked end to end.
-        #
-        # Checked against the profiles that exist rather than waved through.  A
-        # name that matches nothing renders a site with no exclusions at all,
-        # which is a site refusing traffic somebody believed they had allowed,
-        # and it would do it quietly.
+        # WAF strictness is a level or `custom:<profile>`.  Only the levels
+        # are in the static catalog, so profiles are checked here (without
+        # this, applying a profile always failed with a 400).  They are
+        # checked against real profiles: an unknown name would render with no
+        # exclusions and quietly refuse traffic that was meant to be allowed.
         if key == "waf_paranoia" and str(value).startswith("custom:"):
             wanted = str(value).split(":", 1)[1]
             with session_scope() as session:
@@ -2335,7 +2101,7 @@ def _validate_settings(raw, context: str) -> dict:
 
 
 def _parse_size(value) -> int:
-    """Turn an nginx size like 16k or 1m into bytes.  None if it is not one."""
+    """Turn an nginx size like 16k or 1m into bytes, or None."""
     import re as _re
 
     m = _re.fullmatch(r"(\d+)([kKmMgG]?)", str(value).strip())
@@ -2347,27 +2113,17 @@ def _parse_size(value) -> int:
 
 def _cross_check(settings: dict) -> list:
     """
-    Settings that are each fine alone and wrong together.
+    Settings that are each fine alone but wrong together.
 
-    Checking values one at a time is not enough, because nginx has rules about
-    how some of them relate.  The proxy buffer one below is the worst of them:
-    it is easy to hit, and the error nginx gives is
-
-      "proxy_busy_buffers_size" must be less than the size of all
-      "proxy_buffers" minus one buffer
-
-    which mentions a directive you never set, and does not say what to do.
-    Catching it here with an explanation beats letting somebody meet that.
+    The proxy buffer check is the main one.  It is easy to hit, and nginx's
+    error ("proxy_busy_buffers_size" must be less than the size of all
+    "proxy_buffers" minus one buffer) names a directive the user never set.
     """
     problems = []
 
-    # A positive model with nothing in it refuses the whole site.
-    #
-    # The renderer already refuses to write that and says so in the config, but
-    # a setting that saves and then quietly does nothing is worse than one that
-    # will not save: somebody ticks enforce, sees no error, and believes the
-    # site is locked down when it is not.  So it is caught here, where there is
-    # a person to tell.
+    # An enforcing positive model with nothing in it refuses the whole site.
+    # The renderer won't write that either, but saving and then silently doing
+    # nothing would leave someone thinking the site is locked down.
     positive = (settings.get("waf_positive") or "off").strip()
     if positive in ("report", "enforce"):
         chosen = (settings.get("waf_paranoia") or "").strip()
@@ -2388,10 +2144,8 @@ def _cross_check(settings: dict) -> list:
                     f"turning this on with an empty surface would refuse every "
                     f"request to the site.  Record a round and save what it finds")
 
-    # Credentials plus any origin is a pair no browser will use.  The help text
-    # on both settings says so, and until now nothing stopped somebody saving
-    # it, which leaves a site that looks configured for cross site calls and
-    # refuses every one of them with a message about the origin.
+    # Browsers never honor credentials with any origin.  Without this check
+    # the site looks configured for CORS and refuses every call.
     if settings.get("cors_allow_credentials"):
         origins = settings.get("cors_allow_origin") or ["*"]
         if any(str(o).strip() == "*" for o in origins):
@@ -2413,13 +2167,10 @@ def _cross_check(settings: dict) -> list:
             one = _parse_size(m.group(2))
             if one and count:
                 total = count * one
-                # nginx works out proxy_busy_buffers_size for you when you do
-                # not set it, as twice the bigger of the header buffer and one
-                # body buffer.  That figure then has to fit inside everything
-                # except one buffer.
-                # The renderer pins proxy_busy_buffers_size for us, so this
-                # only has to catch the case where no value can satisfy nginx
-                # at all, which means the buffers really are too small.
+                # When unset, nginx computes proxy_busy_buffers_size as twice
+                # the larger of the header buffer and one body buffer, and it
+                # must fit in all buffers but one.  The renderer pins it, so we
+                # only need to catch buffers too small for any value to work.
                 busy = max(head, one)
                 if busy > total - one:
                     need = busy + one
@@ -2433,8 +2184,8 @@ def _cross_check(settings: dict) -> list:
                         f"header buffer"
                     )
 
-    # Caching a page for a logged in user and handing it to somebody else is a
-    # real data leak, and it is an easy one to set up by accident.
+    # Caching a logged in user's page and serving it to someone else is a
+    # real data leak, and easy to set up by accident.
     if settings.get("proxy_cache_zone"):
         bypass = settings.get("proxy_cache_bypass") or []
         no_cache = settings.get("proxy_no_cache") or []
@@ -2446,8 +2197,8 @@ def _cross_check(settings: dict) -> list:
                 "\"never store when\" to the same list as \"skip the cache when\""
             )
 
-    # * with credentials is refused by browsers, and working around the refusal
-    # opens the API to every site on the internet.
+    # Browsers refuse * with credentials, and working around that opens the
+    # API to every site on the internet.
     if settings.get("cors_allow_credentials"):
         origins = settings.get("cors_allow_origin") or []
         if "*" in origins:
@@ -2482,15 +2233,9 @@ def _cert_coverage(h, cert):
     """
     Which of a site's names its certificate would not be accepted for.
 
-    The check nobody has that everybody needs.  A site serving example.com and
-    www.example.com on a certificate carrying only one of them is green on the
-    site page, valid on the certificate page, and a browser warning on the name
-    nobody tested.  Both lists are already in the database, so saying it costs
-    nothing.
-
-    Wildcards are worked out rather than compared as text, because
-    *.example.com covers www.example.com and does not cover example.com, and
-    that is the trap people meet the day they buy one.
+    Catches e.g. a site serving example.com and www.example.com on a
+    certificate covering only one.  Wildcards are matched properly:
+    *.example.com covers www.example.com but not example.com.
     """
     if cert is None:
         return {"cert_covers": [], "uncovered": [], "checked": False}
@@ -2505,8 +2250,7 @@ def _host_detail(h):
     return {
         **_host_summary(h),
         **_cert_coverage(h, h.cert),
-        # What adding the www would mean for this site, worked out here so the
-        # page does not have to know the rules about which names have a pair.
+        # Worked out here so the page need not know which names pair up.
         "www_partner": next(
             (p for p in (hostnames.www_partner(n) for n in h.name_list())
              if p and p not in h.name_list()), None),
@@ -2528,15 +2272,9 @@ def _host_detail(h):
         "settings": h.setting_map(),
         "custom_config": h.custom_config,
         "notes": h.notes,
-        # The same shape the locations endpoint returns, from the same
-        # function, rather than a second list written out here.
-        #
-        # The copy that used to live here left out custom_config, among other
-        # fields, so a caller reading a site's paths from this endpoint was
-        # told every one of them had no hand written config.  Anything acting
-        # on that then skips the path that does have some, or writes it back
-        # empty.  Both happened.  Two serialisers for one object drift the
-        # moment somebody adds a field to whichever they were looking at.
+        # Built by the same function as the locations endpoint.  A separate
+        # copy here once left out fields like custom_config, and callers acting
+        # on it skipped or blanked real hand written config.
         "locations": [
             _location_json(loc)
             for loc in sorted(h.locations, key=lambda x: x.sort_order or 0)
@@ -2547,21 +2285,11 @@ def _host_detail(h):
 
 def _tunnels_behind(h):
     """
-    Which tunnel workloads this site's traffic actually ends up at.
+    Which tunnel workloads this site's traffic ends up at.
 
-    The dependency is real and completely invisible: a site points at a pool,
-    the pool names an address, and that address belongs to a machine that is
-    only reachable because it is on the tunnel.  Nothing on the site page says
-    so, so somebody removing a workload, or wondering why a site broke when the
-    tunnel went down, has to walk pools and members by hand to find out.
-
-    Both the site's own pool and the pools its paths use, since a site with one
-    backend on the Basics tab and another on a path depends on both, and the
-    one that gets forgotten is always the second.
-
-    Matched on address rather than on name.  The pool member holds whatever
-    somebody typed, and what makes it a tunnel workload is that the address is
-    the one the tunnel handed out.
+    That dependency (site, pool, member address, tunnel peer) is otherwise
+    invisible on the site page.  Covers the site's own pool and its paths'
+    pools, and matches on address, since that is what the tunnel assigned.
     """
     from sqlalchemy.orm import object_session
 
@@ -2587,9 +2315,8 @@ def _tunnels_behind(h):
 
     return [{"id": p.id, "name": p.name, "address": p.address,
              "description": p.description or "",
-             # Said out loud, because a workload that was never enrolled is a
-             # backend that has never once answered, and that is a different
-             # problem from one that is simply down.
+             # A never-enrolled workload has never answered, which is a
+             # different problem from one that is down.
              "enrolled": p.is_enrolled(), "enabled": bool(p.enabled)}
             for p in peers]
 
@@ -2633,16 +2360,13 @@ async def create_pool(request: Request, g: ObjectGuard = Depends(changing)):
     g.require("edit_pools")
     payload = pick_fields(await request.json(), POOL_FIELDS)
 
-    # The name check lives in _apply_pool_fields, which runs below, so that
-    # creating and renaming cannot drift apart the way they already did once.
+    # The name uniqueness check is in _apply_pool_fields below, shared with
+    # rename.
     name = validate_name(payload.get("name"), "pool name")
     pool = Pool(name=name)
 
-    # The Settings page calls this "the default health check interval" and says
-    # it is "only the default for a new pool".  Nothing read it, so a new pool
-    # took the hardcoded ten seconds from the column and the setting was saved,
-    # redisplayed and completely inert.  Seed it here, before the payload is
-    # applied, so anything sent explicitly still wins.
+    # The settings page's default health check interval for new pools.
+    # Applied before the payload, so an explicit value still wins.
     default_interval = settings_store.get("health_check_interval")
     if default_interval:
         try:
@@ -2677,8 +2401,8 @@ async def update_pool(pool_id: str, request: Request, g: ObjectGuard = Depends(c
 async def delete_pool(pool_id: str, g: ObjectGuard = Depends(changing)):
     pool = g.get(Pool, pool_id, "edit_pools")
 
-    # A pool a site is using cannot just vanish, the site would render a
-    # proxy_pass at an upstream that does not exist and nginx would not start.
+    # A pool in use cannot be deleted: the site would proxy_pass to a missing
+    # upstream and nginx would not start.
     users = g.session.query(VirtualHost).filter(VirtualHost.pool_id == pool.id).all()
     if users:
         raise HTTPException(
@@ -2700,13 +2424,11 @@ async def delete_pool(pool_id: str, g: ObjectGuard = Depends(changing)):
 # =============================================================================
 # Pool tokens
 #
-# The shared secret nginx puts on requests it sends to a pool, so the backend
-# can turn away anything that did not come through the fleet.
+# A shared secret nginx adds to requests it sends to a pool, so the backend can
+# reject anything that did not come through the fleet.
 #
-# Rotating takes two steps on purpose.  You cannot change both ends at the same
-# instant, and nginx can only send one value, so the only safe order is: stage a
-# new one, teach the backends to accept either, then activate.  A single button
-# that swapped it would break every request in the gap.
+# Rotation is two steps on purpose.  nginx can only send one value, so the safe
+# order is: stage a new token, make the backends accept either, then activate.
 # =============================================================================
 
 @router.post("/pools/{pool_id}/token")
@@ -2717,8 +2439,8 @@ async def create_pool_token(pool_id: str, request: Request,
 
     supplied = str(payload.get("value") or "").strip()
     if supplied:
-        # Somebody bringing a secret their backends already check.  Keep the bar
-        # high enough that a guessable one cannot be set by accident.
+        # A user-supplied secret.  Set a minimum length so a guessable one
+        # cannot be used by accident.
         if len(supplied) < 16:
             raise HTTPException(
                 status_code=400,
@@ -2727,11 +2449,9 @@ async def create_pool_token(pool_id: str, request: Request,
         if len(supplied) > 256:
             raise HTTPException(status_code=400, detail="that token is too long, keep it under 256")
 
-        # Hold this to a plain charset rather than blocking a list of bad
-        # characters.  This value gets written into an nginx directive, and a
-        # semicolon in there ends the directive early and turns the rest into
-        # config.  The renderer would catch it and refuse, but by then the whole
-        # fleet's apply is broken over one bad field, so it gets caught here.
+        # Allowlist the charset.  This goes into an nginx directive, where a
+        # semicolon would end it early.  The renderer would refuse it, but only
+        # after breaking the fleet's apply.
         if not re.fullmatch(r"[A-Za-z0-9._~+/=-]+", supplied):
             raise HTTPException(
                 status_code=400,
@@ -2752,8 +2472,8 @@ async def create_pool_token(pool_id: str, request: Request,
 
     staged = bool(pool.token_encrypted)
     if staged:
-        # Already sending one, so this is a rotation.  Park it in next and leave
-        # what nginx is sending alone until somebody activates.
+        # Already sending one, so this is a rotation.  Stage it in next and
+        # leave the live token alone until activation.
         pool.token_next_encrypted = encrypt(token)
     else:
         pool.token_encrypted = encrypt(token)
@@ -2822,11 +2542,10 @@ async def cancel_pool_token(pool_id: str, g: ObjectGuard = Depends(changing)):
 @router.get("/pools/{pool_id}/token")
 async def reveal_pool_token(pool_id: str, g: ObjectGuard = Depends(guard)):
     """
-    Hand back the actual values.
+    Return the actual token values.
 
-    Anybody who can edit this pool can already change the token, so showing it
-    to them gives away nothing they could not get anyway.  It is audited because
-    reading a secret is worth a line in the log even when it is allowed.
+    Anyone who can edit the pool can already change the token, so this reveals
+    nothing new.  Still audited.
     """
     pool = g.get(Pool, pool_id, "edit_pools")
 
@@ -2900,17 +2619,16 @@ def _apply_pool_fields(session, pool, payload):
         if field in payload:
             setattr(pool, field, payload[field] or None)
 
-    # token_enabled can be switched off here, which stops nginx sending the
-    # header without throwing the secret away.  Turning it on does nothing on
-    # its own: there has to be a token as well, which is its own endpoint.
+    # token_enabled off stops sending the header but keeps the secret.  On
+    # needs a token as well, which is set through its own endpoint.
     if "backend_kind" in payload:
         if payload["backend_kind"] not in ("servers", "site"):
             raise HTTPException(status_code=400,
                                 detail="backend kind has to be servers or site")
         pool.backend_kind = payload["backend_kind"]
 
-    # A path that goes straight into a directive, so it has to look like a path
-    # and nothing else.  Blank means the system bundle.
+    # Goes straight into a directive, so it must be a plain path.  Blank
+    # means the system bundle.
     if "backend_tls_ca" in payload:
         raw = (payload["backend_tls_ca"] or "").strip()
         if raw and not re.fullmatch(r"/[A-Za-z0-9._/-]{1,500}", raw):
@@ -2926,16 +2644,14 @@ def _apply_pool_fields(session, pool, payload):
         if field in payload:
             setattr(pool, field, bool(payload[field]))
 
-    # Somebody touching the switch settles it.  From here on we do what they
-    # said and stop working it out from the member ports, including when they
-    # turn it off with a member on 443, which is theirs to decide.
+    # Once someone sets this explicitly we stop inferring it from member
+    # ports, even if they turn it off with a member on 443.
     if "backend_tls" in payload:
         pool.backend_tls = bool(payload["backend_tls"])
         pool.backend_tls_set = True
 
-    # The SNI name goes on the wire and into an nginx directive, so it has to
-    # look like a hostname.  A stray space or semicolon here would land straight
-    # in the config, and a config nginx will not load blocks the whole fleet.
+    # Goes into an nginx directive, so it must look like a hostname.  Bad
+    # config here would block the whole fleet.
     if "backend_tls_name" in payload:
         raw = (payload["backend_tls_name"] or "").strip()
         if raw and not re.fullmatch(r"[A-Za-z0-9._-]{1,253}", raw):
@@ -2974,13 +2690,12 @@ def _apply_pool_fields(session, pool, payload):
         pool.health_check_port = validate_port(value) if value else None
 
     if "settings" in payload:
-        # Pool settings are our own, not nginx directives, so they get their own
-        # small check rather than going through the catalog.
+        # Our own settings, not nginx directives, so they get their own check.
         pool.settings = json.dumps(_validate_pool_settings(payload["settings"]))
 
 
 def _validate_pool_settings(raw) -> dict:
-    """Check the settings behind our stand ins for the paid features."""
+    """Check the settings for our replacements of the Plus features."""
     if not isinstance(raw, dict):
         raise HTTPException(status_code=400, detail="settings has to be an object")
 
@@ -2996,18 +2711,13 @@ def _validate_pool_settings(raw) -> dict:
         "adaptive_min_weight": int,
         "adaptive_max_weight": int,
         "adaptive_floor_ms": int,
-        # Where this pool's backends publish what they are doing.  A template,
-        # since the members of a pool are nearly always the same kind of box
-        # with the same exporter on the same port, and one field per member is
-        # how it ends up half filled in.
+        # Where members publish metrics.  A template, since members are
+        # usually identical boxes with the same exporter and port.
         "member_metrics_url": "url",
 
-        # Where the application sits on these backends, when it is not at the
-        # root.  It belongs here because it is a fact about the backend and not
-        # about any one site pointed at it, and because this is where people
-        # look for it: the first attempt at setting it was typing the path onto
-        # a member address, which is host and port and gets refused for the
-        # want of a valid port.  A site can still override it.
+        # Path of the application on the backends when it is not the root.
+        # A property of the backend, so it lives on the pool (people tried
+        # typing it onto member addresses first).  Sites can override it.
         "backend_path": "path",
     }
 
@@ -3028,9 +2738,8 @@ def _validate_pool_settings(raw) -> dict:
             if not text:
                 cleaned[key] = ""
                 continue
-            # http or https, and nothing else.  This is a URL the manager will
-            # fetch on a timer, so a file: or a gopher: here would be somebody
-            # pointing it at something it should not read.
+            # http or https only.  We fetch this on a timer, so other schemes
+            # (file:, gopher:) could read things they should not.
             if not re.fullmatch(
                     r"https?://[A-Za-z0-9._:\[\]{}-]+(/[A-Za-z0-9._~:/?#@!$&'()*+,;=%{}-]*)?",
                     text):
@@ -3042,14 +2751,9 @@ def _validate_pool_settings(raw) -> dict:
             if len(text) > 300:
                 raise HTTPException(status_code=400, detail="that URL is too long")
 
-            # Where it points, as well as what scheme it uses.  The manager
-            # fetches this on a timer from a load balancer, so an address only
-            # it can reach is a request forgery primitive rather than a metrics
-            # endpoint.
-            #
-            # Only checkable here when the host is written out.  A template
-            # using {host} becomes a different address per member, so that case
-            # is checked again where the URL is actually built, in metrics.py.
+            # Also check where it points, or this becomes an SSRF primitive
+            # from the load balancer.  Only possible when the host is literal;
+            # {host} templates are checked per member in metrics.py.
             from app.core.exporters import unsafe_fetch_target
 
             bad_target = unsafe_fetch_target(text)
@@ -3058,20 +2762,16 @@ def _validate_pool_settings(raw) -> dict:
 
             cleaned[key] = text
         elif expected == "path":
-            # A path on the backend, not a URL and not a host.  The slashes are
-            # put right here rather than asked of whoever typed it, because the
-            # trailing one is what makes nginx swap the matched part of the
-            # path instead of gluing the two together, and that is exactly the
-            # kind of one character difference nobody should have to know.
+            # A backend path, not a URL.  We normalize the slashes ourselves
+            # because the trailing slash changes how nginx replaces the
+            # matched part of the path.
             text = str(value or "").strip()
             if not text:
                 cleaned[key] = ""
                 continue
 
-            # Checked before the slashes are put right, or a whole URL becomes
-            # a path called /http://host:8080/shop/ and renders a proxy_pass
-            # nobody meant.  Said plainly, because pasting the backend's URL in
-            # here is the obvious thing to try.
+            # Check before normalizing, or a pasted URL becomes a path like
+            # /http://host:8080/shop/.
             if "://" in text or text.lower().startswith(("http:", "https:")):
                 raise HTTPException(
                     status_code=400,
@@ -3147,10 +2847,9 @@ def _pool_detail(p):
             "verify_tls": p.health_check_verify_tls,
             "port": p.health_check_port,
         },
-        # What the trust setup looks like, without the secret in it.  The GUI
-        # needs to know there is a token and whether a rotation is half done.
-        # It does not need the value, and putting it in every pool response
-        # would splash it across logs and browser caches for no reason.
+        # Trust state without the secret.  The GUI only needs to know a
+        # token exists and whether a rotation is in progress; the value would
+        # end up in logs and browser caches.
         "trust": {
             "enabled": bool(p.token_enabled),
             "active": p.token_active,
@@ -3199,8 +2898,7 @@ async def add_member(pool_id: str, request: Request, g: ObjectGuard = Depends(ch
     if not address:
         raise HTTPException(status_code=400, detail="a backend needs an address")
 
-    # Either an IP or a hostname.  Both are fine, but it has to be one of them,
-    # since this ends up in a config file.
+    # Must be an IP or hostname, since it goes into a config file.
     import re
 
     if not re.fullmatch(r"[A-Za-z0-9._:\[\]-]{1,253}", address):
@@ -3232,13 +2930,9 @@ async def add_members_bulk(pool_id: str, request: Request, g: ObjectGuard = Depe
     """
     Add a list of backends in one go.
 
-    Typing them one at a time is fine for two and miserable for thirty, and
-    thirty is exactly when a typo slips through and you do not notice until
-    something is quietly getting no traffic.
-
-    Every line is checked before a single one is saved.  A half loaded pool is
-    worse than a rejected one, because you cannot tell by looking which lines
-    made it, and adding the list again would collide with the half that did.
+    Every line is validated before anything is saved.  A half loaded pool is
+    worse than a rejected one: you cannot tell which lines made it, and
+    re-adding the list would collide with them.
     """
     pool = g.get(Pool, pool_id, "edit_pools")
 
@@ -3250,8 +2944,7 @@ async def add_members_bulk(pool_id: str, request: Request, g: ObjectGuard = Depe
     if len(text) > 100_000:
         raise HTTPException(status_code=400, detail="that is too much at once, split it up")
 
-    # What is already here, so we can say which lines are duplicates rather than
-    # failing on the first one and making them find it.
+    # Existing members, so every duplicate line can be reported at once.
     seen = {
         (m.address, m.port)
         for m in g.session.query(PoolMember).filter(PoolMember.pool_id == pool.id).all()
@@ -3286,9 +2979,8 @@ async def add_members_bulk(pool_id: str, request: Request, g: ObjectGuard = Depe
         seen.add((address, port))
         parsed.append((address, port))
 
-    # Look the names up together.  One at a time is fine for three and slow
-    # enough to look broken for fifty, since every miss waits out its own
-    # timeout before the next one starts.
+    # Resolve names concurrently.  Serially, each miss waits out its own
+    # timeout and fifty names looks hung.
     if parsed:
         checks = await asyncio.gather(
             *[_must_resolve(address) for address, _port in parsed],
@@ -3331,20 +3023,15 @@ async def add_members_bulk(pool_id: str, request: Request, g: ObjectGuard = Depe
 
 async def _must_resolve(address: str):
     """
-    Refuse a backend name this box cannot look up.
+    Refuse a backend name this box cannot resolve.
 
-    nginx resolves the names in an upstream block when it loads the config, not
-    when a request arrives.  A name that does not resolve is not a backend that
-    is down, it is a config nginx refuses to load at all, and since one node
-    saying no stops the whole fleet, one typo here blocks every change on every
-    node until somebody finds it.
+    nginx resolves upstream names at load time, so an unresolvable name is not
+    a down backend but a config nginx refuses to load, which blocks the whole
+    fleet.  Its "host not found in upstream" error also shows up later and
+    somewhere else.
 
-    The error nginx gives is "host not found in upstream", which arrives later,
-    from a different page, about a file the person never opened.  Saying it here
-    costs one lookup and points at the box they are typing into.
-
-    This only proves the name resolves from this node.  A standby with different
-    DNS can still fail the apply, and the two phase apply is what catches that.
+    Only proves the name resolves from this node; the two phase apply catches
+    a standby with different DNS.
     """
     bare = address.strip("[]")
     try:
@@ -3371,18 +3058,14 @@ async def _must_resolve(address: str):
 
 def _split_backend(line: str):
     """
-    Pull an address and a port out of one line.
+    Pull an address and port out of one pasted line.
 
-    People paste these from all sorts of places, so take the shapes that turn up
-    rather than making them reformat a list they already have:
-    host:8080, host 8080, host,8080, host, and [::1]:8080 for IPv6.
-
-    A bare host means port 80, same as adding one by hand.
+    Accepts host:8080, host 8080, host,8080, host, and [::1]:8080.  A bare
+    host means port 80.
     """
     line = line.replace("\t", " ").replace(",", " ").strip()
 
-    # IPv6 in brackets keeps its colons, so the port is only what follows the
-    # closing bracket.  Splitting on the last colon would take the address apart.
+    # Bracketed IPv6: the port is only what follows the closing bracket.
     if line.startswith("["):
         end = line.find("]")
         if end == -1:
@@ -3402,8 +3085,8 @@ def _split_backend(line: str):
         address, _sep, port = single.partition(":")
         return address, (port or 80)
     if single.count(":") > 1:
-        # Bare IPv6 with no brackets.  There is no way to tell a port from
-        # another group, so ask for brackets rather than guess wrong.
+        # Unbracketed IPv6: a port is indistinguishable from another group,
+        # so ask for brackets rather than guess.
         return None, None
     return single, 80
 
@@ -3429,9 +3112,8 @@ async def set_member_state(member_id: str, request: Request,
     """
     Take a backend in or out by hand.
 
-    Draining is the polite one.  The member stops taking new connections but
-    existing ones finish, so you can patch a box without cutting anybody off
-    mid request.
+    Draining stops new connections but lets existing ones finish, so a box
+    can be patched without cutting anyone off mid request.
     """
     member = g.get(PoolMember, member_id, "drain_member")
     payload = await request.json()
@@ -3471,12 +3153,9 @@ async def delete_member(member_id: str, g: ObjectGuard = Depends(changing)):
     return {"ok": True, "deleted": label}
 
 
-# nginx refuses "backup" on a server in a pool that balances by hashing.  Its
-# own message is "balancing method does not support parameter backup", which
-# is true and tells somebody looking at a screen nothing about what to do.
-#
-# Caught here so it is said in words, before the change is saved, rather than
-# surfacing out of a failed apply.
+# Balancing methods that do not allow "backup" servers.  nginx's own error
+# ("balancing method does not support parameter backup") is unhelpful and
+# only shows up at apply, so we explain it at save time.
 NO_BACKUP_METHODS = {
     "ip_hash": "sending each visitor to the same backend by their address",
     "hash": "sending each request to a backend chosen by a value you set",
@@ -3544,10 +3223,10 @@ def _apply_member_fields(member, payload):
 @router.post("/apply")
 async def apply(request: Request, g: ObjectGuard = Depends(changing)):
     """
-    Push the current config out to the whole fleet.
+    Push the current config to the whole fleet.
 
-    Every node stages and tests it before any node applies it.  See
-    cluster.apply_config for the details of what happens if one says no.
+    Every node stages and tests it before any node applies it; see
+    cluster.apply_config for what happens if one refuses.
     """
     g.require("apply_config")
 
@@ -3558,28 +3237,19 @@ async def apply(request: Request, g: ObjectGuard = Depends(changing)):
 
     summary = str(payload.get("summary", "manual apply"))[:500]
 
-    # Force is how somebody says they really do mean to remove every site.  It
-    # is off unless asked for, because the case it exists for is rare and the
-    # case it guards against takes the fleet down.
+    # Force confirms that removing every site is intended.  Off by default:
+    # the legitimate case is rare and the accidental one takes the fleet down.
     force = bool(payload.get("force"))
     if force:
         log.warning("%s applied with force, so the wipe check was skipped",
                     g.user.username)
 
-    # Two things that can go wrong here and used to come back as a bare
-    # "Internal Server Error", which tells somebody nothing and hides an
-    # answer they could have acted on.
-    #
-    # A ClusterError is a refusal with a reason in it, so it goes back as one.
-    # A locked database is the other: SQLite allows one writer, and an apply
-    # started while something else is still committing gets refused by the
-    # driver rather than by us.  That one is worth retrying, and saying so is
-    # the whole difference between "try that again" and "the tool is broken".
-    #
-    # RoleNotSettled is the third, and it is a retry rather than a refusal: for
-    # a few seconds after a restart this node has stood itself down and no
-    # election has run yet.  A 409 there reads as "you are on the wrong box",
-    # which is what the old message said and it was not true.
+    # Turn the expected failures into useful responses instead of a bare 500:
+    #   ClusterError: a refusal with a reason, passed back as is.
+    #   Locked database: SQLite allows one writer, so an apply racing another
+    #     commit is refused by the driver.  Worth a retry, so say so.
+    #   RoleNotSettled: for a few seconds after a restart no election has run
+    #     yet.  Also a retry, not "you are on the wrong node".
     try:
         result = await apply_current_config(author=g.user.username, summary=summary,
                                             force=force)
@@ -3615,12 +3285,7 @@ async def apply(request: Request, g: ObjectGuard = Depends(changing)):
 
 @router.get("/preview")
 async def preview(g: ObjectGuard = Depends(guard)):
-    """
-    Show the config we would write, without writing it.
-
-    Worth having before a big change.  Reading the diff is a lot faster than
-    working out what went wrong afterwards.
-    """
+    """Show the config we would write, without writing it."""
     files, checksum, _ = render_current(g.session)
 
     current = g.session.query(ConfigVersion).order_by(
@@ -3638,21 +3303,16 @@ async def preview(g: ObjectGuard = Depends(guard)):
 @router.post("/repair")
 async def repair(request: Request, g: ObjectGuard = Depends(changing)):
     """
-    Work out what would have to come out for nginx to take this config.
+    Work out what would have to be removed for nginx to accept this config.
 
-    Two steps on purpose, and this is the first one.  With no `confirm` it
-    changes nothing and gives back the list of lines it would comment out, each
-    with the reason nginx gave, so somebody can read it before agreeing.  With
-    `confirm` it makes those same changes and stops there: it does not apply, so
-    the config still has to be pushed the normal way and still gets staged and
-    tested on every node first.
+    Two steps.  Without `confirm` it changes nothing and returns the lines it
+    would comment out, each with nginx's reason.  With `confirm` it makes
+    those changes but does not apply; the normal apply still stages and tests
+    on every node.
 
-    Not folded into apply.  Apply goes to the whole fleet and its audit entry
-    says "applied", so a directive quietly disappearing inside it would be a
-    change nobody sanctioned and nobody could find afterwards.  The ones that go
-    missing here are exactly the ones worth noticing: `ssl_verify_client` and
-    `ssl_protocols` are real controls, and a config error turning into weaker
-    TLS without a word is a worse outcome than an apply that fails loudly.
+    Kept separate from apply on purpose.  Directives removed here can be real
+    controls (`ssl_verify_client`, `ssl_protocols`), and silently weakening
+    TLS inside an apply is worse than an apply that fails loudly.
     """
     g.require("edit_sites")
     payload = await request.json() if await request.body() else {}
@@ -3663,7 +3323,7 @@ async def repair(request: Request, g: ObjectGuard = Depends(changing)):
         return files
 
     async def test(files):
-        """Stage it and ask nginx.  Staging only, so nothing goes live."""
+        """Stage and test only; nothing goes live."""
         agent = get_agent()
         await agent.write_staging(files)
         answer = await agent.test_staging()
@@ -3685,7 +3345,7 @@ async def repair(request: Request, g: ObjectGuard = Depends(changing)):
         log.warning("%s repaired %d line(s) of config", g.user.username,
                     len(result["changes"]))
     else:
-        # Worked out against the session and deliberately not kept.
+        # Computed against the session and deliberately discarded.
         g.session.rollback()
 
     return {
@@ -3701,10 +3361,9 @@ async def repair(request: Request, g: ObjectGuard = Depends(changing)):
 @router.get("/hosts/{host_id}/config")
 async def get_host_config(host_id: str, g: ObjectGuard = Depends(guard)):
     """
-    The nginx this site turns into.
+    The nginx config this site renders to.
 
-    In gui mode this is generated, so it is read only and there to be looked at.
-    In raw mode it is what the person typed, and it is what gets written.
+    Generated and read only in gui mode; in raw mode it is what was typed.
     """
     host = g.get(VirtualHost, host_id)
 
@@ -3727,10 +3386,9 @@ async def put_host_config(host_id: str, request: Request,
     """
     Save hand written config for a site.
 
-    Checked twice before it is stored: our own parser for the obvious mistakes,
-    then nginx itself in the context of the whole config.  Storing something
-    that fails nginx -t would leave a site that cannot be applied and no obvious
-    way back, so it does not get saved at all.
+    Checked by our parser, then by nginx in the context of the full config.
+    Anything that fails nginx -t is not stored, since it would leave a site
+    that cannot be applied.
     """
     host = g.get(VirtualHost, host_id, "raw_config")
     payload = await request.json()
@@ -3749,8 +3407,7 @@ async def put_host_config(host_id: str, request: Request,
             "problems": problems,
         })
 
-    # Try it against nginx in place, so a site that would not load never gets
-    # stored.  We swap this site's file for the candidate and test the lot.
+    # Swap this site's file for the candidate and test the whole config.
     from app.core.render import _safe_name
 
     files, _, _ = render_current(g.session)
@@ -3785,27 +3442,24 @@ async def put_host_config(host_id: str, request: Request,
 @router.post("/config/validate")
 async def validate_config(request: Request, g: ObjectGuard = Depends(changing)):
     """
-    Check a raw config someone typed, before they save it.
+    Check raw config in the editor before it is saved.
 
-    Two passes.  Ours is instant and catches the obvious things right in the
-    editor.  Then it goes to nginx itself, which is the only thing that really
-    knows.  Nothing gets saved on the strength of our check alone.
+    Our quick parser catches obvious mistakes instantly, then nginx itself
+    has the final say.
     """
     payload = await request.json()
     text = payload.get("config", "")
 
     problems = quick_check(text)
 
-    # Only bother nginx if our own pass found nothing fatal.  No point in a
-    # round trip to tell somebody about a missing brace we already spotted.
+    # Skip nginx if our own pass already found something fatal.
     nginx_result = None
     if not any(p["severity"] == "error" for p in problems):
         try:
-            # Test the candidate in the context of everything else, not on its
-            # own.  Two reasons.  A site alone has no log formats or upstreams,
-            # so it fails for reasons that have nothing to do with what was
-            # typed.  And staging is shared, so writing just this one file would
-            # throw away whatever was staged and leave the next apply broken.
+            # Test in the context of the full config.  Alone, a site lacks
+            # log formats and upstreams and fails for unrelated reasons.  And
+            # staging is shared, so writing only this file would wipe what
+            # else was staged and break the next apply.
             files, _, _ = render_current(g.session)
             files["sites/_candidate.conf"] = text
 
@@ -3828,10 +3482,8 @@ async def validate_config(request: Request, g: ObjectGuard = Depends(changing)):
 @router.post("/config/parse")
 async def parse_config(request: Request, g: ObjectGuard = Depends(changing)):
     """
-    Read a config back into GUI settings.
-
-    This is the half that makes the editor two way.  Somebody types
-    client_max_body_size 50m into the file and the form picks it up.
+    Parse config back into GUI settings, so the editor works both ways
+    (e.g. typing client_max_body_size 50m updates the form).
     """
     payload = await request.json()
     text = payload.get("config", "")
@@ -3914,9 +3566,8 @@ async def make_join_token(request: Request, g: ObjectGuard = Depends(changing)):
     settings = get_settings()
     sponsor = f"{settings.node_address}:{settings.peer_port}"
 
-    # The new box does not have the project on it yet, so the command has to get
-    # the code there first.  Handing somebody a command that starts with the
-    # name of a script they do not have is a good way to waste their afternoon.
+    # The new box does not have the project yet, so the command must fetch
+    # the code first.
     repo = settings.repo_url
     target = settings.install_dir
 
@@ -3948,14 +3599,9 @@ async def failover(request: Request, g: ObjectGuard = Depends(changing)):
     except ClusterError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
-    # Say what is true now, and do not invent a reason for it.
-    #
-    # The first cut of this said the chosen node was "not in a fit state"
-    # whenever it was not yet active, which is wrong most of the time: moving
-    # the role takes a couple of seconds and there is a moment in the middle
-    # where neither node holds it.  Reporting that as a fault sends somebody
-    # looking for a problem that is about to fix itself.  So the only time a
-    # reason is given is when the roster actually says the node cannot take it.
+    # Only give a reason when the roster says the node cannot take the role.
+    # Moving the role takes a couple of seconds with nobody active in the
+    # middle, and that is not a fault.
     from app.core.cluster import preferred_active
     wanted, _asked_at = preferred_active()
     with session_scope() as session:
@@ -4003,17 +3649,14 @@ async def failover(request: Request, g: ObjectGuard = Depends(changing)):
 @router.delete("/cluster/nodes/{node_name}")
 async def remove_node(node_name: str, g: ObjectGuard = Depends(changing)):
     """
-    Take a node out of the cluster.
+    Remove a node from the cluster.
 
-    There was no way to do this at all, which is a problem the moment somebody
-    registers the wrong box.  A node that is not really there still counts
-    towards quorum, so a phantom entry can stop the real nodes electing anybody
-    and there was no way to clear it out short of editing the database.
+    A phantom node still counts toward quorum and can stop the real nodes
+    from electing anyone.
 
-    This only forgets the node here.  It does not reach out and uninstall
-    anything, because the usual reason for doing this is that the node is not
-    answering in the first place.  If it is still running out there, stop it or
-    it will carry on heartbeating and reappear.
+    Only forgets the node here; nothing is uninstalled, since the node is
+    usually not answering anyway.  If it is still running, stop it, or its
+    heartbeats will bring it back.
     """
     node = g.session.query(Node).filter(Node.name == node_name).first()
     if not node:
@@ -4046,9 +3689,8 @@ async def remove_node(node_name: str, g: ObjectGuard = Depends(changing)):
     audit.record("cluster.node_remove", user=g.user, object_type="cluster",
                  object_name=node_name, detail=f"removed {node_name} from the cluster")
 
-    # Roles are worked out from who is left, so run that again now rather than
-    # waiting for the timer.  Dropping a dead node is often the thing that lets
-    # the survivors elect somebody.
+    # Re-run the election now rather than waiting for the timer.  Dropping a
+    # dead node is often what lets the survivors elect someone.
     try:
         await get_cluster().run_election()
     except Exception as exc:
@@ -4060,12 +3702,10 @@ async def remove_node(node_name: str, g: ObjectGuard = Depends(changing)):
 @router.post("/cluster/resync")
 async def resync(g: ObjectGuard = Depends(changing)):
     """
-    Push the current config at anybody who is behind, right now.
+    Push the current config, and certificates, to any node that is behind.
 
-    Certificates go too.  Config was the only thing this caught, so a node that
-    joined after a certificate was issued stayed without it and pressing Sync
-    now did not help, which is the one button anybody would try.  Sync should
-    mean everything the other nodes need, not just the config files.
+    Certificates are included so a node that joined after one was issued
+    catches up when someone presses Sync.
     """
     g.require("manage_cluster")
     await get_cluster().drain_pending()
@@ -4095,10 +3735,9 @@ async def resync(g: ObjectGuard = Depends(changing)):
 # Zones and access lists
 # ==============================================================================
 #
-# These are the shared pieces sites point at.  nginx wants them declared once at
-# the http level and then used further down, which is why they are their own
-# objects rather than settings on a site.  It also means several sites can share
-# one bucket, which is usually what you want for something like a login limit.
+# Shared objects sites point at.  nginx declares them once at the http level,
+# which is why they are not per-site settings, and lets several sites share
+# one bucket (usually what you want for e.g. a login rate limit).
 
 ZONE_MODELS = {
     "rate": RateLimitZone,
@@ -4149,7 +3788,7 @@ async def list_zones(g: ObjectGuard = Depends(guard)):
 
 
 def _zone_users(session, setting_key: str, zone_name: str) -> list:
-    """Which sites point at this zone.  Stops somebody deleting one still in use."""
+    """Which sites use this zone, so one in use cannot be deleted."""
     users = []
     for host in session.query(VirtualHost).all():
         if host.setting_map().get(setting_key) == zone_name:
@@ -4196,8 +3835,8 @@ async def update_zone(kind: str, zone_id: str, request: Request,
     if "name" in payload:
         new_name = validate_name(payload["name"], "zone name")
         if new_name != zone.name:
-            # Renaming a zone a site still points at would break that site's
-            # config, because the name is what links the two.
+            # The name links the zone to its sites, so renaming one in use
+            # would break them.
             users = _zone_users(g.session, _setting_for(kind), zone.name)
             if users:
                 raise HTTPException(
@@ -4260,8 +3899,7 @@ def _apply_zone_fields(kind: str, zone, payload: dict):
 
     if "key" in payload and kind in ("rate", "conn"):
         key = str(payload["key"]).strip()
-        # An nginx variable, possibly a couple joined together.  Anything else
-        # would end up written straight into a directive.
+        # One or more nginx variables only; this goes into a directive.
         if not _re.fullmatch(r"[$A-Za-z0-9_]{1,120}", key):
             raise HTTPException(
                 status_code=400,
@@ -4303,8 +3941,8 @@ def _apply_zone_fields(kind: str, zone, payload: dict):
         path = str(payload["path"]).strip()
         if not path.startswith("/") or _re.search(r"[;{}\s]", path):
             raise HTTPException(status_code=400, detail="that is not a valid path")
-        # Somewhere sensible, not anywhere on the disk.  A cache path pointed at
-        # the wrong place fills a partition somebody was relying on.
+        # Keep cache paths to known locations so a mistake cannot fill a
+        # partition something else depends on.
         if not path.startswith(("/var/cache/", "/srv/", "/data/")):
             raise HTTPException(
                 status_code=400,
@@ -4341,9 +3979,8 @@ def _error_template_detail(session, t):
         }
         for i in sorted(t.images or [], key=lambda x: x.name)
     ]
-    # Sites and paths both, because deleting one that a path is using is
-    # exactly as much of a change as deleting one a site is using, and only
-    # counting sites made the refusal below miss half of them.
+    # Count paths as well as sites; counting only sites made the refusal
+    # below miss half the users.
     used = [h.name for h in session.query(VirtualHost)
             .filter(VirtualHost.error_page_template_id == t.id).all()]
     used += [f"{loc.host.name}{loc.path}" for loc in session.query(Location)
@@ -4370,15 +4007,11 @@ async def get_error_template(template_id: str, g: ObjectGuard = Depends(guard)):
 async def preview_error_template(template_id: str, code: int = 404,
                                  g: ObjectGuard = Depends(guard)):
     """
-    What one page really looks like, rendered the same way the fleet renders it.
+    Render one error page exactly as the fleet would.
 
-    Deliberately the same function the renderer calls, not a second one that
-    does nearly the same thing.  A preview that is its own code path is a
-    preview that can be right about a page which then comes out wrong.
-
-    Handed back as HTML rather than as a string in some json, because a person
-    looking at their page wants to see the page.  See sandboxed_html_headers
-    for what stops that being a way of running their markup on our origin.
+    Uses the renderer's own function so the preview cannot disagree with the
+    real page.  Returned as HTML; see sandboxed_html_headers for what stops it
+    running user markup on our origin.
     """
     template = g.get(ErrorPageTemplate, template_id)
     try:
@@ -4434,10 +4067,9 @@ async def update_error_template(template_id: str, request: Request,
 async def delete_error_template(template_id: str, g: ObjectGuard = Depends(changing)):
     template = g.get(ErrorPageTemplate, template_id, "edit_sites")
 
-    # Unlike a pool, a template going away cannot break a site: nginx falls back
-    # to its own page and keeps the real status.  It still gets refused, because
-    # a template being deleted out from under four sites is a change to four
-    # sites and the person doing it should know that before it happens.
+    # Unlike a pool, a missing template cannot break a site (nginx falls back
+    # to its own page).  Still refused, so the person knows it affects those
+    # sites.
     users = [h.name for h in g.session.query(VirtualHost)
              .filter(VirtualHost.error_page_template_id == template.id).all()]
     users += [f"{loc.host.name}{loc.path}" for loc in g.session.query(Location)
@@ -4506,12 +4138,10 @@ def _apply_error_template_fields(g, template, payload):
 async def upload_error_image(template_id: str, request: Request,
                              g: ObjectGuard = Depends(changing)):
     """
-    Take a picture for a template.
+    Upload an image for a template.
 
-    The name is ours, not the uploader's: it goes through validate_name and it
-    is only ever used as a lookup key in {{image:...}}.  Nothing here ever
-    becomes a path, which is the point of keeping these in the database and
-    inlining them rather than writing them out as files.
+    The name only ever serves as a lookup key in {{image:...}} and never
+    becomes a path; images live in the database and are inlined.
     """
     template = g.get(ErrorPageTemplate, template_id, "edit_sites")
     payload = await request.json()
@@ -4521,7 +4151,7 @@ async def upload_error_image(template_id: str, request: Request,
     if not isinstance(raw_b64, str):
         raise HTTPException(status_code=400, detail="send the picture as base64")
 
-    # Strip a data: prefix, since that is what a browser FileReader hands over.
+    # Strip a data: prefix, which is what a browser FileReader sends.
     if raw_b64.startswith("data:"):
         raw_b64 = raw_b64.split(",", 1)[-1]
 
@@ -4545,8 +4175,8 @@ async def upload_error_image(template_id: str, request: Request,
                     f"They all travel to every node on every apply."),
         )
 
-    # Same name replaces, so re-uploading a logo does not leave the old one
-    # behind taking up the budget and never being referenced by anything.
+    # Same name replaces, so a re-uploaded logo does not leave the old one
+    # eating the size budget.
     for image in list(template.images or []):
         if image.name == name:
             g.session.delete(image)
@@ -4590,11 +4220,10 @@ async def delete_error_image(template_id: str, image_id: str,
 @router.get("/metrics/members")
 async def member_metrics(minutes: int = 60, g: ObjectGuard = Depends(guard)):
     """
-    What each pool's backends say they are doing.
+    What each pool's backends report about themselves.
 
-    Empty for a pool that has no metrics URL set, which is not an error: most
-    backends publish nothing and the page says not measured rather than drawing
-    an empty chart, because an empty chart reads as zero.
+    Empty for pools with no metrics URL, which is normal; the page shows
+    "not measured" rather than an empty chart that reads as zero.
     """
     g.require("view")
     from app.core.metrics import get_collector
@@ -4604,8 +4233,8 @@ async def member_metrics(minutes: int = 60, g: ObjectGuard = Depends(guard)):
         "minutes": minutes,
         "pools": get_collector().member_snapshot(with_series=True,
                                                  limit=minutes * 2),
-        # Which pools are set up to be asked at all, so the page can tell a
-        # pool that publishes nothing from one that has never been looked at.
+        # Pools set up for metrics, so the page can tell "publishes nothing"
+        # from "never asked".
         "configured": _pools_with_metrics(g.session),
     }
 
@@ -4620,18 +4249,17 @@ def _pools_with_metrics(session):
 @router.get("/metrics/series")
 async def metrics_series(minutes: int = 60, g: ObjectGuard = Depends(guard)):
     """
-    The same numbers as /metrics, with the history behind them.
+    The same numbers as /metrics, with history.
 
-    `minutes` is capped by what is kept, which is a couple of hours in memory.
-    Asking for more than that is not an error, it just gets what there is: the
-    page says how far back the data really goes rather than drawing a flat line
-    across a window nobody has numbers for.
+    `minutes` is capped by what is kept in memory (a couple of hours); asking
+    for more just returns what there is, and the page says how far back it
+    goes.
     """
     g.require("view")
     from app.core.metrics import get_collector
 
     minutes = max(1, min(int(minutes or 60), 240))
-    # One sample every fifteen seconds, so four a minute.
+    # One sample every fifteen seconds.
     limit = minutes * 4
     return {
         "minutes": minutes,
@@ -4644,13 +4272,10 @@ async def nginx_metrics(g: ObjectGuard = Depends(guard)):
     """
     Connection and request numbers for every node, with rates.
 
-    stub_status is what free nginx gives, and four of its seven numbers are
-    counters, so the useful part is the difference between two readings rather
-    than the readings themselves.  See app/core/metrics.py.
-
-    Deliberately not per site or per backend.  Those need the access log read,
-    which is a real piece of work and is written up in docs/plus-parity.md as a
-    plan rather than pretended to be here.
+    Comes from stub_status, where most numbers are counters, so rates come
+    from the difference between readings (see app/core/metrics.py).  Per site
+    and per backend numbers need access log parsing; that is planned in
+    docs/plus-parity.md.
     """
     g.require("view")
     from app.core.metrics import get_collector
@@ -4704,14 +4329,12 @@ def _gslb_record_json(r):
         "when_all_down": r.when_all_down,
         "answers": [
             {"id": a.id, "value": a.value, "node_id": a.node_id,
-             # The stored name, not a lookup through node_id.  On any node
-             # other than the one that wrote the row, that id is a different
-             # machine, so resolving it here would report the wrong node.
+             # Use the stored name.  node_id refers to a different machine on
+             # any node other than the one that wrote the row.
              "node_name": (a.node_name
                            or (a.node.name if a.node else None)),
              "priority": a.priority, "enabled": a.enabled,
-             # Next to the answer rather than in a list somewhere else, so it
-             # is in front of the person editing the thing it is about.
+             # Shown next to the answer it is about.
              "address_warning": _answer_warnings().get(a.id)}
             for a in r.answers
         ],
@@ -4722,8 +4345,8 @@ def _answer_warnings():
     """
     Answers whose address does not belong to the node they are tied to.
 
-    Worked out once per request and cached on the session, because a zone with
-    many records would otherwise walk the node table for every answer.
+    Computed once per request and cached on the session, so large zones do
+    not walk the node table for every answer.
     """
     from app.core import gslb
     from app.db import session_scope
@@ -4739,9 +4362,8 @@ async def list_gslb_zones(g: ObjectGuard = Depends(guard)):
     server = gslb.get_server()
     return {
         "zones": [_gslb_zone_json(z) for z in g.list(GslbZone)],
-        # What the listener is actually doing, because a zone that exists in
-        # the database and a zone the world can resolve are different things
-        # and the gap between them is the whole of what goes wrong here.
+        # What the listener is actually doing.  A zone in the database is not
+        # the same as a zone the world can resolve.
         "server": {
             "listening": bool(server._running),
             "address": server.address,
@@ -4752,15 +4374,11 @@ async def list_gslb_zones(g: ObjectGuard = Depends(guard)):
         },
         # Which nodes would be handed out right now.
         "healthy_nodes": sorted(gslb.healthy_node_names(g.session)),
-        # The nodes an answer can be tied to, with the address each one would
-        # hand out.  The cluster page does not publish node ids and there is no
-        # reason it should, but an answer is stored against one, so the picker
-        # has to get them from somewhere.
-        #
-        # Split by family rather than offered as one address, because the
-        # record type decides which one is even legal.  A node's public address
-        # here is quite often the IPv6 one, and handing that to an A record
-        # produces something that looks filled in and cannot be saved.
+        # Nodes an answer can be tied to, with the address each would give.
+        # The picker needs node ids, which the cluster page does not expose.
+        # Split by address family because the record type decides which is
+        # valid; a node's public address is often IPv6, which an A record
+        # cannot take.
         "nodes": [
             {
                 "id": n.id,
@@ -4776,11 +4394,10 @@ async def list_gslb_zones(g: ObjectGuard = Depends(guard)):
 
 def _pick_family(node, family: int):
     """
-    The address of this node worth putting in public DNS, for one family.
+    The address of this node to publish in DNS, for one family.
 
-    The public one first where we know it, because the address a node uses to
-    reach its peers is often private, and a private address in public DNS is a
-    mistake nobody notices until somebody outside cannot get in.
+    Prefers the public address, since the peer address is often private and
+    would be unreachable from outside.
     """
     for candidate in (node.public_ip, node.address):
         if not candidate:
@@ -4826,9 +4443,8 @@ async def update_gslb_zone(zone_id: str, request: Request,
     zone = g.get(GslbZone, zone_id, "edit_sites")
     payload = pick_fields(await request.json(), GSLB_ZONE_FIELDS)
     _apply_gslb_zone(g, zone, payload)
-    # Every change bumps the serial.  Nothing here transfers a zone today, so
-    # it changes nothing that works, and a zone whose serial never moves is a
-    # zone no secondary could ever be added to later.
+    # Bump the serial on every change.  Nothing transfers zones today, but
+    # this keeps adding a secondary later possible.
     zone.soa_serial = (zone.soa_serial or 1) + 1
     g.session.commit()
 
@@ -4915,8 +4531,8 @@ def _apply_gslb_zone(g, zone, payload):
                                     detail=f"{entry} is not a nameserver name")
             if name not in cleaned:
                 cleaned.append(name)
-        # Said rather than refused, because a zone can be built before the
-        # delegation is in place and refusing would force the wrong order.
+        # Warn rather than refuse, since a zone may be built before its
+        # delegation exists.
         zone.nameservers = json.dumps(cleaned)
 
 
@@ -5024,9 +4640,9 @@ async def create_gslb_answer(record_id: str, request: Request,
     audit.record("gslb.answer.add", user=g.user, object_type="gslb_record",
                  object_name=record.fqdn(), changes=payload)
     _gslb_reload()
-    # Saved either way.  A warning here is advice, not a refusal: pointing an
-    # answer at a floating address, or at something in front of the node, is a
-    # real thing people do and the product cannot tell it from a typo.
+    # Saved either way.  Pointing an answer at a floating address or at
+    # something in front of the node is legitimate, and we cannot tell that
+    # from a typo.
     return _gslb_record_json(record)
 
 
@@ -5075,8 +4691,8 @@ def _apply_gslb_answer(g, record, answer, payload):
         else:
             node = g.get(Node, node_id)
             answer.node_id = node.id
-            # The name is what survives the trip to another node.  The id is
-            # kept only so this box's own pages can resolve it without a join.
+            # The name is what survives replication; the id is only for this
+            # node's own pages.
             answer.node_name = node.name
 
     if "priority" in payload:
@@ -5100,11 +4716,8 @@ def _apply_gslb_answer(g, record, answer, payload):
 
 def _gslb_reload():
     """
-    Rebuild the listener's snapshot straight away rather than waiting.
-
-    The timer would pick it up within ten seconds, and somebody who just saved
-    a record and immediately ran dig would see the old answer and reasonably
-    conclude it had not worked.
+    Rebuild the listener's snapshot now instead of waiting up to ten seconds
+    for the timer, so a dig right after saving shows the new answer.
     """
     try:
         from app.core import gslb
@@ -5123,20 +4736,13 @@ def _publish_gslb():
     """
     Send the zones to the other nodes.
 
-    Everything else here is served by nginx from files, and those files reach
-    the other nodes on an apply.  DNS is the exception: the listener answers
-    out of the database, so on any node whose database has not got the zones,
-    it answers nothing at all.
+    The DNS listener answers from the database, not from nginx files.  Rows
+    travel between nodes with the config snapshot, which only ships when the
+    rendered nginx config changes, and a DNS edit changes no nginx file.  So
+    without this the zones stayed on one node, and the node meant to take
+    over when it died answered nothing.
 
-    The config snapshot is what carries database rows between nodes, and it
-    only travels when the rendered nginx config changes.  Editing a DNS record
-    changes no nginx file, so without this the zones stayed on the box they
-    were typed into and every other node stayed silent.  On a feature whose
-    whole job is to survive a node dying, the node that stays silent is the one
-    that was supposed to take over.
-
-    Forced, because "nothing changed" is exactly the answer the renderer gives
-    for a DNS edit, and that answer is what used to stop the zones moving.
+    Forced, because the renderer reports "nothing changed" for a DNS edit.
     """
     async def _go():
         try:
@@ -5151,9 +4757,8 @@ def _publish_gslb():
     try:
         asyncio.get_running_loop().create_task(_go())
     except RuntimeError:
-        # No loop, which means a script or a test rather than a request.  The
-        # local listener is already up to date, and the timer on each node will
-        # bring the rest along at the next apply.
+        # No loop means a script or test, not a request.  The local listener
+        # is current and other nodes catch up at the next apply.
         log.debug("no event loop, so the dns zones were not pushed from here")
 
 
@@ -5173,8 +4778,7 @@ def _authority_json(a):
         "description": a.description,
         "directory_url": a.directory_url,
         "eab_kid": a.eab_kid,
-        # Never the key itself, only whether one is stored.  The same rule the
-        # dns credentials already follow.
+        # Never the key itself, only whether one is stored.
         "eab_hmac_key_set": bool(a.eab_hmac_key_encrypted),
         "preferred_chain": a.preferred_chain,
         "enabled": a.enabled,
@@ -5221,9 +4825,8 @@ async def update_authority(authority_id: str, request: Request,
 async def delete_authority(authority_id: str, g: ObjectGuard = Depends(changing)):
     g.require("edit_certs")
     authority = g.get(CertificateAuthority, authority_id)
-    # Refused rather than cascaded, the same as a pool a site is using.  A
-    # certificate whose authority has gone cannot be renewed, and it would not
-    # say so until the renewal.
+    # Refused rather than cascaded.  A certificate whose authority is gone
+    # cannot renew, and would not say so until the renewal.
     if authority.certificates:
         names = ", ".join(c.name for c in authority.certificates)
         raise HTTPException(
@@ -5242,12 +4845,11 @@ async def delete_authority(authority_id: str, g: ObjectGuard = Depends(changing)
 @router.post("/authorities/{authority_id}/test")
 async def test_authority(authority_id: str, g: ObjectGuard = Depends(changing)):
     """
-    Register an account against this authority, and keep nothing but the answer.
+    Register an account with this authority and keep only the result.
 
-    Worth its own button because these credentials are wrong in a particular
-    way: they look fine when they are typed and they fail at first use, which
-    is at a renewal months later at whatever hour the timer runs.  Trying it
-    now turns that into a red message while somebody is still looking at it.
+    Bad EAB credentials look fine when typed and only fail at first use,
+    months later at renewal.  This surfaces the problem while someone is
+    still looking.
     """
     g.require("edit_certs")
     authority = g.get(CertificateAuthority, authority_id)
@@ -5293,8 +4895,8 @@ def _apply_authority(g, authority, payload, creating=False):
 
     if "eab_hmac_key" in payload:
         value = str(payload["eab_hmac_key"] or "").strip()
-        # Blank means leave the stored one alone, so somebody editing the name
-        # does not have to paste the key again.
+        # Blank keeps the stored key, so editing the name does not require
+        # re-entering it.
         if value:
             authority.eab_hmac_key_encrypted = encrypt(value)
 
@@ -5312,13 +4914,8 @@ def _apply_authority(g, authority, payload, creating=False):
 # Map blocks, which is nginx's lookup table
 # ==============================================================================
 
-# Variables a map is allowed to read.
-#
-# Not a nicety.  nginx refuses a map whose source variable it does not know,
-# with "unknown variable", and it refuses it at load time on every node, so one
-# typo here stops the whole fleet applying anything at all until somebody works
-# out which map is to blame.  Checking on the way in turns that into a message
-# next to the box it was typed in.
+# Variables a map may read.  nginx rejects an unknown source variable at load
+# time on every node, blocking the whole fleet, so we check at save time.
 MAP_SOURCE_VARIABLES = {
     "$host", "$hostname", "$http_host", "$https", "$scheme", "$request_method",
     "$request_uri", "$uri", "$document_uri", "$args", "$query_string",
@@ -5336,15 +4933,14 @@ MAP_SOURCE_VARIABLES = {
     "$upstream_addr", "$upstream_status", "$upstream_response_time",
 }
 
-# Whole families of them, where the bit after the prefix is whatever the client
-# sent.  nginx makes these up on demand so any name after the prefix is fine.
+# Variable families where any suffix is valid (nginx creates them on demand).
 MAP_SOURCE_PREFIXES = (
     "$http_", "$arg_", "$cookie_", "$sent_http_", "$upstream_http_",
     "$upstream_cookie_", "$ssl_", "$geoip_", "$proxy_protocol_tlv_",
 )
 
-# Names a map must not produce, because nginx already has them and says
-# "the duplicate variable" rather than anything about a map.
+# Names a map must not produce, because nginx already defines them and its
+# error ("the duplicate variable") says nothing about maps.
 MAP_RESERVED_RESULTS = {
     v.lstrip("$") for v in MAP_SOURCE_VARIABLES
 } | {"args", "uri", "host", "status", "scheme", "request", "document_uri"}
@@ -5378,8 +4974,7 @@ def _known_source(value: str) -> bool:
 async def list_maps(g: ObjectGuard = Depends(guard)):
     return {
         "maps": [_map_json(m) for m in g.list(MapBlock)],
-        # What a map is allowed to read, so the page can offer them rather than
-        # leaving somebody to guess and take the fleet down with a typo.
+        # Offered in the page so nobody has to guess.
         "sources": sorted(MAP_SOURCE_VARIABLES),
         "prefixes": list(MAP_SOURCE_PREFIXES),
     }
@@ -5428,10 +5023,9 @@ async def update_map(map_id: str, request: Request,
 async def delete_map(map_id: str, g: ObjectGuard = Depends(changing)):
     block = g.get(MapBlock, map_id, "edit_sites")
 
-    # A map nothing reads is dead weight; a map something reads is load bearing,
-    # and nginx will not start with a variable that has no map behind it.  We
-    # cannot see into raw config or a setting's text reliably, so this looks and
-    # says what it found rather than refusing outright.
+    # nginx will not start if a variable in use has no map.  We cannot
+    # reliably see into raw config or setting text, so we report what we find
+    # rather than refusing.
     variable = "$" + (block.result_variable or "").lstrip("$")
     users = []
     for host in g.session.query(VirtualHost).all():
@@ -5496,8 +5090,7 @@ def _apply_map_fields(g, block, payload):
                 detail=(f"nginx already has a variable called ${result}, and a "
                         f"map cannot take a name that is taken.  It says "
                         f'"the duplicate variable" and will not start.'))
-        # Two maps writing one variable is accepted by nginx and only one of
-        # them wins, silently, which is a worse day than a refusal.
+        # nginx accepts two maps writing one variable and silently uses one.
         for other in g.session.query(MapBlock).all():
             if other.id == block.id:
                 continue
@@ -5533,8 +5126,8 @@ def _apply_map_fields(g, block, payload):
             if not match:
                 continue
             if match in seen:
-                # nginx takes the first and ignores the rest, so the second one
-                # is a rule somebody wrote that will never fire.
+                # nginx uses the first and ignores the rest, so the second
+                # entry would never fire.
                 raise HTTPException(
                     status_code=409,
                     detail=(f"{match} is in this map twice.  nginx uses the first "
@@ -5546,12 +5139,11 @@ def _apply_map_fields(g, block, payload):
 
 def _check_map_text(value, what):
     """
-    A match or a value, checked the way the renderer will write it.
+    Check a map match or value the way the renderer will write it.
 
-    Backslashes are allowed on purpose, because a map is mostly regular
-    expressions and almost every useful one has a backslash in it.  What is
-    refused is what would end the directive early or run past the closing
-    quote.  See map_value in render.py, which does the writing.
+    Backslashes are allowed since most maps are regexes.  Refused is anything
+    that would end the directive early or break out of the quotes; see
+    map_value in render.py.
     """
     text = "" if value is None else str(value).strip()
     if re.search(r"[;{}\n\r]", text):
@@ -5580,8 +5172,8 @@ STREAM_FIELDS = {
     "access_list_id", "custom_config",
 }
 
-# Ports the manager itself answers on.  Handing one to a stream takes the GUI
-# away from whoever is doing it, from inside the GUI, which is a bad afternoon.
+# Ports the manager itself listens on.  Giving one to a stream would cut off
+# the GUI.
 def _reserved_ports():
     settings = get_settings()
     return {
@@ -5619,9 +5211,8 @@ async def list_streams(g: ObjectGuard = Depends(guard)):
         pass
     return {
         "streams": [_stream_json(s) for s in g.list(StreamServer)],
-        # Said out loud rather than left to a config that silently does nothing.
-        # nginx has to be built --with-stream and the installer does that, but a
-        # binary from somewhere else may not be.
+        # nginx needs --with-stream.  The installer builds it that way, but a
+        # binary from elsewhere may not have it.
         "supported": have_stream,
     }
 
@@ -5688,10 +5279,8 @@ def _apply_stream_fields(g, stream, payload):
         if proto not in ("tcp", "udp"):
             raise HTTPException(status_code=400, detail="it is tcp or udp")
         stream.protocol = proto
-        # The model carries both a protocol column and a udp flag, and the
-        # renderer reads either one.  Setting them together here is the only
-        # thing stopping them disagreeing, which is a stream that says udp on
-        # the page and listens on tcp.
+        # The model has both a protocol column and a udp flag, and the
+        # renderer reads either, so keep them in sync here.
         stream.udp = proto == "udp"
 
     if "listen_port" in payload:
@@ -5709,9 +5298,8 @@ def _apply_stream_fields(g, stream, payload):
                 detail=(f"port {port} is {reserved[port]}.  Taking it would cut "
                         f"you off from the thing you are using to take it."))
 
-        # A site already listening there is the other way to lose a service, and
-        # nginx would refuse to start rather than quietly picking one, so the
-        # whole fleet stops applying anything until somebody spots it.
+        # A site on the same port makes nginx refuse to start, which would
+        # block every apply on the fleet.
         clash = g.session.query(VirtualHost).filter(
             VirtualHost.enabled.is_(True)).all()
         for host in clash:
@@ -5738,8 +5326,7 @@ def _apply_stream_fields(g, stream, payload):
                     detail="that has to be an address on this box, or 0.0.0.0 for all of them")
         stream.listen_address = addr
 
-    # Two streams on one address and port is the same refusal as above, and
-    # worth catching here rather than at apply time on somebody else's node.
+    # Same for two streams on one address and port.
     port = stream.listen_port
     proto = "udp" if stream.udp else "tcp"
     for other in g.session.query(StreamServer).all():
@@ -5774,10 +5361,8 @@ def _apply_stream_fields(g, stream, payload):
         if not isinstance(raw, dict):
             raise HTTPException(status_code=400, detail="settings has to be an object")
         clean = {}
-        # A short list on purpose.  The catalog is written for http and most of
-        # it means nothing on a raw socket, so rather than offer settings that
-        # quietly do nothing, a stream takes these few and hand written config
-        # for anything else.
+        # Short list on purpose.  Most of the catalog is http-only, so streams
+        # take these few settings plus hand written config for anything else.
         for key in ("proxy_timeout", "proxy_connect_timeout"):
             value = str(raw.get(key) or "").strip()
             if not value:
@@ -5788,11 +5373,8 @@ def _apply_stream_fields(g, stream, payload):
                     detail=f"{key} looks like 60s, 5m or 1h")
             clean[key] = value
 
-        # The TLS ones do mean something on a raw socket, and until they were
-        # allowed through here the renderer had a version pair written into it
-        # and no way to say otherwise.  A stream that has never been given a
-        # list keeps the pair it has always had; setting one here is how it
-        # moves, the same as a site.
+        # TLS settings do apply to streams.  A stream with no list keeps its
+        # existing version pair; setting one here changes it, as for a site.
         if raw.get("ssl_protocols"):
             wanted = raw["ssl_protocols"]
             if isinstance(wanted, str):
@@ -5813,8 +5395,7 @@ def _apply_stream_fields(g, stream, payload):
                     status_code=400,
                     detail=("a stream doing TLS needs at least one version.  "
                             "Turn TLS off instead of emptying the list."))
-            # Keep the file in version order however the list arrived, so two
-            # streams that mean the same thing render the same way.
+            # Always in version order, so equivalent lists render the same.
             clean["ssl_protocols"] = [p for p in allowed if p in picked]
 
         for key in ("ssl_post_quantum", "ssl_post_quantum_only"):
@@ -5872,15 +5453,10 @@ async def update_access_list(acl_id: str, request: Request,
 async def delete_access_list(acl_id: str, g: ObjectGuard = Depends(changing)):
     acl = g.get(AccessList, acl_id, "edit_access_lists")
 
-    # Everything that can point at an access list, not just sites.
-    #
-    # This used to ask about sites alone, so a list protecting one path, or a
-    # tcp service, could be deleted out from under it.  The row kept its
-    # access_list_id, the id no longer existed, and the next render quietly
-    # dropped every rule: the path went from protected to public with nothing
-    # said and nothing to see on the page.  Protecting a path rather than a
-    # whole site is the normal shape for an admin area, so it was easy to
-    # reach.
+    # Check everything that can use an access list, not just sites.  Checking
+    # only sites let a list protecting a path (the usual setup for an admin
+    # area) or a stream be deleted, and the next render silently dropped its
+    # rules, leaving the path public.
     used_by = [h.name for h in g.session.query(VirtualHost)
                .filter(VirtualHost.access_list_id == acl.id).all()]
     used_by += [f"{loc.host.name}{loc.path}" if loc.host else f"path {loc.path}"
@@ -5942,23 +5518,11 @@ def _apply_acl_fields(acl, payload: dict):
             validate_cidr(proxy)
         acl.real_ip_from = json.dumps(proxies)
 
-    # Trusting a forwarded address with nobody named to trust it from.
-    #
-    # It is not dangerous, it is inert: without a set_real_ip_from line nginx
-    # trusts no source, so the header is ignored and the rules are applied to
-    # the address the connection really came from.  Which is exactly the
-    # problem.  The tick box is on, the page says the forwarded address is
-    # being used, and it is not, so somebody puts their CDN in front and
-    # wonders why every visitor arrives wearing the CDN's address.
-    #
-    # A setting that is saved, redisplayed and does nothing is worse than no
-    # setting.  Refused here with the fix in the message, the same as the
-    # other four values this API refuses.  One access list on this fleet was
-    # already sitting in exactly this state, found by the access list round.
-    # Only when this save is actually about the forwarded address, so that an
-    # unrelated edit to a list that is already in this state is not refused
-    # for something the person did not touch.  That is the shape of bug this
-    # project has shipped twice: saving one setting undoing another.
+    # Refuse "use the forwarded address" with no trusted sources.  Without a
+    # set_real_ip_from line nginx ignores the header, so rules apply to the
+    # connecting address (e.g. the CDN's) while the page says otherwise.
+    # Only checked when this save touches those fields, so an unrelated edit
+    # to a list already in this state is not refused.
     touched = "use_real_ip" in payload or "real_ip_from" in payload
     if touched and acl.use_real_ip and not acl.trusted_proxies():
         raise HTTPException(
@@ -5968,8 +5532,7 @@ def _apply_acl_fields(acl, payload: dict):
                    "nothing.  Add the address of whatever sits in front, or "
                    "turn the setting off.")
 
-    # Basic auth users.  The password is hashed here and the plain one never
-    # stored, same as any other password in this tool.
+    # Basic auth users.  Only the hash is stored.
     if "add_user" in payload:
         entry = payload["add_user"] or {}
         username = str(entry.get("username", "")).strip()
@@ -5997,12 +5560,10 @@ def _apply_acl_fields(acl, payload: dict):
 
 def _htpasswd_hash(password: str) -> str:
     """
-    Hash a basic auth password the way nginx expects to read it.
+    Hash a basic auth password in APR1, the htpasswd default nginx reads.
 
-    APR1 is what htpasswd writes by default and what nginx understands.  It is
-    not a good hash by modern standards, and that is a property of the format
-    rather than a choice.  Basic auth over https is a speed bump on top of the
-    IP rules, not the thing holding the door shut, and the help text says so.
+    Not a strong hash by modern standards, but that is the format.  Basic auth
+    is a speed bump on top of the IP rules, and the help text says so.
     """
     import base64
     import hashlib
@@ -6057,7 +5618,7 @@ def _htpasswd_hash(password: str) -> str:
 async def upgrade_plan(request: Request, nginx_version: str = None,
                        openssl_version: str = None,
                        g: ObjectGuard = Depends(guard)):
-    """What a rebuild would do, before anybody commits to forty minutes of it."""
+    """What a rebuild would do, before committing to a long build."""
     g.require("upgrade_nginx")
     from app.core.upgrade import get_upgrade_runner
 
@@ -6079,10 +5640,9 @@ async def upgrade_start(request: Request, g: ObjectGuard = Depends(changing)):
 
     payload = await request.json() if await request.body() else {}
 
-    # The WAF module is a build option, so it is decided here rather than on a
-    # page of its own.  Stored before the walk starts, because every node in
-    # the walk reads it as it goes: the whole fleet has to come out of this
-    # agreeing about whether the module is there.
+    # The WAF module is a build option, so it is set here.  Stored before the
+    # rolling rebuild starts because every node reads it as it goes, and the
+    # fleet must agree on it.
     if "with_modsecurity" in payload:
         settings_store.set("waf_module", bool(payload["with_modsecurity"]),
                            actor=g.user.username)
@@ -6123,10 +5683,8 @@ async def upgrade_revert(request: Request, g: ObjectGuard = Depends(changing)):
 @router.get("/upgrade/modules")
 async def upgrade_modules(g: ObjectGuard = Depends(guard)):
     """
-    What each node was built with, and where they differ.
-
-    Adding a module means rebuilding, so this sits next to the upgrade page
-    rather than off on its own.
+    What each node was built with, and where they differ.  Lives next to the
+    upgrade page because adding a module means rebuilding.
     """
     g.require("view")
     from app.core.capabilities import fleet_capabilities, module_differences
@@ -6142,9 +5700,8 @@ async def upgrade_modules(g: ObjectGuard = Depends(guard)):
         "nginx_version": caps.nginx_version,
         "openssl_version": caps.openssl_version,
         "post_quantum": caps.supports_post_quantum(),
-        # What the next rebuild will do about the WAF module, so the checkbox
-        # on the page shows what is actually in force rather than defaulting to
-        # off and quietly turning it off on the next rebuild.
+        # So the checkbox reflects the current setting rather than defaulting
+        # to off and dropping the module on the next rebuild.
         "waf_module": bool(settings_store.get("waf_module")),
     }
 
@@ -6173,15 +5730,13 @@ async def list_certs(g: ObjectGuard = Depends(guard)):
                 "synced_nodes": list(c.sync_map().keys()),
                 "last_error": c.last_renewal_error,
                 "renewal_failures": c.renewal_failures,
-                # Nothing renews an uploaded one, so the page has to be the
-                # thing that says the expiry is coming.  A row waiting on an
-                # authority has no certificate at all yet and should not read
-                # as a broken one.
+                # Nothing renews uploaded certificates, so the page has to warn
+                # about expiry.  A row still waiting on an authority has no
+                # certificate yet and should not look broken.
                 "has_material": c.has_material(),
                 "awaiting_csr": bool(c.csr_pem and not c.not_after),
-                # Names the sites using this certificate serve and it does not
-                # carry.  A browser warning waiting to happen, and both lists
-                # are right here, so there is no excuse for not saying it.
+                # Names served by sites using this certificate that it does
+                # not cover.
                 "short_of": sorted({
                     name
                     for h in c.hosts
@@ -6217,8 +5772,7 @@ async def create_cert(request: Request, g: ObjectGuard = Depends(changing)):
     if challenge not in ("http-01", "dns-01"):
         raise HTTPException(status_code=400, detail="challenge has to be http-01 or dns-01")
 
-    # A wildcard can only be done over dns-01.  Lets Encrypt will not issue one
-    # from an http challenge, so catching it here saves a confusing failure.
+    # Let's Encrypt only issues wildcards over dns-01, so catch it early.
     if any(d.startswith("*.") for d in domains) and challenge != "dns-01":
         raise HTTPException(
             status_code=400,
@@ -6234,8 +5788,7 @@ async def create_cert(request: Request, g: ObjectGuard = Depends(changing)):
         auto_renew=bool(payload.get("auto_renew", True)),
     )
 
-    # Which authority to buy it from, and to renew it from later.  Empty is
-    # Lets Encrypt, which is what every existing certificate is.
+    # Authority to issue and renew from.  Empty means Let's Encrypt.
     if payload.get("authority_id"):
         authority = g.get(CertificateAuthority, payload["authority_id"])
         if not authority.enabled:
@@ -6277,10 +5830,8 @@ def _cert_name_for(payload, domains, what="certificate"):
 
 def _store_material(g, cert, material, source):
     """
-    Put the certificate and its key on the row, together, or not at all.
-
-    Written as one step on purpose.  Half of a pair on a row is the same
-    problem as half of a pair on disk, and this system has met that twice.
+    Store the certificate and key on the row together, or not at all.  Half a
+    pair has caused problems before, on disk and in the database.
     """
     from app.core.crypto import encrypt
 
@@ -6294,10 +5845,8 @@ def _store_material(g, cert, material, source):
     cert.serial = material["serial"][:128]
     cert.fingerprint = material["fingerprint"][:128]
 
-    # Nothing renews these for us.  Lets Encrypt certificates get a renewal
-    # scheduled and these get a warning on the page instead, so leaving
-    # auto_renew on would put them in a queue that can never do anything for
-    # them and hide the fact that a person has to act.
+    # Nothing renews these, so auto_renew must be off.  Otherwise they sit in a
+    # renewal queue that can never succeed and hide that someone has to act.
     cert.auto_renew = False
     cert.csr_pem = None
     cert.csr_created_at = None
@@ -6306,11 +5855,8 @@ def _store_material(g, cert, material, source):
 @router.post("/certs/analyse")
 async def analyse_cert_upload(request: Request, g: ObjectGuard = Depends(changing)):
     """
-    Say what an upload is before anything is kept.
-
-    Same call the save uses, so what somebody is shown and what gets stored
-    cannot disagree.  A preview that is its own code path is a preview that can
-    be right about a certificate which then goes in wrong.
+    Describe an upload before anything is stored.  Uses the same call as the
+    save, so the preview and what is stored cannot disagree.
     """
     g.require("edit_certs")
     payload = await request.json()
@@ -6330,7 +5876,7 @@ async def analyse_cert_upload(request: Request, g: ObjectGuard = Depends(changin
 
 
 def _material_summary(material):
-    """Everything worth showing, and never the private key."""
+    """Everything worth showing, never the private key."""
     return {
         "subject": material["subject"],
         "issuer": material["issuer"],
@@ -6348,10 +5894,8 @@ def _material_summary(material):
 
 def _decode_upload(value):
     """
-    Take a field that might be pasted text or a base64 file from the browser.
-
-    A certificate is usually pasted and a PKCS12 never can be, so both arrive
-    through the same fields and this works out which is which.
+    Decode a field that may be pasted text or a base64 file from the browser.
+    Certificates are usually pasted; PKCS12 never can be.
     """
     if not value:
         return None
@@ -6366,7 +5910,7 @@ def _decode_upload(value):
 
 @router.post("/certs/upload")
 async def upload_cert(request: Request, g: ObjectGuard = Depends(changing)):
-    """Take a certificate somebody already has and put it on every node."""
+    """Upload an existing certificate and place it on every node."""
     g.require("edit_certs")
     payload = await request.json()
 
@@ -6413,7 +5957,7 @@ async def upload_cert(request: Request, g: ObjectGuard = Depends(changing)):
 
 @router.post("/certs/self-signed")
 async def create_self_signed(request: Request, g: ObjectGuard = Depends(changing)):
-    """Make one on the spot, for a name no public authority will sign."""
+    """Create a self-signed certificate, for names no public CA will sign."""
     g.require("edit_certs")
     payload = await request.json()
 
@@ -6455,12 +5999,10 @@ async def create_self_signed(request: Request, g: ObjectGuard = Depends(changing
 @router.post("/certs/csr")
 async def create_csr(request: Request, g: ObjectGuard = Depends(changing)):
     """
-    Make a signing request, and keep the key here.
+    Create a signing request and keep the key here.
 
-    The row this creates has no certificate on it yet, so it has no not_after,
-    so the renderer will not point nginx at it.  That is what makes a half
-    finished request harmless to leave sitting there while an authority takes
-    its time.
+    The row has no certificate and so no not_after, which means the renderer
+    ignores it.  A pending request is harmless while the authority is slow.
     """
     g.require("edit_certs")
     payload = await request.json()
@@ -6517,7 +6059,7 @@ async def get_csr(cert_id: str, g: ObjectGuard = Depends(guard)):
 @router.post("/certs/{cert_id}/csr/complete")
 async def complete_csr(cert_id: str, request: Request,
                        g: ObjectGuard = Depends(changing)):
-    """Pair the certificate an authority sent back with the key we kept."""
+    """Pair the certificate an authority returned with the key we kept."""
     cert = g.get(Certificate, cert_id, "edit_certs")
     payload = await request.json()
 
@@ -6558,12 +6100,10 @@ async def complete_csr(cert_id: str, request: Request,
 
 async def _place_and_report(cert_id):
     """
-    Write the material to every node, and never let that fail the save.
+    Write the material to every node, without ever failing the save.
 
-    The row is already committed by the time this runs, and that ordering is
-    deliberate.  A peer being down is a copy to make later, not a reason to
-    throw away a certificate somebody just uploaded, and the file check puts it
-    right on its own within the minute.
+    The row is committed first on purpose.  A peer being down just means a
+    copy to make later, and the file check fixes it within a minute.
     """
     try:
         return await get_cert_manager().place_material(cert_id)
@@ -6591,25 +6131,17 @@ async def issue_cert(cert_id: str, g: ObjectGuard = Depends(changing)):
 @router.post("/certs/{cert_id}/replicate")
 async def replicate_cert(cert_id: str, g: ObjectGuard = Depends(changing)):
     """
-    Push a certificate out to every node again.
+    Push a certificate to every node again.
 
-    Replication used to happen only as the last step of issuing.  That is fine
-    until the fleet changes afterwards: a node that joins later was never sent
-    the certificates that already existed, so it sat there missing them with no
-    way to ask for a copy.  "pushed to 1 of 2" and no button to do anything
-    about it.
-
-    Safe to run whenever.  A node that already has the files just gets the same
-    bytes written over the top.
+    Replication used to run only at issue time, so nodes that joined later
+    never got existing certificates and there was no way to fix that.  Safe
+    to run any time; nodes that have the files just get them rewritten.
     """
     cert = g.get(Certificate, cert_id, "edit_certs")
 
-    # Which way round depends on where the files actually are.
-    #
-    # An issued certificate is exported from whichever node certbot wrote it
-    # on.  One we hold the material for is written from the database, and
-    # asking certbot's folder for it gets "no cert called that", which is a
-    # confusing way to be told the button was pointed at the wrong code.
+    # Issued certificates are exported from whichever node certbot wrote them
+    # on.  Ones we hold material for are written from the database; certbot
+    # knows nothing about those.
     try:
         if cert.has_material():
             result = await get_cert_manager().place_material(cert.id)
@@ -6629,9 +6161,8 @@ async def cert_placement(cert_id: str, g: ObjectGuard = Depends(guard)):
     """
     Show which node would get this certificate, and why.
 
-    Worth its own endpoint.  When issuance fails this is the first thing to
-    look at, and it tells you what DNS says versus what your nodes think their
-    addresses are, side by side.
+    The first thing to check when issuance fails: DNS answers and node
+    addresses side by side.
     """
     cert = g.get(Certificate, cert_id)
     domains = cert.domain_list()
@@ -6640,8 +6171,8 @@ async def cert_placement(cert_id: str, g: ObjectGuard = Depends(guard)):
 
     placement = await pick_issuing_node(domains[0])
 
-    # The stored check too, so the dialog you opened because issuance looked
-    # wrong also tells you the record has been pointing elsewhere for a while.
+    # Include the stored DNS check, which may show the record has pointed
+    # elsewhere for a while.
     placement["dns_health"] = cert.dns_warning
     placement["dns_ok"] = bool(cert.dns_ok)
     return placement
@@ -6666,16 +6197,10 @@ async def delete_cert(cert_id: str, g: ObjectGuard = Depends(changing)):
     g.session.delete(cert)
     g.session.commit()
 
-    # Take the files off every node as well.
-    #
-    # Deleting the row used to leave the private key on the disk of every box,
-    # forever.  Nothing pointed at it and nothing listed it, so the only way to
-    # find out was to go and look, which nobody does until an audit.  It
-    # mattered more once certificates could be uploaded, because then this is
-    # the only copy anywhere and deleting it is the only way to get rid of it.
-    #
-    # Never certbot's folder.  It keeps renewal state next to its copies and
-    # `certbot delete` is the way to remove those.
+    # Remove the files from every node too.  Deleting the row used to leave
+    # the private key on every box indefinitely, and for uploaded certificates
+    # this is the only copy.  Never touch certbot's folder; it keeps renewal
+    # state there and `certbot delete` handles it.
     forgotten = await _forget_cert_files(name)
 
     audit.record("cert.delete", user=g.user, object_type="cert", object_name=name,
@@ -6688,9 +6213,8 @@ async def _forget_cert_files(name):
     """
     Remove a certificate's files fleet wide, without ever failing the delete.
 
-    A node being down is a file to clear up later, not a reason to keep a row
-    somebody asked to be rid of.  What is left where goes in the audit log, so
-    there is a record rather than a surprise.
+    Nodes that are down keep their files for now; what was left where goes
+    into the audit log.
     """
     results = {"ok": [], "failed": []}
     settings = get_settings()
@@ -6740,24 +6264,18 @@ async def acme_hook(request: Request):
     """
     Called by the certbot hook scripts on this host.
 
-    No session and no CSRF, because the caller is a shell script certbot ran,
-    not a browser.  Three things stand in for that:
-
-      the request has to come from this machine
-      it has to carry the shared secret the hooks were written with
-      it can only publish or remove a challenge token, nothing else
-
-    Getting all three means already being on the box, at which point the token
-    file could have been written directly anyway.
+    No session or CSRF, since the caller is a shell script.  Instead the
+    request must come from this machine, carry the shared secret the hooks
+    were written with, and can only publish or remove a challenge token.
+    Anyone who passes all three is already on the box and could write the
+    token file directly.
     """
     from app.core import acme_hooks
     from app.core.acme import ChallengeCoordinator
 
-    # Has to be a local caller.  Test this properly rather than by comparing
-    # strings: a connection to 127.0.0.1 can arrive as "::ffff:127.0.0.1" when
-    # the listener is dual stack, and any loopback address is 127.anything, not
-    # just 127.0.0.1.  A literal list misses both, and the failure looks like
-    # the hook URL being wrong rather than the address being rejected.
+    # Must be a local caller.  Check properly rather than by string: on a dual
+    # stack listener 127.0.0.1 can arrive as "::ffff:127.0.0.1", and loopback
+    # is all of 127.0.0.0/8.
     source = client_ip(request)
     try:
         is_local = ipaddress.ip_address(
@@ -6858,10 +6376,8 @@ async def version_diff(version: int, g: ObjectGuard = Depends(guard)):
     """
     What one applied version changed against the one before it.
 
-    Both sides come out of what was actually shipped, so this is history rather
-    than a guess.  Re-rendering the older one from today's objects would show
-    what it would look like now, which is a different and much less useful
-    question.
+    Both sides are the files actually shipped, not a re-render from today's
+    objects.
     """
     row = g.session.query(ConfigVersion).filter(
         ConfigVersion.version == version
@@ -6903,19 +6419,13 @@ async def version_diff(version: int, g: ObjectGuard = Depends(guard)):
 
 @router.post("/rollback")
 async def rollback(request: Request, g: ObjectGuard = Depends(changing)):
-    """Put the last known good config back on this node."""
+    """Restore the last known good config on this node."""
     g.require("rollback")
     payload = await request.json() if await request.body() else {}
 
-    # Take a version number as well as an archive name.
-    #
-    # Everything else in this tool speaks in version numbers: the versions list,
-    # the diff, the audit trail.  So `version` is the obvious thing to send
-    # here, and it used to be ignored: the agent fell back to the newest
-    # archive, which is the config that is already live, and the answer came
-    # back `ok: true`.  Asking to go back to a known good version and being
-    # told it worked while nothing changed is the worst possible behaviour for
-    # the one button somebody presses when they are already in trouble.
+    # Accept a version number as well as an archive name.  `version` used to
+    # be ignored: the agent fell back to the newest archive (the live config)
+    # and returned ok: true while nothing changed.
     name = payload.get("backup")
     wanted = payload.get("version")
     if name is None and wanted is not None:
@@ -6989,12 +6499,10 @@ async def audit_log(g: ObjectGuard = Depends(guard), limit: int = 100):
 @router.post("/import/preview")
 async def import_preview(request: Request, g: ObjectGuard = Depends(guard)):
     """
-    Work out what a config would become.  Writes nothing.
+    Show what a config would become, without writing anything.
 
-    Deliberately a read.  Somebody weighing up whether to adopt this tool should
-    be able to point it at their live config and see the answer without having
-    committed to anything, and without needing the permission that changes
-    things.
+    A read on purpose, so someone evaluating the tool can point it at their
+    live config without committing to anything.
     """
     g.require("edit_sites")
     payload = await request.json()
@@ -7007,12 +6515,10 @@ async def import_preview(request: Request, g: ObjectGuard = Depends(guard)):
 @router.post("/import")
 async def import_apply(request: Request, g: ObjectGuard = Depends(changing)):
     """
-    Make what the preview described.
+    Create what the preview described.
 
-    The config is parsed again here rather than trusting a plan posted back by
-    the browser.  A plan is a list of objects to create, and taking one from the
-    client would let anybody who can reach this endpoint make whatever they
-    liked, whatever the preview actually said.
+    The config is parsed again here rather than trusting a plan from the
+    browser, which would let a caller create anything it liked.
     """
     g.require("edit_sites")
     g.require("edit_pools")
@@ -7036,8 +6542,8 @@ async def import_apply(request: Request, g: ObjectGuard = Depends(changing)):
                  detail=f"imported {len(result['sites'])} sites and "
                         f"{len(result['pools'])} pools")
 
-    # Nothing is applied here.  Everything lands disabled and unapplied, so the
-    # person can look at what arrived before any of it reaches nginx.
+    # Nothing is applied.  Everything lands disabled so it can be reviewed
+    # before it reaches nginx.
     return {"ok": True, **result,
             "message": "imported and left switched off.  Look them over, turn on "
                        "the ones you want, then apply."}
@@ -7047,11 +6553,9 @@ async def import_apply(request: Request, g: ObjectGuard = Depends(changing)):
 # Paths within a site
 # ==============================================================================
 
-# There was a LOCATION_FIELDS tuple here that read exactly like the list of what
-# a path accepts and was referenced by nothing at all.  It is gone rather than
-# updated: a list nothing reads cannot be wrong in a way anybody notices, so it
-# drifts, and then somebody trusts it.  `_apply_location_fields` below is the
-# only answer to what a path accepts.
+# `_apply_location_fields` below is the only definition of what a path
+# accepts.  (An old, unused LOCATION_FIELDS tuple was removed so nobody trusts
+# a list that can drift.)
 
 MATCH_TYPES = {"prefix", "exact", "preferential", "regex", "regex_i"}
 LOCATION_MODES = {"proxy", "static", "redirect", "deny"}
@@ -7075,12 +6579,8 @@ def _location_json(loc) -> dict:
         "custom_config": loc.custom_config or "",
         "enabled": bool(loc.enabled),
         "sort_order": loc.sort_order or 0,
-        # Stored, written and accepted on the way in, and left out of here,
-        # which is the shape of bug that undoes itself.  The path editor reads
-        # this to draw the checkbox, so the box came back clear on every reload
-        # however it was saved, and the next save of that path posted the clear
-        # box back and turned the setting off.  Nobody unticked anything: the
-        # site simply started 404ing again after an unrelated edit.
+        # Must be returned here.  When it was missing, the editor showed the
+        # box cleared on reload, and the next unrelated save turned it off.
         "strip_prefix": bool(loc.strip_prefix),
         "mount_site": bool(loc.mount_site),
         "settings": loc.setting_map(),
@@ -7134,11 +6634,9 @@ def _apply_location_fields(loc, payload, g):
     if "sort_order" in payload:
         loc.sort_order = int(payload.get("sort_order") or 0)
 
-    # A mount only means anything where a path can have something under it.  On
-    # an exact or a regex match there is no prefix to take off and no set of URLs
-    # beneath it, so the rewriting would fire on one URL and mislead about the
-    # rest.  Refused rather than ignored, because a checkbox that saves and does
-    # nothing is the bug this whole area has already had once.
+    # Mounting only makes sense on prefix matches.  Exact and regex matches
+    # have nothing underneath to rewrite, so refuse rather than silently
+    # ignore.
     if loc.mount_site and loc.match_type not in ("prefix", "preferential"):
         raise HTTPException(
             status_code=400,
@@ -7156,9 +6654,8 @@ def _apply_location_fields(loc, payload, g):
                    "serve a site under")
 
     if "settings" in payload and isinstance(payload["settings"], dict):
-        # Validated the same way a site's are, and against the same catalog, so
-        # a setting that is not real cannot be smuggled in on a location when it
-        # would be refused on the site above it.
+        # Same catalog validation as a site, so nothing refused on the site
+        # can be set on a location instead.
         loc.settings = json.dumps(_validate_settings(payload["settings"], "location"))
 
 
@@ -7183,9 +6680,8 @@ async def create_location(host_id: str, request: Request,
         path=(payload.get("path") or "/").strip(),
         match_type="prefix",
         mode="proxy",
-        # On the end by default.  Order is what decides which path wins, so a
-        # new one going to the top would quietly take traffic from something
-        # that was already working.
+        # Append at the end.  Order decides which path wins, so adding at the
+        # top could take traffic from an existing path.
         sort_order=(existing[-1].sort_order or 0) + 10 if existing else 10,
         enabled=True,
     )
@@ -7228,12 +6724,10 @@ async def delete_location(loc_id: str, g: ObjectGuard = Depends(changing)):
 async def reorder_locations(host_id: str, request: Request,
                             g: ObjectGuard = Depends(changing)):
     """
-    Set the order of the paths on a site.
+    Set the order of a site's paths in one step.
 
-    Worth its own endpoint rather than a field on each save, because the order
-    is the thing that decides which path handles a request and it has to move as
-    one piece.  Saving them one at a time leaves a moment where two share a
-    position, and which one wins then is down to the database.
+    Order decides which path handles a request.  Saving positions one at a
+    time would briefly leave two paths sharing one.
     """
     g.require("edit_sites")
     host = g.get(VirtualHost, host_id)

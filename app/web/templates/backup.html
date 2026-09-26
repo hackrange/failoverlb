@@ -76,20 +76,17 @@ document.addEventListener("DOMContentLoaded", function () {
   function el(id) { return document.getElementById(id); }
   function esc(s) { return NFM.escapeHtml(s == null ? "" : String(s)); }
 
-  // These three calls use fetch rather than NFM.api, because one sends a file
-  // and another gets one back, and NFM.api speaks json both ways.  What that
-  // skips is the CSRF header NFM.api adds for you, and without it the change
-  // making calls are rejected before they reach the route.  The rejection is
-  // an HTML error page, so the only symptom was the json parser complaining
-  // about a doctype, which says nothing about what actually happened.
+  // These use fetch rather than NFM.api because they send or receive files,
+  // and NFM.api is json both ways. That means adding the CSRF header by hand;
+  // without it the request is rejected with an HTML error page, which only
+  // shows up as a json parse error about a doctype.
   function csrfToken() {
     const match = document.cookie.match(/(?:^|;\s*)nfm_csrf=([^;]+)/);
     return match ? decodeURIComponent(match[1]) : "";
   }
 
-  // Anything that is not json here is a page, and a page means the request
-  // never got where it was going.  Saying so beats handing back a parser error
-  // about a character somebody never typed.
+  // Anything that is not json here is an HTML page, meaning the request never
+  // reached the route. Say that instead of surfacing a parser error.
   async function asJson(res) {
     const text = await res.text();
     try {
@@ -118,8 +115,8 @@ document.addEventListener("DOMContentLoaded", function () {
     el("e-go").disabled = true;
     el("e-out").innerHTML = '<div class="faint">Collecting...</div>';
     try {
-      // Not NFM.api, because the answer is a file rather than json, and the
-      // download has to be handed to the browser rather than parsed.
+      // Not NFM.api: the answer is a file for the browser to download,
+      // not json to parse.
       const res = await fetch("{{ base }}/api/backup/export", {
         method: "POST",
         headers: {
@@ -193,7 +190,7 @@ document.addEventListener("DOMContentLoaded", function () {
       (info.taken_from ? " on <strong>" + esc(info.taken_from) + "</strong>" : "") +
       "</div></div>" + counts(info.counts);
 
-    // The addresses are the part worth reading before pressing the button.
+    // The addresses are the part worth reading before restoring.
     if ((info.nodes_seen || []).length) {
       html += '<div class="mt"><strong class="small">The fleet it came from:' +
         "</strong>";

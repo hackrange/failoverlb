@@ -1,21 +1,14 @@
 """
-Connection and request numbers, with a bit of history behind them.
+Connection and request numbers, with a short in-memory history.
 
-The free nginx gives you `stub_status`, which is seven numbers for the whole
-server and nothing per site.  That is much less than the paid version reports,
-and it is still worth having, because four of those numbers are counters and a
-counter you sample twice is a rate.
+Open source nginx only offers `stub_status`: seven server-wide numbers, none
+per site.  Four are counters, so sampling twice gives a rate.
 
-Kept in memory on purpose.  These are worth looking at while somebody is
-watching a deploy or wondering why the box feels busy, and they are worthless
-tomorrow.  Writing them to sqlite would mean a table that grows forever to
-answer a question nobody asks about last week, on a manager whose whole point is
-being simple enough to fix at 3am.  A restart loses the history and that is
-fine: the counters carry on from where nginx has them.
+The recent detail lives in memory; a restart loses it and nginx's counters
+carry on.  Longer history is kept by `metrics_store.py`.
 
-The per site and per backend numbers that Plus shows are a different job and are
-not here.  They need the access log read and parsed, which is written up in
-docs/plus-parity.md as a plan rather than a feature.
+Per-site and per-backend numbers (as NGINX Plus shows) would need access log
+parsing; see docs/plus-parity.md.
 """
 import logging
 import time
@@ -23,15 +16,11 @@ from collections import deque
 
 log = logging.getLogger("nfm.metrics")
 
-# How many samples to keep.  At one every fifteen seconds this is two hours,
-# which covers "what happened during the deploy" and stops well short of being
-# a time series database.
+# Two hours at one sample every fifteen seconds.
 MAX_SAMPLES = 480
 
-# The counters, as opposed to the gauges.  A counter only means something when
-# you take the difference between two readings; a gauge means something on its
-# own.  Confusing the two gives you a graph of "requests since nginx started",
-# which climbs forever and says nothing.
+# Counters only mean something as a difference between two readings;
+# gauges stand on their own.
 COUNTERS = ("accepts", "handled", "requests")
 GAUGES = ("active_connections", "reading", "writing", "waiting",
           "cpu_percent", "memory_percent", "memory_used", "memory_total",
@@ -40,22 +29,15 @@ GAUGES = ("active_connections", "reading", "writing", "waiting",
 
 def read_host() -> dict:
     """
-    What this box is doing, out of /proc.
+    Host CPU, memory, load and disk from /proc.
 
-    Read here rather than through the agent, and that is a deliberate choice
-    about where the security boundary sits.  The agent runs with
-    `ProcSubset=pid`, so /proc/stat and /proc/meminfo are invisible to it, and
-    the fix is not to widen the one root component in the system for the sake
-    of a chart.  The container can read these itself, it needs no privilege to
-    do so, and the numbers are the host's because a container shares the
-    kernel's view of them.
+    Read here, not through the agent: the agent runs with `ProcSubset=pid`
+    and can't see /proc/stat or /proc/meminfo, and we won't widen the root
+    component for a chart.  The container shares the host kernel's view.
 
-    cpu comes back as raw jiffies, which are counters.  Turning them into a
-    percentage needs two readings and is done by the caller.
-
-    Memory is available rather than free.  Free counts the page cache as used,
-    so a healthy Linux box that has been up a week reads as out of memory when
-    it has plenty, and somebody acts on that.
+    cpu is raw jiffies (counters); the caller turns two readings into a
+    percentage.  Memory uses MemAvailable, not MemFree, which counts page
+    cache as used and makes a healthy box look full.
     """
     out = {}
 
@@ -113,9 +95,8 @@ def cpu_percent(older: dict, newer: dict):
     """
     Busy time between two /proc/stat readings, as a percentage.
 
-    None when either reading is missing or the counters went backwards, which
-    happens on a reboot.  A gap in what we know is not zero percent, and a
-    chart that draws it as zero says the box was idle when it was off.
+    None when a reading is missing or the counters went backwards (a
+    reboot).  A gap must not be drawn as zero.
     """
     if not older or not newer:
         return None
@@ -154,8 +135,7 @@ class MetricsHistory:
             elif key in host:
                 row[key] = host[key]
 
-        # The cpu jiffies themselves, kept so the next sample can work out a
-        # percentage.  Not reported: a counter since boot is not a chart.
+        # Raw jiffies, kept internally for the next sample's percentage.
         if host.get("cpu"):
             row["_cpu"] = host["cpu"]
             previous = self.samples[-1].get("_cpu") if self.samples else None
@@ -168,20 +148,14 @@ class MetricsHistory:
     def latest(self):
         if not self.samples:
             return None
-        # The raw jiffies are working state, not something to hand out.
+        # Hide internal keys like the raw jiffies.
         return {k: v for k, v in self.samples[-1].items() if not k.startswith("_")}
 
     def rates(self):
         """
-        Per second rates worked out from the last two samples.
-
-        Returns None when there is only one sample, which is honest: a rate
-        needs two readings and there is no sensible number to show before the
-        second one arrives.
-
-        A counter going backwards means nginx restarted and started again from
-        zero.  That is not a negative rate, it is a gap in what we know, so the
-        rate comes back None rather than as a large wrong number.
+        Per second rates from the last two samples.  None with fewer than
+        two samples.  A counter going backwards (nginx restarted) gives None
+        for that rate rather than a negative number.
         """
         if len(self.samples) < 2:
             return None
@@ -201,9 +175,8 @@ class MetricsHistory:
                 continue
             out[key + "_per_sec"] = round(delta / seconds, 2)
 
-        # Connections nginx accepted but did not handle.  Nearly always zero,
-        # and when it is not, the box is out of worker connections or file
-        # handles, which is worth knowing and is invisible in the other six.
+        # Accepted but not handled.  Nonzero means the box is out of worker
+        # connections or file handles.
         if out.get("accepts_per_sec") is not None and out.get("handled_per_sec") is not None:
             out["dropped_per_sec"] = round(
                 max(0.0, out["accepts_per_sec"] - out["handled_per_sec"]), 2)
@@ -211,12 +184,9 @@ class MetricsHistory:
 
     def series(self, key, limit=120):
         """
-        Recent values of one number, for drawing a line.
-
-        A sample with no value for this key is left out rather than sent as
-        zero, so the chart can break the line there.  Joining across a gap
-        invents data, and the gaps are exactly the interesting moments: a
-        restart, or a node nobody could reach.
+        Recent values of one key for a chart.  Missing values are omitted,
+        not sent as zero, so the chart breaks the line at gaps (restarts,
+        unreachable nodes).
         """
         rows = list(self.samples)[-limit:]
         return [{"at": round(r["at"], 1), "value": r[key]}
@@ -224,12 +194,9 @@ class MetricsHistory:
 
     def rate_series(self, limit=120):
         """
-        Request rate over time, worked out between each pair of samples.
-
-        Counters have to be differenced, and doing it here rather than in the
-        page keeps the one place that knows a counter from a gauge in one
-        place.  A pair that spans a restart, where the counter went backwards,
-        is skipped so the line breaks instead of spiking.
+        Request rate between each pair of samples.  Pairs spanning a
+        restart (counter went backwards) are skipped so the line breaks
+        instead of spiking.
         """
         rows = list(self.samples)[-(limit + 1):]
         out = []
@@ -247,13 +214,11 @@ class MetricsHistory:
 
 class MemberHistory:
     """
-    Samples for one backend, and what its exporter last said about itself.
+    Samples for one backend from its exporter.
 
-    Kept apart from the node histories because a backend is a different kind of
-    thing: we do not own it, it may publish nothing, and what it publishes may
-    describe the whole machine or only one process.  Which of those it is has to
-    travel with the numbers, or a JVM at 100% of one core reads as a box on
-    fire.
+    Separate from node histories: we don't own backends, they may publish
+    nothing, and the numbers may describe a machine or one process.  `level`
+    travels with the numbers so a busy JVM isn't read as a busy box.
     """
 
     def __init__(self):
@@ -295,11 +260,8 @@ class MemberHistory:
 
 class MetricsCollector:
     """
-    Asks the agent for stub_status on a timer and keeps what it says.
-
-    One history per node.  The peers are asked through the same peer channel
-    everything else uses, so a standby's numbers show up on whichever node
-    somebody is looking at, which is the point of having a fleet view at all.
+    Polls stub_status (local agent and peers) on a timer and keeps one
+    history per node, so every node shows the whole fleet.
     """
 
     def __init__(self, node_name: str):
@@ -317,16 +279,12 @@ class MetricsCollector:
 
     async def collect_members(self):
         """
-        Ask each pool's backends what they are doing, where they publish it.
+        Read each pool's backend exporters, where configured.
 
-        Every node does this for itself rather than one node doing it and
-        sharing, which is the same choice the health checker makes and for the
-        same reason: a backend one node can reach and another cannot is a
-        routing problem, and seeing it split by node usually gives the answer
-        straight away.
+        Every node polls for itself, like the health checker, so a backend
+        reachable from one node but not another shows up as a routing issue.
 
-        Never raises.  A backend that publishes nothing, or has gone away, is a
-        thing to report on a page and not a reason for the collector to stop.
+        Never raises; failures are recorded per backend.
         """
         import httpx
 
@@ -355,10 +313,8 @@ class MetricsCollector:
             for pool_name, label, url in wanted:
                 history = self._member(pool_name, label)
 
-                # Checked again here, because a template using {host} is only a
-                # real address once a member's address has been put in it.  The
-                # save time check cannot see that, so a backend whose address is
-                # loopback would otherwise reach this untouched.
+                # Re-check after expanding {host}: the save time check can't
+                # see a member whose address is loopback.
                 bad = exporters.unsafe_fetch_target(url)
                 if bad:
                     history.error = bad
@@ -409,7 +365,7 @@ class MetricsCollector:
         return self.history[node]
 
     async def collect(self):
-        """One round.  Never raises: this is a nicety, not a critical path."""
+        """One collection round.  Never raises."""
         from app.core.agent_client import get_agent
         from app.core.cluster import PeerClient, get_cluster
         from app.db import session_scope
@@ -422,8 +378,7 @@ class MetricsCollector:
                 self._for(self.node_name).add(result["metrics"], host=host)
                 self.last_error.pop(self.node_name, None)
             else:
-                # Still keep the host numbers.  nginx being unreachable is
-                # exactly when somebody wants to know what the box is doing.
+                # Keep host numbers even when nginx doesn't answer.
                 self._for(self.node_name).add({}, host=host)
                 self.last_error[self.node_name] = result.get("error") or "no numbers came back"
         except Exception as exc:
@@ -437,17 +392,8 @@ class MetricsCollector:
         except Exception:
             return
 
-        # Forget nodes that are no longer in the cluster.
-        #
-        # This only ever added to the history, so a node that was removed kept
-        # its last readings for as long as the process ran and went on being
-        # drawn on the dashboard.  Somebody who has just taken a node out is
-        # then looking at a page that says it is still there, which is the one
-        # moment they need the page to be right.
-        #
-        # The readings are worth nothing once the node is gone: they are a
-        # snapshot of a machine this cluster no longer talks to and cannot
-        # refresh.
+        # Forget nodes that left the cluster, or a removed node keeps being
+        # drawn on the dashboard with stale readings.
         known = {self.node_name} | {name for _id, name in peers}
         for gone in [name for name in self.history if name not in known]:
             self.history.pop(gone, None)
@@ -462,20 +408,17 @@ class MetricsCollector:
                     if not node:
                         continue
                     client = PeerClient(node, cluster.ca)
-                # The key is `payload` and the answer is the agent's own reply
-                # with nothing wrapped round it, because /peer/agent returns
-                # what AgentClient.call gives back and that has already had the
-                # envelope taken off.  Guessing either of those wrong gets you
-                # "no numbers came back" from a node that answered perfectly.
+                # The key is `payload`, and the reply is already unwrapped
+                # (/peer/agent returns what AgentClient.call returns).  Get
+                # either wrong and a healthy peer reports "no numbers came
+                # back".
                 data = await client.call(
                     "/peer/agent",
                     {"verb": "nginx_metrics", "payload": {}},
                     timeout=15) or {}
 
-                # The peer's own reading of its own /proc.  Asked of its
-                # manager rather than its agent, because the agent cannot see
-                # /proc/stat and widening it for a chart would be trading the
-                # one root component's boundary for a nicety.
+                # The peer's /proc numbers come from its manager, not its
+                # agent, which can't read /proc/stat (see read_host).
                 try:
                     peer_host = await client.call("/peer/host-metrics", {},
                                                   timeout=15) or {}
@@ -489,8 +432,7 @@ class MetricsCollector:
                     self._for(peer_name).add({}, host=peer_host)
                     self.last_error[peer_name] = data.get("error") or "no numbers came back"
             except Exception as exc:
-                # A peer being unreachable is the cluster page's story to tell,
-                # not this one's.  Record it and carry on.
+                # Unreachable peers are the cluster page's concern.
                 self.last_error[peer_name] = str(exc)
 
     def snapshot(self, with_series=False, limit=120) -> dict:

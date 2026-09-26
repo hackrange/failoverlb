@@ -1,24 +1,17 @@
 """
 The nginx feature catalog.
 
-Everything the GUI lets you turn on is described in here, once.  The forms, the
-help popups, the input checking, and the config we write all read from the same
-place.  That is on purpose.  The usual way these tools rot is that somebody adds
-a checkbox and forgets to update the renderer, or updates the renderer and the
-help text now describes something the box does not do.  Here there is nothing
-to keep in sync, because there is only one copy.
+Every setting the GUI offers is described here once.  Forms, help popups,
+validation and the rendered config all read from this single definition, so
+they cannot drift apart.
 
-Two things every feature carries that matter a lot:
+Each feature also records:
 
-  module   which nginx module it needs.  We read the actual build flags off the
-           box with nginx -V, so if your nginx was not built with, say, the
-           image filter module, that whole section just is not there.  You never
-           get to save a config that will not load.
+  module   the nginx module it needs.  Build flags are read with nginx -V and
+           features whose module is missing are not offered.
 
-  edition  oss or plus.  Plenty of nice nginx features are only in the paid
-           version.  Those are not offered at all, since these are not licensed
-           servers.  Where there is a free way to get close, the help text says
-           what it is instead of leaving you wondering.
+  edition  oss or plus.  Plus-only features are never offered; the help text
+           points to an open source alternative where one exists.
 """
 
 from app.catalog.registry import (

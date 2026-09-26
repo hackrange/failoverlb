@@ -53,10 +53,8 @@
               {% if u.full_name %}<div class="small faint">{{ u.full_name }}</div>{% endif %}
             </td>
             <td>
-              {# Your own role is shown and not offered.  Changing it is the
-                 one thing on this page that can take away the permission you
-                 are using, and the route refuses it, so there is no reason to
-                 put a control here that cannot work. #}
+              {# Your own role is shown, not editable. The route refuses the
+                 change, since it could remove the permission you are using. #}
               {% if u.id == user.id %}
                 <span class="badge neutral">{{ u.role.value }}</span>
                 <div class="small faint">your own</div>
@@ -65,10 +63,9 @@
                       style="margin:0" data-role-form
                       data-username="{{ u.username }}">
                   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                  {# No inline onchange.  The page sends a Content Security
-                     Policy with a nonce and no unsafe-inline, so an attribute
-                     handler is never run and the dropdown silently did
-                     nothing.  It is bound in the script at the bottom. #}
+                  {# No inline onchange. The CSP has a nonce and no
+                     unsafe-inline, so attribute handlers never run. Bound in
+                     the script at the bottom. #}
                   <select name="role" data-was="{{ u.role.value }}"
                           style="padding:3px 6px; font-size:0.8rem; width:auto">
                     <option value="viewer"   {{ 'selected' if u.role.value == 'viewer' }}>viewer</option>
@@ -127,9 +124,8 @@ Only do this when you are sure who you are talking to.">
                   <input type="hidden" name="enabled" value="{{ 'false' if u.enabled else 'true' }}">
                   <button type="submit" class="btn sm">{{ 'Disable' if u.enabled else 'Enable' }}</button>
                 </form>
-                {# Not on your own row.  Deleting the account you are signed in
-                   as is refused by the route, and offering it is an invitation
-                   to find that out the hard way. #}
+                {# Not on your own row. The route refuses deleting the account
+                   you are signed in as. #}
                 <form method="post" action="{{ base }}/users/{{ u.id }}/delete"
                       style="display:inline" data-confirm="Delete {{ u.username }}?
 
@@ -224,8 +220,8 @@ Every reset is written to the audit log with your name on it.</p>
 <script nonce="{{ csp_nonce }}">
 document.addEventListener("DOMContentLoaded", function () {
 
-  // Forms carrying a data-confirm ask before they submit.  Used for the ones
-  // that sign somebody out or take away their second factor.
+  // Forms with data-confirm ask before submitting. Used for the ones that
+  // sign someone out or remove their second factor.
   document.body.addEventListener("submit", function (e) {
     const form = e.target.closest("form[data-confirm]");
     if (!form) return;
@@ -236,15 +232,11 @@ document.addEventListener("DOMContentLoaded", function () {
 
   // Changing a role.
   //
-  // Bound here rather than written on the tag.  This page is served with a
-  // Content Security Policy that allows scripts from this origin and a nonce,
-  // which means an inline onchange attribute is never run: the dropdown moved,
-  // nothing was sent, and the account kept the role it had.
+  // Bound here, not inline: the CSP allows only same-origin and nonced
+  // scripts, so an onchange attribute never runs.
   //
-  // It asks first, because it is not an ordinary edit.  A role change signs
-  // that account out of every session it has open, and a dropdown that acts
-  // the instant it moves is one stray scroll away from doing that to somebody
-  // mid change.  Saying no puts the dropdown back where it was.
+  // Asks first, because a role change signs that account out of every
+  // session. Declining puts the dropdown back.
   document.body.addEventListener("change", function (e) {
     const select = e.target.closest("form[data-role-form] select[name=role]");
     if (!select) return;

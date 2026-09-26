@@ -1,20 +1,13 @@
 """
-The security layer for the web app.
+Security layer for the web app: client address handling, middleware, CSRF,
+object lookups and input validation.
 
-Everything in here is aimed at the OWASP top ten, and a couple of items get
-special attention because they are the ones that actually bite tools like this.
-
-Broken object level authorization, which OWASP calls BOLA and everybody else
-calls IDOR, is number one on their API list for a reason.  It is the bug where
-/api/pools/7 checks that you are logged in but never checks that pool 7 is
-anything to do with you.  Change the number, get somebody else's data.
-
-The usual advice is "check ownership", which does not quite fit here, because a
-load balancer's objects are not owned by individual users.  So the rule here is
-different but the discipline is the same: every object lookup goes through one
-function that takes the current user and the permission needed, and there is no
-other way to fetch an object by id.  A route physically cannot forget the check,
-because there is nowhere else to get the object from.
+The main guard is against broken object level authorization (BOLA/IDOR),
+where /api/pools/7 checks that you're logged in but not that you may see
+pool 7. Objects on a load balancer aren't owned by individual users, so the
+rule here is permission based, but the discipline is the same: every lookup
+by id goes through ObjectGuard, and routes have no other way to fetch an
+object, so they can't forget the check.
 """
 
 import ipaddress
@@ -35,25 +28,21 @@ log = logging.getLogger("nfm.security")
 CSRF_COOKIE = "nfm_csrf"
 SESSION_COOKIE = "nfm_session"
 
-# Methods that change something.  These need a CSRF token.  GET and HEAD do not,
-# and must not change anything, which is why they do not need one.
+# Methods that change state and therefore need a CSRF token. GET and HEAD
+# must never change anything.
 UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
-# Paths where a one time ticket in the URL stands in for the management allow
-# list, because the machine that has to reach them is by definition not on it.
-#
-# A tuple rather than a check buried in the middleware, so adding a third is
-# one line in one place and checks/trust.py can assert the list rather than
-# trusting somebody to remember.  Every entry must be a path whose credential
-# is the ticket: single use, short lived, stored only as a hash.
+# Paths where a one time ticket in the URL stands in for the admin allow
+# list, because the machine that needs them is by definition not on it.
+# Every entry must be a path whose credential is such a ticket: single use,
+# short lived, stored only as a hash.
 TICKETED_PATHS = (
     "/tunnel/enrol/",     # a workload joining the tunnel
     "/tunnel/psk/",       # a workload already on it, taking a pre-shared key
 )
 
-# Paths that skip the login check.  Kept short on purpose and checked by exact
-# match or a strict prefix, never with a loose "in" test, because a substring
-# check here is how /healthz-but-actually-admin sneaks through.
+# Paths that skip the login check. Matched exactly or by strict prefix,
+# never a substring test.
 PUBLIC_PATHS = {
     "/healthz",
     "/login",
@@ -70,28 +59,18 @@ PUBLIC_PATHS = {
 
 def client_ip(request: Request) -> str:
     """
-    Work out the real client address.
+    The real client address, used by the allow list, login rate limit,
+    account lockout and audit log.
 
-    Everything that decides who somebody is uses this: the allow list, the login
-    rate limit, the account lockout and every line in the audit log.  Getting it
-    wrong is not one bug, it is all four at once.
+    X-Forwarded-For is only trusted when the connection comes from an
+    address in trusted_proxies (empty by default). Trusting it from anyone
+    lets a client claim a management address; not setting it behind a proxy
+    makes every visitor look like the proxy (often loopback), and the allow
+    list quietly passes everyone.
 
-    X-Forwarded-For is only believed when the connection itself came from an
-    address in trusted_proxies, which is empty until somebody sets it.  Anybody
-    can send that header, so believing it from a stranger lets them put a
-    management address in it and walk through the allow list.  Believing it from
-    a proxy we put there ourselves is the only way to see past that proxy.
-
-    Both mistakes are easy and neither announces itself.  Trust the header from
-    everybody and the allow list means nothing.  Put the GUI behind a proxy and
-    forget to set this, and every visitor arrives wearing the proxy's address,
-    which is usually loopback, and the allow list passes the whole internet
-    while looking like it is working.
-
-    We walk the header from the right, which is the end our own proxy appends
-    to, and take the first address that is not itself a trusted proxy.  Reading
-    from the left instead would take whatever the client typed, and the client
-    writes that end.
+    Walk the header from the right, the end our proxies append to, and take
+    the first address that isn't a trusted proxy. The left end is whatever
+    the client wrote.
     """
     peer = request.client.host if request.client else "unknown"
 
@@ -105,15 +84,13 @@ def client_ip(request: Request) -> str:
         try:
             ipaddress.ip_address(bare)
         except ValueError:
-            # Junk in the header.  Stop rather than skip past it, since
-            # anything further left was written before this hop and we have
-            # already lost the chain.
+            # Junk in the header. Stop rather than skip it; everything to
+            # the left is untrustworthy now.
             break
         if not ip_allowed(bare, trusted):
             return bare
 
-    # Every hop was a proxy we trust, or the header was not there at all.  The
-    # peer is the most honest thing left.
+    # All hops were trusted proxies, or there was no header. Use the peer.
     return peer
 
 
@@ -125,12 +102,9 @@ def _bare(ip: str) -> str:
 
 def _is_loopback(ip: str) -> bool:
     """
-    Is this the machine talking to itself.
-
-    Written out rather than compared against a list of strings.  A connection to
-    127.0.0.1 turns up as "::ffff:127.0.0.1" on a dual stack listener, and
-    loopback is the whole of 127.0.0.0/8, not one address.  A literal list
-    misses both.
+    True for loopback. Parsed rather than string compared, since a dual
+    stack listener reports "::ffff:127.0.0.1" and loopback is all of
+    127.0.0.0/8.
     """
     try:
         return ipaddress.ip_address(
@@ -142,8 +116,8 @@ def _is_loopback(ip: str) -> bool:
 
 def ip_allowed(ip: str, networks) -> bool:
     if not networks:
-        # Nothing configured means no restriction.  The GUI shouts about this on
-        # the dashboard rather than silently locking everybody out.
+        # Nothing configured means no restriction. The dashboard warns about
+        # this rather than locking everyone out.
         return True
     try:
         addr = ipaddress.ip_address(ip)
@@ -156,26 +130,20 @@ def ip_allowed(ip: str, networks) -> bool:
 # Middleware
 # ==============================================================================
 
-# The header a response sets to say it has its own security headers and the
-# middleware should not overwrite them.  It never reaches the browser: the
-# middleware takes it back off on the way out.
+# A response sets this to keep its own security headers. The middleware
+# strips it before the response goes out.
 SANDBOX_OPT_OUT = "X-NFM-Own-Security-Headers"
 
 
 def sandboxed_html_headers() -> dict:
     """
-    Headers for handing back HTML that somebody else wrote.
+    Headers for serving HTML someone else wrote (the error page preview).
 
-    `sandbox` in a CSP drops the document into an origin of its own, so even
-    opened straight in a tab it cannot read our cookies, our storage or the
-    page that framed it.  That is the part that matters, and it is why this is
-    safe to serve from the same host as the GUI.
-
-    The rest is about the preview being honest.  Styles have to work or you are
-    not looking at your page, pictures have to work but only the ones already
-    in the page as data, and everything else is off: no script, and nothing
-    fetched from anywhere, so a preview cannot phone home or become a way of
-    scanning the network from an admin's browser.
+    CSP `sandbox` gives the document its own origin, so even opened directly
+    it can't read our cookies, storage or the framing page. That's what makes
+    it safe on the GUI's host. Inline styles and data: images are allowed so
+    the preview is accurate; scripts and all fetches are off, so a preview
+    can't phone home or probe the network from an admin's browser.
     """
     return {
         SANDBOX_OPT_OUT: "1",
@@ -194,20 +162,11 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     """
     Security headers on every response.
 
-    The CSP is strict because it can be.  This is our own GUI, we control every
-    asset, and everything is served from the same origin.  There is no CDN, no
-    outside font, no analytics.  So default-src 'self' just works, and there is
-    no reason to weaken it.
+    The CSP can be strict because every asset is ours and same origin: no
+    CDN, external fonts or analytics. Inline scripts need a nonce.
 
-    No unsafe-inline for scripts.  Any inline script gets a nonce.
-
-    One response is allowed to opt out, and only one: the error page preview,
-    which hands back HTML somebody else wrote so they can see what their
-    visitors will see.  Serving that under the policy below would block the
-    styles that are the entire point of looking at it, and serving it under no
-    policy at all would run their markup on our origin with an admin session
-    sitting in the cookie jar.  It sets its own, which is stricter than this one
-    in every way that matters, and says so with SANDBOX_OPT_OUT.  See
+    The error page preview is the one exception. It sets its own stricter
+    sandboxed policy and signals that with SANDBOX_OPT_OUT; see
     sandboxed_html_headers.
     """
 
@@ -217,13 +176,11 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
         response = await call_next(request)
 
-        # MutableHeaders has no pop, so read it and then take it back off.  It
-        # must not reach the browser: it says nothing useful to a client and
-        # naming our own middleware in a response header is free reconnaissance.
+        # MutableHeaders has no pop. The marker must not reach the browser;
+        # it would just advertise our middleware.
         if response.headers.get(SANDBOX_OPT_OUT):
             del response.headers[SANDBOX_OPT_OUT]
-            # It brought its own CSP and its own frame rules.  Everything below
-            # this line would either overwrite them or contradict them.
+            # It brought its own CSP and frame rules; don't overwrite them.
             response.headers["X-Content-Type-Options"] = "nosniff"
             response.headers["Referrer-Policy"] = "no-referrer"
             response.headers["Cache-Control"] = "no-store"
@@ -232,10 +189,9 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         csp = (
             "default-src 'self'; "
             f"script-src 'self' 'nonce-{nonce}'; "
-            # Styles keep unsafe-inline because a few components set things like
-            # a progress bar width inline.  Style injection is a much smaller
-            # problem than script injection, and locking this down would mean a
-            # nonce on every style attribute for very little gain.
+            # Styles keep unsafe-inline because a few components set inline
+            # widths. Style injection is far less dangerous than script, and
+            # nonces on every style attribute aren't worth it.
             "style-src 'self' 'unsafe-inline'; "
             "img-src 'self' data:; "
             "font-src 'self'; "
@@ -256,26 +212,18 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
         response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
 
-        # The GUI is https only, so this is safe and worth having.
+        # The GUI is HTTPS only, so HSTS is safe.
         response.headers["Strict-Transport-Security"] = "max-age=31536000"
 
-        # What the browser is currently running, on every answer.
-        #
-        # A page already loaded is never re-fetched however good the cache
-        # headers are, and most of this GUI's JavaScript is inline in the
-        # template, so a tab left open across an upgrade keeps running the old
-        # script forever.  Nothing tells it otherwise, and the failures look
-        # like bugs in the feature rather than an old page: a form missing a
-        # field that shipped, a button calling an endpoint that moved.
-        #
-        # Carried on the response rather than polled for.  Every page here
-        # talks to the API, so the comparison is free and needs no timer, no
-        # extra request and nothing to remember to wire up on a new page.
+        # Build id on every response. Most of the GUI's JavaScript is inline,
+        # so a tab left open across an upgrade keeps running old code, and the
+        # failures look like feature bugs. Every page talks to the API, so the
+        # client can compare this for free without polling.
         from app.web.routes_pages import ASSET_VERSION
         response.headers["X-NFM-Build"] = ASSET_VERSION
 
-        # Management pages should never be cached.  A shared machine with a page
-        # of your nginx config sitting in the browser cache is not great.
+        # Never cache management pages; a shared machine shouldn't keep your
+        # nginx config in its browser cache.
         if not request.url.path.startswith("/static"):
             response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
             response.headers["Pragma"] = "no-cache"
@@ -285,49 +233,31 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
 class AdminAllowlistMiddleware(BaseHTTPMiddleware):
     """
-    Drop anything from outside the management networks.
-
-    This runs before the login page even renders.  A stolen password from the
-    wrong network gets nothing, because there is nothing to type it into.
+    Drop anything from outside the management networks. Runs before the
+    login page renders, so a stolen password from the wrong network has
+    nowhere to be typed.
     """
 
     async def dispatch(self, request: Request, call_next):
         settings = get_settings()
         networks = settings.admin_networks
 
-        # The health endpoint stays open so a load balancer or docker can check
-        # us without being on the list.  It returns nothing sensitive.
+        # Health endpoint stays open for docker and external checks. It
+        # returns nothing sensitive.
         if request.url.path == "/healthz":
             return await call_next(request)
 
-        # The two tunnel paths a workload has to reach are open, and this is a
-        # deliberate trade rather than an oversight.
+        # The ticketed tunnel paths are open on purpose. A workload joining
+        # the tunnel is on someone else's network and will never be on the
+        # allow list. The ticket in the path stands in for it: single use,
+        # two hour expiry, stored only as a hash. Without a valid one these
+        # return nothing.
         #
-        # The whole point of the tunnel is that a workload on somebody else's
-        # network, with no inbound access and no public address, can run one
-        # command and join.  That machine is not on the management allow list
-        # and never will be: if it were, it would not need a tunnel.
+        # Every ticketed path must be listed in TICKETED_PATHS. The PSK path
+        # was once missed, and workloads got an HTML 404 piped into bash.
         #
-        # What stands in for the allow list is the ticket in the path.  Each is
-        # single use, expires in two hours, only its hash is stored, and it is
-        # spent the moment it is read.  Without a valid one these answer exactly
-        # what they answer anybody else, which is nothing.
-        #
-        # **Both of them, and the second was missed.**  Enrolment was exempt
-        # from the day it was written; the pre-shared key upgrade was added
-        # later and was not, so a workload running the command it was given got
-        # the allow list's answer instead of a script, and bash met an HTML
-        # error page.  It fails in a confusing way rather than a clear one,
-        # because the refusal looks like a 404 and the 404 has a body.
-        #
-        # Narrow on purpose.  Only these two prefixes, both of them a ticket in
-        # a path, and nothing else about the tunnel is reachable without a
-        # session.
-        #
-        # The root path is taken off first, because this fleet may be served
-        # under a prefix.  Matching the raw path would work at the root and
-        # silently block every enrolment on an install behind /lb, which is
-        # the sort of thing that only shows up at a customer.
+        # Strip the root path first. Matching the raw path works at the root
+        # but blocks every enrollment on an install served under a prefix.
         _root = get_settings().root_path.rstrip("/")
         _path = request.url.path
         if _root and _path.startswith(_root):
@@ -337,28 +267,20 @@ class AdminAllowlistMiddleware(BaseHTTPMiddleware):
 
         ip = client_ip(request)
 
-        # Loopback always gets through, whatever the allow list says.
+        # Loopback always passes. The certbot hooks on this host post to
+        # 127.0.0.1 to publish challenge tokens, and a real allow list won't
+        # include it, so issuance used to fail with a confusing 404.
         #
-        # The manager calls itself.  The certbot hooks run on this host and post
-        # to 127.0.0.1 to publish a challenge token, and an allow list of real
-        # management networks does not contain 127.0.0.1, so the manager was
-        # turning away its own hook and certificates could never be issued.  The
-        # 404 it returned looked like a broken hook URL and sent people looking
-        # at DNS and port 80.
-        #
-        # This gives nothing away.  Reaching us on loopback means already being
-        # on this box, and anybody there can read the database and write the
-        # challenge file by hand.  The endpoints that matter do their own checks
-        # on top: the hook wants a shared secret, everything else wants a
-        # session.
+        # This gives nothing away: anyone on loopback is already on the box
+        # and can read the database. The hook endpoint also requires a
+        # shared secret, and everything else requires a session.
         if _is_loopback(ip):
             return await call_next(request)
 
         if not ip_allowed(ip, networks):
             log.warning("turned away %s %s from %s, not on the allow list",
                         request.method, request.url.path, ip)
-            # 404 rather than 403.  There is no reason to confirm to somebody
-            # off the allow list that there is anything here at all.
+            # 404, not 403: don't confirm anything is here.
             return JSONResponse({"detail": "not found"}, status_code=404)
 
         return await call_next(request)
@@ -366,15 +288,12 @@ class AdminAllowlistMiddleware(BaseHTTPMiddleware):
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
     """
-    Slow down login attempts.
+    Throttle login attempts per address.
 
-    The account lockout in the auth layer protects one account.  This protects
-    the box: somebody spraying one common password across a list of usernames
-    never trips a single account's lockout, because each account only sees one
-    attempt.
-
-    A dict in memory is enough.  This is a management GUI with a handful of
-    users, not a public site, and it resets on restart which is fine.
+    The auth layer's lockout protects one account. This catches password
+    spraying across many usernames, which never trips a per account
+    lockout. An in-memory dict is enough for a management GUI; it resets on
+    restart.
     """
 
     def __init__(self, app, max_attempts=10, window_seconds=300):
@@ -384,25 +303,13 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         self._attempts = {}
 
     async def dispatch(self, request: Request, call_next):
-        # The prefix comes off first, and leaving it on made this middleware
-        # inert on every install served under one.
+        # Strip the root path first. Without this the check never matched
+        # on installs served under a prefix, and the limiter silently did
+        # nothing. AdminAllowlistMiddleware does the same for the same
+        # reason.
         #
-        # This fleet runs under /lb, so the path here is /lb/auth/login and the
-        # comparison below never matched.  The middleware ran on every request
-        # and its body was unreachable, which looks exactly like a middleware
-        # that is working: no error, no log line, nothing to notice.  Fourteen
-        # consecutive login attempts from one address were accepted before this
-        # was fixed.
-        #
-        # AdminAllowlistMiddleware in this same file has always done this, and
-        # its comment says why: matching the raw path "would work at the root
-        # and silently block every enrolment on an install behind /lb, which is
-        # the sort of thing that only shows up at a customer."  The same
-        # reasoning applies here and was not carried across.
-        #
-        # There was a second entry, "/auth/totp", for a route that does not
-        # exist.  The second factor is posted to /auth/login with the password
-        # carried alongside it, so that entry protected nothing and is gone.
+        # Only /auth/login is limited; the second factor is posted there
+        # too, alongside the password.
         root = get_settings().root_path.rstrip("/")
         path = request.url.path
         if root and path.startswith(root):
@@ -429,7 +336,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         hits.append(now)
         self._attempts[ip] = hits
 
-        # Keep the dict from growing forever on a box that gets scanned.
+        # Keep the dict bounded on a box that gets scanned.
         if len(self._attempts) > 10000:
             cutoff = now - self.window
             self._attempts = {
@@ -447,33 +354,24 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
 def new_csrf_token() -> str:
     """
-    Make a CSRF token.
-
-    Split out from setting the cookie because a server rendered form needs the
-    value while the page is being built, and the cookie only gets set on the
-    response afterwards.  Both halves have to be the same string or the check
-    fails, so the caller makes the token once and passes it to both.
+    Make a CSRF token. Separate from setting the cookie because a server
+    rendered form needs the value before the response exists; the caller
+    passes the same token to both.
     """
     return secrets.token_urlsafe(32)
 
 
 def ensure_csrf_token(request: Request) -> str:
     """
-    Reuse the token this browser already has, or make one if it has none.
+    Reuse this browser's existing token, or make one.
 
-    Minting a fresh token on every page render sounds tidier and quietly breaks
-    things.  The cookie is shared across the whole browser, so rendering a
-    second page rewrites it, and the form sitting in the first tab is now
-    holding a value that no longer matches.  Submitting it fails with a CSRF
-    error that makes no sense to the person looking at it, and reloading
-    "fixes" it, which makes the whole thing look flaky rather than broken.
-
-    A token is a random secret, not a nonce.  Keeping the same one for the life
-    of the cookie is the normal way to do double submit and gives up nothing.
+    Minting a new token per page render rewrites the shared cookie and
+    breaks forms already open in other tabs with a confusing CSRF error.
+    A double submit token is a secret, not a nonce, so keeping it for the
+    cookie's lifetime costs nothing.
     """
     existing = request.cookies.get(CSRF_COOKIE)
-    # Sanity check what came back.  A cookie somebody hand edited should be
-    # replaced rather than trusted into a comparison.
+    # Replace a malformed or hand edited cookie rather than comparing it.
     if existing and 20 <= len(existing) <= 128 and existing.replace("-", "").replace("_", "").isalnum():
         return existing
     return new_csrf_token()
@@ -481,29 +379,25 @@ def ensure_csrf_token(request: Request) -> str:
 
 def issue_csrf_token(response, token: str = None) -> str:
     """
-    Put a CSRF token in a cookie.
+    Set the CSRF cookie (double submit pattern).
 
-    Double submit pattern.  The token goes in a cookie the page's JavaScript can
-    read, and the page sends it back in a header.  A form posted from another
-    site can carry the cookie, because browsers attach cookies to cross site
-    posts, but it cannot read that cookie to set the header.  Same origin policy
-    stops it.
-
-    SameSite=Strict on the session cookie is the other half.  Belt and braces,
-    because SameSite handling has had gaps in various browsers over the years.
+    Page JavaScript reads the cookie and echoes it in a header. A cross site
+    form post carries the cookie but can't read it to set the header.
+    SameSite=Strict on the session cookie is a second layer, since browser
+    SameSite support has had gaps.
     """
     token = token or new_csrf_token()
     response.set_cookie(
         CSRF_COOKIE,
         token,
         max_age=86400,
-        # Readable by our own script on purpose.  This is the one cookie that
-        # has to be, because the page needs to copy it into a header.
+        # Must be readable by our own script so it can be copied into a
+        # header.
         httponly=False,
         secure=True,
         samesite="strict",
-        # Scope the cookie to our prefix so we do not scatter cookies over
-        # whatever else is served on the same hostname.
+        # Scope to our prefix so we don't scatter cookies over other apps on
+        # the same host.
         path=(get_settings().root_path.rstrip("/") or "") + "/",
     )
     return token
@@ -511,18 +405,11 @@ def issue_csrf_token(response, token: str = None) -> str:
 
 async def check_csrf(request: Request):
     """
-    Raise unless the token the caller sent matches the cookie.
+    Raise unless the submitted token matches the cookie.
 
-    Two ways to send it, because we have two kinds of caller.
-
-    The API pages use fetch and set an X-CSRF-Token header.  That is the clean
-    way and it is what most of the app does.
-
-    The login, enrolment and password forms post normally, with no JavaScript
-    involved.  A plain form cannot set a header, so those send the token in a
-    hidden field instead.  Keeping those forms working without JavaScript is
-    deliberate: signing in is the one thing that has to work even when something
-    else on the page is broken.
+    fetch based API calls send an X-CSRF-Token header. Login, enrollment and
+    password forms are plain posts with no JavaScript, so they send a hidden
+    field instead. Signing in must work even when the page's scripts don't.
     """
     if request.method not in UNSAFE_METHODS:
         return
@@ -534,13 +421,12 @@ async def check_csrf(request: Request):
     sent = request.headers.get("X-CSRF-Token")
 
     if not sent:
-        # Only look at the form for a real form post.  Calling .form() on a JSON
-        # body would try to parse it as a form and give nothing useful.
+        # Only parse a real form post; .form() on JSON gives nothing useful.
         content_type = request.headers.get("content-type", "")
         if content_type.startswith(("application/x-www-form-urlencoded", "multipart/form-data")):
             try:
-                # Starlette caches the parsed form, so reading it here does not
-                # steal the body from the Form(...) parameters on the route.
+                # Starlette caches the parsed form, so the route's Form(...)
+                # parameters still get the body.
                 form = await request.form()
                 sent = form.get("csrf_token")
             except Exception:
@@ -562,21 +448,9 @@ class ObjectGuard:
     """
     The only way to fetch an object by id.
 
-    Every route that takes an id in the URL goes through here.  It does three
-    things in one place:
-
-      1. Checks the user holds the permission this action needs.
-      2. Looks the object up.
-      3. Returns 404, not 403, when the object does not exist or they cannot
-         have it.
-
-    Point three is worth being deliberate about.  A 403 on an object that exists
-    and a 404 on one that does not lets somebody map out what is on the system
-    just by counting ids.  Same answer either way means they learn nothing.
-
-    Point one is what stops the classic version of this bug.  There is no path
-    where a route fetches a row itself and forgets the check, because routes do
-    not have a way to fetch rows by id at all.
+    Checks the permission, looks the object up, and returns 404 for both
+    "doesn't exist" and "not allowed" so ids can't be probed. Routes have no
+    other way to fetch rows by id, so they can't skip the check.
     """
 
     def __init__(self, session, user):
@@ -585,13 +459,11 @@ class ObjectGuard:
 
     def get(self, model, object_id, permission: str = "view"):
         if not can(self.user, permission):
-            # Deliberately the same as not found.  Telling somebody "you are not
-            # allowed to see pool 7" confirms pool 7 exists.
+            # Same as not found; a 403 would confirm the object exists.
             raise HTTPException(status_code=404, detail="not found")
 
-        # Ids come out of the URL, so they are strings that could be anything.
-        # int() them explicitly rather than handing them to the ORM, so a
-        # cleverly shaped id cannot end up somewhere it should not.
+        # Ids come from the URL. Convert explicitly rather than handing an
+        # arbitrary string to the ORM.
         try:
             oid = int(object_id)
         except (TypeError, ValueError):
@@ -625,14 +497,9 @@ class ObjectGuard:
 
 def pick_fields(payload: dict, allowed: set) -> dict:
     """
-    Take only the fields we said were editable.
-
-    Guards against mass assignment, which is the bug where a form posts
-    {"name": "x", "role": "admin"} and the code helpfully sets both because it
-    loops over whatever arrived.
-
-    Allow list, never a deny list.  A deny list means every new field is
-    editable by default until somebody remembers to add it, and they will not.
+    Keep only the fields declared editable, to prevent mass assignment
+    (posting {"role": "admin"} alongside a name). Always an allow list: with
+    a deny list every new field is editable until someone remembers.
     """
     return {k: v for k, v in (payload or {}).items() if k in allowed}
 
@@ -641,7 +508,7 @@ def pick_fields(payload: dict, allowed: set) -> dict:
 # Input checks
 # ==============================================================================
 
-# Names that become filenames and nginx identifiers.  Strict on purpose.
+# Names that become filenames and nginx identifiers. Strict on purpose.
 SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 HOSTNAME_RE = re.compile(
@@ -664,10 +531,8 @@ def validate_name(name: str, what: str = "name") -> str:
 
 def validate_hostname(name: str) -> str:
     """
-    Check a server_name.
-
-    The underscore is allowed as a special case because nginx uses it for the
-    catch all server, and it is not a real hostname.
+    Check a server_name. "_" is allowed because nginx uses it for the catch
+    all server.
     """
     if name == "_":
         return name

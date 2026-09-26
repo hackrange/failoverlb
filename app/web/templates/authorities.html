@@ -69,9 +69,8 @@ document.addEventListener("DOMContentLoaded", function () {
     draw(data.authorities || []);
   }
 
-  // What the last test said, because credentials that were never tried are a
-  // different thing from credentials known to work, and both are different
-  // from ones known to be wrong.
+  // Last test result. Never tested, known good and known bad are three
+  // different states.
   function tested(a) {
     if (a.last_tested_at === null || a.last_test_ok === null) {
       return '<span class="dot unknown"></span><span class="faint small">' +

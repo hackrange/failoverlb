@@ -28,8 +28,7 @@
 <form method="post" action="{{ base }}/settings">
 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
 
-{# Sign in goes first.  It is the only card on this page that can lock
-   everybody out, so it should not be something somebody scrolls past. #}
+{# Sign in goes first. It is the only card here that can lock everyone out. #}
 <div class="card">
   <div class="card-head">
     <h2>Signing in to this GUI</h2>
@@ -693,9 +692,8 @@ somebody wrote months earlier.</p>
 
 <script nonce="{{ csp_nonce }}">
 document.addEventListener("DOMContentLoaded", function () {
-  // Check the discovery URL without making anybody attempt a login.  A typo
-  // here is the most common way this is set up wrong, and the worst place to
-  // find out is the login page in front of somebody who cannot get in.
+  // Check the discovery URL without a login attempt. A typo here is the most
+  // common setup mistake, and the login page is the worst place to find it.
   const testBtn = document.getElementById("oidc-test");
   if (testBtn) {
     testBtn.addEventListener("click", async function () {
@@ -722,9 +720,8 @@ document.addEventListener("DOMContentLoaded", function () {
   const summary = document.getElementById("geo-summary");
   const nodes = document.getElementById("geo-nodes");
 
-  // The MaxMind fields only exist when MaxMind is the answer.  Two credential
-  // boxes on screen for a source that needs none is a page asking a question
-  // it already knows the answer to.
+  // The MaxMind fields only show when MaxMind is selected. The other
+  // sources need no credentials.
   function showSource() {
     maxmind.style.display = source.value === "maxmind" ? "" : "none";
   }
@@ -792,9 +789,9 @@ document.addEventListener("DOMContentLoaded", function () {
     const rows = Object.entries(state.nodes || {});
     const have = rows.filter(([, n]) => n.present).length;
 
-    // Disagreement gets said out loud.  Two nodes on different rule sets is
-    // not an outage, it is a site that behaves differently depending on which
-    // box answered, which is far harder to work out from the outside.
+    // Call out disagreement. Nodes on different rule sets is not an outage,
+    // but a site that behaves differently depending on which box answered is
+    // much harder to diagnose.
     if (!rows.length) {
       crsSummary.textContent = "no nodes to ask";
     } else if (have !== rows.length) {

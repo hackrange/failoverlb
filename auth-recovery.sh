@@ -5,21 +5,17 @@
 #
 # The GUI can be set so local passwords do not work at all.  That is the right
 # setting once an identity provider is the system of record, and it has one
-# obvious failure: the provider goes down, or its certificate expires, or
-# somebody deletes the application registration, and now nobody can sign in to
-# the thing that manages your load balancers.  Usually on the morning you need
-# it most.
+# obvious failure: the provider goes down, its certificate expires, or
+# somebody deletes the application registration, and now nobody can sign in
+# to the thing that manages your load balancers.
 #
-# This script is the door that does not depend on any of that.  It talks to the
-# database directly through the running container and puts local passwords back
-# on.  It needs a shell on the box, which is the whole point: if you can get to
-# a root shell here, you are already trusted more than any login page could
-# check.
+# This script does not depend on any of that.  It talks to the database
+# directly through the running container and puts local passwords back on.
+# It needs a root shell on the box, which is already more trust than any
+# login page could check.
 #
-# It deliberately does not create accounts, reset passwords or touch the
-# provider settings.  Those are decisions, and a recovery script that makes
-# decisions is one nobody trusts enough to run.  All it does is stop local
-# passwords being refused.
+# It does not create accounts, reset passwords or touch the provider
+# settings.  All it does is stop local passwords being refused.
 #
 #   ./auth-recovery.sh                 say what the current setting is
 #   ./auth-recovery.sh --allow-local   local accounts or single sign on
@@ -27,6 +23,11 @@
 #
 # Run it on any node.  The setting travels with the config, so a fleet that is
 # applying normally will carry it to the others; if it is not, run it on each.
+#
+# Set NFM_CONTAINER first if the manager's container runs under a different
+# name.
+#
+# usage() prints lines 3-29 above as the help text; keep that range intact.
 set -euo pipefail
 
 CONTAINER="${NFM_CONTAINER:-nginx-fleet-manager}"
@@ -63,11 +64,9 @@ fi
 
 printf '\n'
 
-# Everything below runs inside the container, because that is where the
-# database, the settings module and the encryption key all are.  Writing
-# through settings_store rather than straight into the table means the value is
-# stored and read back exactly the way the application would do it, which is
-# the difference between a fix and a second bug.
+# Runs inside the container, where the database and encryption key are.
+# Goes through settings_store rather than the table so the value is stored
+# exactly as the application would store it.
 if [ -z "$MODE" ]; then
     docker exec -i "$CONTAINER" python - <<'PY'
 from app.core import settings_store

@@ -1,52 +1,33 @@
 """
-Failover LB against the load balancers people actually shortlist against it.
+Feature comparison: Failover LB against NGINX Plus, Kemp LoadMaster and
+HAProxy ALOHA.
 
-Read the honesty warning before the table, because it applies to every number
-in this file: **we are rating our own product against three other people's.**
-That is a conflict of interest and no amount of care removes it.  What can be
-done is to be specific about why each score is what it is, so a reader can
-disagree with the reasoning rather than having to take the number on trust.
+We are scoring our own product, which is a conflict of interest.  Each score
+therefore carries a note explaining it, so readers can disagree with the
+reasoning rather than trust the number.
 
-The scale, and it is deliberately not "how good is this":
+Scale:
 
-    0   not offered at all
-    1   possible, but you are building it yourself
-    2   there, and you will feel the gap
+    0   not offered
+    1   possible, but you build it yourself
+    2   present, with noticeable gaps
     3   does the job
     4   does the job well
-    5   as good as this gets
+    5   as good as it gets
 
-A capability with a 5 against a paid product and a 3 against us is not a
-complaint.  It means somebody paid for it and got something better, which is
-what paying is for.  The rows worth arguing about are the ones where we claim
-to be equal or better, and those are the ones with the longest notes.
+Ground rules: add-on products (Instance Manager, NGINX One, App Protect,
+LoadMaster 360, HAProxy Fusion) are not counted as part of the base product,
+though notes mention them.  Capabilities that come from nginx itself score
+the same for us and Plus.  Rows we lose stay in.  Where nothing published
+could be found, the score is 1 and the row is marked unconfirmed.
 
-Four things this table deliberately does **not** do:
-
-  * **Count Instance Manager, NGINX One, App Protect, LoadMaster 360 or
-    HAProxy Fusion as part of the product they sit beside.**  They are separate
-    products with separate prices.  Where one of them is the real answer to a
-    row, the note says so rather than the score pretending the base product
-    lacks it entirely.
-  * **Take credit for nginx itself.**  Most of what a load balancer does is in
-    the free nginx both we and Plus run.  Those rows are 5 and 5, and saying so
-    is more useful than leaving them out to make the table look flattering.
-  * **Hide the rows we lose.**  Support is the obvious one, and the star total
-    at the top of each column is another: we do not come first on it.
-  * **Guess at a competitor and score the guess.**  Where we could not confirm
-    something from published material, the score is 1 and the note says we
-    could not confirm it.  A 1 that says "we do not know" is more use than a 0
-    that pretends we do.
-
-The two appliance columns were scored on 16 August 2026 from vendor
-documentation, release notes and datasheets.  Both products move, so a score
-here is a reading of what was published on that day and nothing stronger.
+The appliance columns were scored on August 16, 2026 from vendor docs,
+release notes and datasheets, and reflect what was published then.
 """
 
 # ---------------------------------------------------------------- the columns
 #
-# The page sorts these by star total, highest first, so the order here is only
-# the order the scores are written in each row.
+# The page sorts by star total; this order only matters for reading the rows.
 PRODUCTS = [
     {
         "key": "plus",
@@ -77,7 +58,7 @@ PRODUCTS = [
 
 RIVAL_KEYS = [p["key"] for p in PRODUCTS if not p.get("us")]
 
-# Everything below is a judgement, and the notes are the argument for it.
+# Row fields:
 #
 #   key       stable id, so a link can point at a row
 #   label     what the capability is called
@@ -86,17 +67,13 @@ RIVAL_KEYS = [p["key"] for p in PRODUCTS if not p.get("us")]
 #   lb        0 to 5 for Failover LB
 #   kemp      0 to 5 for Kemp LoadMaster
 #   aloha     0 to 5 for HAProxy ALOHA
-#   note      why Plus and we scored what we did, in plain words
-#   others    why the two appliances scored what they did
+#   note      reasoning for the Plus and Failover LB scores
+#   others    reasoning for the two appliance scores
 #
-# One optional key, and it matters more than it looks:
+# Optional:
 #
-#   unconfirmed   product keys we could find nothing published about, either
-#                 way.  Those score 1, and 1 there means "we do not know",
-#                 which is a different thing from the 1 that means "possible,
-#                 but you are building it yourself".  Both readings are honest
-#                 and the star cannot tell them apart, so the row says which
-#                 and checks/comparison.py holds us to it.
+#   unconfirmed   product keys with nothing published either way.  They score
+#                 1, meaning "unknown" rather than "build it yourself".
 CAPABILITIES = [
 
     # ---------------------------------------------------------------- balancing
@@ -631,13 +608,9 @@ CAPABILITIES = [
     },
     # ------------------------------------------------------- backup and restore
     #
-    # This was one row until somebody pointed out that backup and restore is
-    # not one question.  Taking a copy, what is in the copy, and what you can
-    # do with it later are three different jobs, and the four products are good
-    # at different ones.  Three rows rather than the six it could have been:
-    # expanding a category you happen to be strong in is the oldest way to tilt
-    # a comparison, and doing it in a table you wrote about your own product is
-    # worse.  Note what it did to the totals anyway, in the page copy.
+    # Split into three rows (taking a copy, what it contains, what you can
+    # do with it) because the products differ on each.  Kept to three so a
+    # category we are strong in does not tilt the totals.
     {
         "key": "backup_taking",
         "label": "Taking a backup, and where it goes",
@@ -859,14 +832,9 @@ CAPABILITIES = [
 ]
 
 CATEGORIES = [
-    # Support goes first on purpose.  It is the row we lose worst, and a
-    # comparison written by one of the four products that buries its weakest
-    # answer near the bottom has told you something about itself before you
-    # reach any of the numbers.
+    # Support first: it is our weakest row and should not be buried.
     "Support",
-    # Second, because this is where the product is strongest and it was sitting
-    # in the middle of the page where nobody would reach it.  Somebody weighing
-    # this up should meet the row we lose, then the rows we win outright.
+    # Then our strongest category.
     "TLS and certificates",
     "Load balancing",
     "Health and resilience",
@@ -880,9 +848,8 @@ CATEGORIES = [
 
 # --------------------------------------------------------------------- pricing
 #
-# The date is not decoration.  Every vendor here moves its prices, two of them
-# publish nothing at all, and a table of costs with no date on it is worse than
-# no table, because it looks current forever.
+# Prices change and two vendors publish none, so the table is always shown
+# with the date it was checked.
 PRICING_PULLED = "16 August 2026"
 
 PRICING = [
@@ -957,11 +924,10 @@ PRICING = [
 
 def by_category():
     """
-    Rows grouped for the page, in the order the categories are listed.
+    Rows grouped by category, in CATEGORIES order.
 
-    Each row is copied and given two extra keys the template needs: the best
-    score any rival managed, and whether we beat it.  Doing it here keeps the
-    template to displaying things.
+    Each row copy gets the best rival score and whether we beat it, so the
+    template only has to display.
     """
     out = []
     for name in CATEGORIES:
@@ -979,15 +945,8 @@ def by_category():
 
 def only_here():
     """
-    What this does that none of the other three do at all.
-
-    Kept to rows where every other product scores zero, rather than anywhere we
-    happen to score higher.  "We do it better" is an argument; "nobody else has
-    it" is a fact, and only the second belongs on a list with this title.
-
-    Widening the comparison from one rival to three cut this list hard, which
-    is the point of widening it.  Several rows that read as ours alone against
-    NGINX Plus turned out to be things an appliance has had for years.
+    Rows where every other product scores zero.  Scoring higher is not
+    enough to make this list.
     """
     return [c for c in CAPABILITIES
             if c["lb"] > 0 and all(c[k] == 0 for k in RIVAL_KEYS)]
@@ -997,13 +956,8 @@ def product_totals():
     """
     Star total per product, highest first.
 
-    Asked for, and worth handling carefully.  This is the crudest reading of
-    the table there is: it says a request queue and a support contract weigh
-    the same, and they do not.  It is published anyway, and in the order the
-    numbers actually fall, because a comparison that only reports totals when
-    they flatter the author is not a comparison.
-
-    We do not come first on it.
+    A crude measure, since every row weighs the same, but shown in the
+    order the numbers fall.
     """
     ceiling = len(CAPABILITIES) * 5
     rows = []
@@ -1019,11 +973,10 @@ def product_totals():
 
 def pricing():
     """
-    The pricing cards, in the same order as the star totals.
+    Pricing cards, in star total order.
 
-    Two of the four vendors publish no price at all, so most of this is
-    reseller listings and price trackers rather than a rate card.  The notes
-    say which is which, and the date says how stale it is allowed to get.
+    Two vendors publish no prices, so several figures come from resellers and
+    price trackers; the notes say which.
     """
     order = [r["key"] for r in product_totals()]
     by_key = {p["key"]: p for p in PRODUCTS}
@@ -1037,12 +990,10 @@ def pricing():
 
 def totals():
     """
-    Rows won, lost and drawn, against the field rather than against one rival.
+    Rows won, lost and drawn against the whole field.
 
-    Ahead means we beat every other product on that row.  Behind means at least
-    one of them beats us.  That is a harder test than the old one against NGINX
-    Plus alone, and the numbers moved when the two appliances arrived, which is
-    what an honest comparison is supposed to do.
+    Ahead means we beat every other product on the row; behind means at least
+    one beats us.
     """
     wins = losses = 0
     for c in CAPABILITIES:

@@ -5,16 +5,14 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{% block title %}Failover LB{% endblock %}</title>
-{# The prefix we are served under, so the JavaScript builds API URLs that land
-   in the right place when something proxies us at a sub path. #}
+{# The prefix we are served under, so API URLs are right when proxied at a
+   sub path. #}
 <meta name="nfm-base" content="{{ base }}">
-{# What this page was rendered from.  Compared against the same stamp on every
-   API answer, so a tab left open across an upgrade notices rather than quietly
-   running yesterday's script. #}
+{# Build stamp for this page. Compared against the stamp on every API response
+   so a tab left open across an upgrade notices it is running old script. #}
 <meta name="nfm-build" content="{{ asset_version }}">
 <link rel="stylesheet" href="{{ base }}/static/app.css?v={{ asset_version }}">
-{# The favicon is drawn inline as an SVG so there is no image file to fetch.
-   Keeps the content security policy tight and works with no network. #}
+{# Inline SVG favicon: no image to fetch, keeps the CSP tight, works offline. #}
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' rx='3' fill='%23141414'/><path d='M4.6 1.8 7.4 5H5.3v9.2H3.9V5H1.8l2.8-3.2zm6.8 12.4L8.6 11h2.1V1.8h1.4V11h2.1l-2.8 3.2z' fill='white'/></svg>">
 </head>
 <body>
@@ -25,10 +23,8 @@
     <div class="flex">
       <button class="btn sm menu-toggle" aria-label="Menu">&#9776;</button>
       <a href="{{ base }}/" class="brand">
-        {# Hand drawn mark.  Two arrows passing each other in a rounded square:
-           traffic moving one way and failing over the other.  Nothing fetched.
-           It was an N until the rename, which is a letter we no longer have
-           any business drawing. #}
+        {# Hand drawn mark: two arrows passing in a rounded square, traffic
+           going one way and failing over the other. Inline, nothing fetched. #}
         <svg viewBox="0 0 16 16" aria-hidden="true">
           <rect width="16" height="16" rx="3" fill="currentColor" opacity="0.18"/>
           <path d="M4.6 1.8 7.4 5H5.3v9.2H3.9V5H1.8l2.8-3.2zm6.8 12.4L8.6 11h2.1V1.8h1.4V11h2.1l-2.8 3.2z" fill="currentColor"/>
@@ -39,16 +35,15 @@
 
     <div class="right">
       <span class="node-chip">
-        {# node_role comes from the shared context, so this is right on every
-           page rather than on the two that happened to pass a node object. #}
+        {# node_role comes from the shared context, so it is right on every
+           page, not just the ones that pass a node object. #}
         {% if node_role == 'active' %}
           <span class="dot ok"></span>{{ node_name }} &middot; active
         {% elif node_role == 'standby' %}
           <span class="dot neutral"></span>{{ node_name }} &middot; standby
         {% else %}
-          {# Not known is its own answer.  Calling it standby would be a guess,
-             and it is the guess that gets somebody to make a change on the box
-             they thought was the spare. #}
+          {# Unknown is its own answer. Calling it standby is a guess, and that
+             guess is how someone changes the box they thought was the spare. #}
           <span class="dot warn"></span>{{ node_name }} &middot; role unknown
         {% endif %}
       </span>
@@ -235,17 +230,13 @@
 
     </nav>
 
-    {# Collapsing the sections.
+    {# Collapsing the sidebar sections.
 
-       Inline and right after the nav rather than in app.js, which loads at the
-       end of the page.  By then the sidebar has already been painted open, so
-       somebody who keeps three of the four collapsed would watch them close
-       again on every single page load.  Run here, the collapsed ones are never
-       drawn expanded.
+       Inline right after the nav instead of in app.js, which loads at the end
+       of the page. Otherwise the sidebar paints open and then collapses on
+       every page load.
 
-       Kept per user, because a browser is not always one person's.  Two
-       accounts on the same machine would otherwise inherit each other's
-       sidebar and have no idea why it moved. #}
+       Stored per user, since two accounts can share a browser. #}
     <script nonce="{{ csp_nonce }}">
     (function () {
       var KEY = "nfm.nav." + {{ user.username|tojson }};
@@ -270,11 +261,9 @@
         var links = group.querySelector(".group-links");
         if (!button || !links) { return; }
 
-        // A section holding the page you are on always opens, whatever was
-        // saved, so you can see where you are.  The saved answer is left
-        // alone: collapse Fleet, visit Tunnel, and Fleet is open while you are
-        // there and collapsed again everywhere else.  That is remembering the
-        // preference, not overriding it.
+        // A section holding the current page always opens so you can see
+        // where you are. The saved state is left alone and applies again
+        // on other pages.
         var here = !!links.querySelector("a.active");
         var collapsed = !!state[name] && !here;
 
@@ -297,9 +286,8 @@
     </script>
 
     <main class="content">
-      {# Saved is not the same as live, and that catches people out.  This sits
-         above every page rather than on the one you happened to edit, because
-         by the time it matters you have usually moved on to another page. #}
+      {# Saved is not live. Shown on every page because by the time it matters
+         you have usually moved on from the page you edited. #}
       <div class="notice warn" id="pending-config" hidden
            style="position:sticky; top:0; z-index:20; margin-bottom:14px;
                   align-items:center; justify-content:space-between">
@@ -325,9 +313,8 @@
 
       {% block content %}{% endblock %}
 
-      {# Attribution for the mark, on every page rather than tucked away on an
-         about screen, because every page has nginx somewhere on it.  We manage
-         nginx, we are not nginx, and this is where that is said out loud. #}
+      {# Attribution for the nginx mark. It goes on every page because every
+         page shows nginx somewhere, and we manage nginx, we are not nginx. #}
       <footer class="legal">
         NGINX&reg; is a registered trademark of F5, Inc.  NGINX Plus is a
         trademark of F5, Inc.  Failover LB is an independent project, not

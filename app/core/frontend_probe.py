@@ -1,53 +1,23 @@
 """
 Asking this node's own web frontend whether it is actually serving.
 
-Why this is not the same thing as `nginx_active`
-------------------------------------------------
+`nginx_active` comes from `systemctl is-active nginx`, a liveness check.  On
+August 24, 2026 that made an outage last 73 minutes instead of one: workers
+aborted holding a shared memory lock, every respawned worker blocked on it,
+and the master kept the listening sockets open.  systemd said active, the
+kernel kept completing TCP handshakes, and clients waited in silence while
+the GSLB kept handing the node out.
 
-`nginx_active` comes from `systemctl is-active nginx`, which answers "is the
-service running".  That is a liveness check, and on 24 August 2026 it is the
-reason an outage lasted 73 minutes instead of one.
+So this sends a real request through the public listener.
 
-nginx workers aborted and left a shared memory lock held by a dead process.
-Every worker respawned afterwards blocked on that lock forever.  The master
-stayed up and kept the listening sockets, so:
+A timeout counts as failure; silence is exactly what we are catching.  Ping
+and a plain TCP connect both looked healthy during that incident.  The
+status code does not matter: any HTTP reply means a worker is serving, and
+a check that fails because a site was renamed would soon be ignored.
 
-  - systemd saw a healthy service and said `active`
-  - the kernel went on completing TCP handshakes that no worker would ever read
-  - clients connected, waited in silence, and gave up
-
-The GSLB kept handing that node out for the whole outage, because the only
-signal it had said the service was running.  It was.  It was not serving
-anything.
-
-So this asks the other question: put a real request through the public
-listener and see whether a reply comes back.
-
-What counts as failure, and why a hang has to
----------------------------------------------
-
-A timeout is a failure here, not an inconclusive result.  That is the entire
-point, because the thing being caught is silence rather than an error code.
-Nothing cheaper catches it.  During that incident ICMP replied normally the
-whole time, and port 80 completed its TCP handshake in 0.06 seconds before
-going quiet, so a ping check and a plain TCP connect check would both have
-called the node perfectly healthy.
-
-What does not count as failure is the *status code*.  Any HTTP reply at all
-means a worker read the request and wrote an answer, which is what we are
-actually asking about.  A 404 from a node with no matching site is a serving
-node.  Grading the status code here would mean this check starts failing
-because somebody renamed a site, and a health signal that goes red for reasons
-unrelated to health is one people learn to ignore.
-
-Why the streaks
----------------
-
-Withdrawing a node from DNS is not free, and a single dropped packet is not an
-outage.  A node has to fail several times in a row before it is called down,
-and succeed a couple of times before it is called up again.  The cost of being
-slow here is one extra probe interval.  The cost of flapping is a name that
-changes every thirty seconds, which is worse than either answer.
+Streaks: a node must fail several probes in a row to be marked down and pass
+a couple to come back.  Being slow costs one probe interval; flapping DNS is
+worse than either answer.
 """
 
 import asyncio
@@ -60,17 +30,14 @@ log = logging.getLogger("nfm.frontend")
 
 class FrontendProbe:
     """
-    Keeps the running verdict on whether this node's own listener serves.
+    Running verdict on whether this node's own listener serves.
 
-    Deliberately holds its streaks in memory rather than the database.  The
-    verdict is about right now, and a manager that has just restarted should
-    work it out again from live probes rather than trusting what the last one
-    believed before it went away.
+    Kept in memory on purpose: after a restart the verdict is rebuilt from
+    live probes rather than trusting stale state.
     """
 
     def __init__(self):
-        # None means "no verdict yet", which is not the same as False.  Nothing
-        # is withdrawn on the strength of never having been asked.
+        # None means no verdict yet, which never triggers a withdrawal.
         self.serving = None
         self.detail = "not probed yet"
         self._fails = 0
@@ -80,17 +47,14 @@ class FrontendProbe:
         """
         One request through the listener.  Returns (ok, detail).
 
-        verify=False on purpose.  We are asking whether nginx answers, not
-        whether its certificate is any good, and a node whose cert has expired
-        is still serving every client that has not noticed.  Certificate expiry
-        has its own alerting and should not be laundered through this.
+        verify=False on purpose: we only care whether nginx answers.
+        Certificate expiry has its own alerting.
         """
         url = f"https://{host}:{port}/"
         headers = {}
         extensions = {}
         if server_name:
-            # Ask as a real client would, so we land in the right server block
-            # rather than whichever one happens to be the default.
+            # Land in the intended server block, not the default one.
             headers["Host"] = server_name
             extensions["sni_hostname"] = server_name
 
@@ -98,8 +62,7 @@ class FrontendProbe:
             async with httpx.AsyncClient(verify=False, timeout=httpx.Timeout(timeout)) as client:
                 reply = await client.get(url, headers=headers, extensions=extensions)
         except httpx.TimeoutException:
-            # The interesting one.  Connected, or did not even manage that, and
-            # then nothing came back.  This is the wedge.
+            # The wedge case: nothing came back.
             return False, f"no answer within {timeout}s"
         except httpx.ConnectError as exc:
             return False, f"could not connect: {exc}"
@@ -112,9 +75,8 @@ class FrontendProbe:
 
     async def run_cycle(self, host, port, server_name, timeout, fail_after, pass_after):
         """
-        Probe once and move the verdict if a streak is long enough.
-
-        Returns the verdict, which is None until the first streak completes.
+        Probe once and update the verdict if a streak is long enough.
+        Returns the verdict (None until the first streak completes).
         """
         ok, detail = await self.probe_once(host, port, server_name, timeout)
         self.detail = detail
@@ -132,7 +94,7 @@ class FrontendProbe:
             self._fails += 1
             self._passes = 0
             if self.serving is not False and self._fails >= fail_after:
-                # Loud, because this is the node taking itself out of DNS.
+                # Loud: this takes the node out of DNS.
                 log.error(
                     "this node's frontend has failed %d probes in a row (%s), "
                     "so it should stop being handed out",
@@ -148,36 +110,19 @@ class FrontendProbe:
 
 class FrontendWatchdog:
     """
-    Restarts nginx when this node's own listener has stopped answering.
+    Restarts nginx when this node's own listener stops answering.
 
-    Withdrawing the node from DNS routes around the problem.  It does not fix
-    it, and on 24 August 2026 nothing did until a person restarted the box 73
-    minutes in.  This is the part that fixes it.
+    DNS withdrawal only routes around a wedge; this fixes it.  It must be a
+    restart: shared memory zones survive a reload, so a lock held by a dead
+    worker blocks the new workers too.  In the August 24, 2026 incident a
+    reload at 21:45:21 changed nothing and the wedge lasted 72 more minutes.
 
-    Why restart and not reload
-    --------------------------
+    Rate limited with a cooldown and a daily cap.  Restarting every cycle
+    just drops connections and buries the fault; at the cap the node stays
+    withdrawn and logs loudly for a person.
 
-    A reload cannot clear this.  nginx's shared memory zones are created by the
-    master at startup and survive a reload, so a zone left locked by a worker
-    that died holding the lock is handed straight back to the new workers and
-    they block on it too.  The logs from that incident show it plainly: there
-    was a reload at 21:45:21, seconds after the crash storm, and the wedge
-    carried on for another 72 minutes.  Only a full stop and start builds the
-    zones again.
-
-    Why it is rate limited
-    ----------------------
-
-    A restart that fixes nothing, repeated every cycle, is its own outage: it
-    drops in flight connections over and over and hides the fault in a wall of
-    log lines.  So there is a cooldown between attempts and a daily cap, and
-    when the cap is reached this stops and says so.  A node that needs
-    restarting five times a day has a problem a restart is not going to solve,
-    and at that point the right thing is to stay withdrawn and be loud.
-
-    The order matters.  DNS withdrawal is written first, on the cycle before
-    this is reached, so clients are already being sent elsewhere by the time
-    the listener drops for a restart.
+    DNS withdrawal happens on an earlier cycle, so clients are already going
+    elsewhere when the listener drops for the restart.
     """
 
     def __init__(self):
@@ -211,9 +156,8 @@ class FrontendWatchdog:
         """
         Restart nginx, if we are allowed to right now.
 
-        Returns True only when a restart actually ran and the agent said it
-        worked.  Never raises: this is called from a scheduled job and a
-        watchdog that takes the manager down with it is worse than no watchdog.
+        True only when a restart ran and the agent reported success.  Never
+        raises, since it runs from a scheduled job.
         """
         from app.core import audit
         from app.core.agent_client import AgentError, get_agent
@@ -247,9 +191,8 @@ class FrontendWatchdog:
         worked = bool(result.get("ok"))
         output = (result.get("output") or result.get("note") or "").strip()
 
-        # The agent tests the config before it restarts and refuses if it does
-        # not pass, which is the right call: restarting into a config nginx will
-        # not load turns a wedge into a node that is properly down.
+        # The agent refuses to restart if the config test fails; restarting
+        # into a broken config would turn a wedge into a hard down.
         audit.record(
             "nginx_watchdog_restart",
             result="success" if worked else "failure",

@@ -61,8 +61,8 @@
 </div>
 
 <script nonce="{{ csp_nonce }}">
-// Waits for app.js, which the layout loads after this block.  Without the wait
-// window.NFM does not exist yet and the whole page silently does nothing.
+// Waits for app.js, which the layout loads after this block. Without the wait
+// window.NFM does not exist yet and the page silently does nothing.
 document.addEventListener("DOMContentLoaded", function () {
   const POOLS = {{ pools|map(attribute='id')|list|tojson }};
   const POOL_NAMES = {{ pools|map(attribute='name')|list|tojson }};

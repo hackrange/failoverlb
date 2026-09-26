@@ -1,17 +1,16 @@
 /* =============================================================================
    Failover LB styles
 
-   Neutral on purpose.  Black, white and grey, with colour saved for the one
-   thing colour is actually good at here: telling you at a glance whether
-   something is broken.  If everything is coloured then nothing stands out, and
-   on a page full of load balancer status that is the whole job.
+   Neutral on purpose. Black, white and gray, with color kept for the one thing
+   it is good at here: showing at a glance whether something is broken. If
+   everything is colored, nothing stands out.
 
-   Layout follows the same shape as the other tools here.  Dark bar across the
-   top, fixed sidebar down the left, content fills the rest.
+   Layout: dark bar across the top, fixed sidebar down the left, content fills
+   the rest.
    ============================================================================= */
 
 :root {
-    /* Greys, light to dark.  Everything structural comes from these. */
+    /* Grays, light to dark.  Everything structural comes from these. */
     --bg: #ffffff;
     --bg-soft: #f6f6f6;
     --bg-sunk: #efefef;
@@ -26,7 +25,7 @@
     --header: #141414;
     --sidebar: #fafafa;
 
-    /* State colours.  Only for status, never for decoration. */
+    /* State colors.  Only for status, never for decoration. */
     --ok: #1a7f37;
     --ok-bg: #eaf4ec;
     --warn: #9a6700;
@@ -44,8 +43,8 @@
             "Liberation Mono", monospace;
 }
 
-/* Dark mode follows the operating system.  Nobody wants a white screen at 3am
-   when the pager went off, and this costs us one block of variables. */
+/* Dark mode follows the operating system. Nobody wants a white screen at 3am
+   when paged, and it costs one block of variables. */
 @media (prefers-color-scheme: dark) {
     :root {
         --bg: #161616;
@@ -152,10 +151,8 @@ pre {
     color: var(--text-faint);
     font-weight: 600;
 
-    /* It is a button now, so it has to be told to stop looking like one.
-       Everything below undoes a default rather than adding a style: the
-       heading should read exactly as it did when it was a div, and only
-       behave differently. */
+    /* It is a button, so undo the button defaults. The heading should look
+       the same as it did as a div and only behave differently. */
     display: flex;
     align-items: center;
     gap: 8px;
@@ -187,14 +184,13 @@ pre {
 }
 .sidebar .group-label[aria-expanded="false"] .chev { transform: rotate(-90deg); }
 
-/* Collapsed is hidden outright rather than animated to zero height.  A height
-   animation on a list whose length is not known needs a measured pixel value
-   to animate to, and getting that wrong leaves a sliver of a link showing or
-   clips the last one. */
+/* Collapsed is hidden outright, not animated to zero height. Animating a list
+   of unknown length needs a measured height, and getting it wrong leaves a
+   sliver showing or clips the last link. */
 .sidebar .group-links[hidden] { display: none; }
 
-/* The sections carry the separation now, so the first heading does not need
-   the extra space it had when it was following a link. */
+/* The sections provide the separation, so the first heading does not need
+   extra space above it. */
 .sidebar .nav-group + .nav-group .group-label { padding-top: 10px; }
 .sidebar a {
     display: flex;
@@ -373,15 +369,11 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; }
 
 /* Every text entry field, listed by type.
  *
- * Listing types is a trap and this rule has been caught by it twice: a type
- * that is not named here gets no styling at all and falls back to whatever the
- * browser draws, which is a differently shaped box sitting next to the others.
- * It happened to the six search boxes, which had no border and no padding, and
- * to two url fields on the settings page.
+ * A type not named here gets no styling and falls back to the browser's
+ * default box. That has already happened to search and url fields.
  *
- * So `search` and `url` are named now, and `appearance: none` goes with them.
- * WebKit draws a search field with its own rounded shape and will keep doing
- * that through a border and a radius set here unless it is told not to.
+ * appearance: none is needed too, since WebKit keeps its own rounded search
+ * field through any border and radius set here.
  *
  * If you add a field of a type that is not on this list, add the type. */
 input[type=text], input[type=password], input[type=number], input[type=email],
@@ -397,9 +389,8 @@ select, textarea {
     font-size: 0.88rem;
 }
 
-/* Only the inputs, never the select.  A select needs to keep its native
- * appearance or the dropdown arrow goes with it, and then it looks like a text
- * box that mysteriously will not accept typing. */
+/* Only the inputs, never the select. A select needs its native appearance or
+ * it loses the dropdown arrow and looks like a text box. */
 input[type=text], input[type=password], input[type=number], input[type=email],
 input[type=search], input[type=url], input[type=tel], input[type=date],
 textarea {
@@ -407,9 +398,8 @@ textarea {
     -webkit-appearance: none;
 }
 
-/* The little clear cross WebKit puts inside a search field.  Kept, because it
- * is useful and people expect it, but recoloured: its default is a mid grey
- * that disappears against the dark background. */
+/* The clear cross WebKit puts in a search field. Kept, but recolored: the
+ * default mid gray disappears on the dark background. */
 input[type=search]::-webkit-search-cancel-button {
     -webkit-appearance: none;
     appearance: none;
@@ -439,8 +429,7 @@ input:disabled, select:disabled { background: var(--bg-sunk); color: var(--text-
 }
 
 /* ------------------------------------------------------- the help ? button */
-/* Every setting gets one of these.  Small, quiet, always in the same place, so
-   it becomes something you stop noticing until you need it. */
+/* Every setting gets one. Small, quiet and always in the same place. */
 .help-btn {
     display: inline-flex;
     align-items: center;
@@ -533,16 +522,11 @@ input:disabled, select:disabled { background: var(--bg-sunk); color: var(--text-
 /* ------------------------------------------------------------------ notices */
 /* Make the hidden attribute actually hide things.
  *
- * The browser's own rule is [hidden] { display: none }, and any author rule
- * with a display on it beats that, because author styles win over the user
- * agent stylesheet.  .notice sets display: flex, so every notice marked hidden
- * was on screen the whole time regardless of what the code thought.
- *
- * That is how the "saved but not live" banner ended up permanently visible
- * while the page it sat above correctly said there was nothing waiting, and
- * the same was true of both "unsaved changes" notices.  There was already a
- * .modal-backdrop[hidden] rule further down, which is somebody meeting this
- * once and fixing it where they found it.  This does it for everything. */
+ * The browser's [hidden] { display: none } loses to any author rule that sets
+ * display. .notice sets display: flex, so hidden notices stayed visible,
+ * including the "saved but not live" banner and both "unsaved changes"
+ * notices. The older .modal-backdrop[hidden] rule below was a local fix for
+ * the same thing; this covers everything. */
 [hidden] { display: none !important; }
 
 .notice {
@@ -567,9 +551,9 @@ input:disabled, select:disabled { background: var(--bg-sunk); color: var(--text-
 .login-wrap {
     min-height: 100vh;
     display: flex;
-    /* Column so the trademark line sits under the box rather than beside it.
-       With the direction turned, align-items is now the horizontal centre and
-       justify-content the vertical one, which is why both are still here. */
+    /* Column so the trademark line sits under the box. With the direction
+       turned, align-items is the horizontal center and justify-content the
+       vertical one, which is why both are here. */
     flex-direction: column;
     align-items: center;
     justify-content: center;
@@ -611,8 +595,8 @@ input:disabled, select:disabled { background: var(--bg-sunk); color: var(--text-
 }
 
 /* ------------------------------------------------------ trademark footer */
-/* Quiet on purpose.  It has to be legible and on every page, and it is not
-   something anybody came here to read. */
+/* Quiet on purpose: legible and on every page, but not what anyone came to
+   read. */
 .legal {
     margin-top: 28px;
     padding-top: 12px;
@@ -689,8 +673,8 @@ input:disabled, select:disabled { background: var(--bg-sunk); color: var(--text-
 }
 
 /* ------------------------------------------------------------------- tabs */
-/* Used on the site editor.  Plain buttons rather than links so the page does
-   not reload when you flip between them and lose what you were typing. */
+/* Used on the site editor. Buttons rather than links, so switching tabs does
+   not reload the page and lose what you were typing. */
 .tabs {
     display: flex;
     gap: 2px;
@@ -714,15 +698,14 @@ input:disabled, select:disabled { background: var(--bg-sunk); color: var(--text-
 
 /* The country picker.
  *
- * Two hundred and fifty tick boxes in one column is a page nobody scrolls to
- * the end of.  Columns are sized rather than counted, so it lands on three on a
- * laptop and five on a wide screen without a breakpoint per width. */
+ * About 250 tick boxes, so use columns sized by width rather than counted:
+ * three on a laptop, five on a wide screen, no breakpoint per width. */
 .geo-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
   gap: 2px 18px;
-  /* Steady height while a search narrows it, so the buttons underneath stay
-     where they were and the page does not jump about as somebody types. */
+  /* Steady height while a search narrows it, so the buttons below do not jump
+     around while typing. */
   min-height: 40vh;
   align-content: start;
   max-height: 60vh;
@@ -746,40 +729,33 @@ input:disabled, select:disabled { background: var(--bg-sunk); color: var(--text-
 
 /* Stars on the feature comparison.
  *
- * A filled star and an empty one, rather than only drawing the filled ones,
- * so three out of five reads as three out of five at a glance instead of
- * needing to be counted.  The number is on the title and the aria-label as
- * well, because colour and shape alone are no good to a screen reader and not
- * much better to somebody who cannot tell the two greys apart. */
+ * Filled and empty stars both drawn, so three of five reads at a glance. The
+ * number is also on the title and aria-label for screen readers and anyone
+ * who cannot tell the two grays apart. */
 .stars { white-space: nowrap; letter-spacing: 1px; }
 .stars .star { color: var(--line, #d0d0d0); }
 .stars .star.on { color: var(--warn, #d9a406); }
 
-/* The comparison table.  The reasoning column is the widest on purpose: it is
- * the part worth reading, and a table of bare scores would be an assertion.
- * With four products the score columns are narrow and the last column is the
- * one that has to breathe, so it is targeted from the end rather than by
- * counting from the front. */
+/* The comparison table. The reasoning column is widest on purpose, since it
+ * is the part worth reading. It is targeted from the end rather than counted
+ * from the front. */
 table.cmp td { vertical-align: top; }
 table.cmp td:last-child { min-width: 24rem; }
 table.cmp th.us, table.cmp td.us { background: var(--row-alt, #fafafa); }
 
-/* The best score in a row gets a quiet backing rather than a badge.  Four
- * badges per row would be noise, and the point is only to let the eye find
- * the winner without comparing five stars against five stars four times. */
+/* The best score in a row gets a quiet background rather than a badge, so the
+ * eye can find it without comparing rows of stars. */
 table.cmp td.lead { background: rgba(217, 164, 6, .10); }
 
-/* The second paragraph in the reasoning column, covering the two appliances.
- * Ruled off from the first so it is clear which argument is about which
- * products. */
+/* The second paragraph in the reasoning column, covering the two appliances,
+ * ruled off so it is clear which argument is about which products. */
 .cmp-others {
   margin-top: .55rem; padding-top: .55rem;
   border-top: 1px dashed var(--line, #d0d0d0);
 }
 
-/* Star totals and pricing, both a row of cards that wrap on a narrow screen.
- * Our own card is marked so nobody has to work out which one we are, and it
- * sits wherever the number puts it rather than being pinned to the front. */
+/* Star totals and pricing, both rows of cards that wrap on narrow screens.
+ * Our own card is marked, and sits where its score puts it rather than first. */
 .score-grid, .price-grid {
   display: grid; gap: .9rem; margin-bottom: 1rem;
   grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
@@ -800,10 +776,9 @@ table.cmp td.lead { background: rgba(217, 164, 6, .10); }
 .price-headline { font-size: 1.5rem; font-weight: 700; line-height: 1.2; }
 .price-unit { margin-bottom: .5rem; }
 
-/* One row in the WAF hits list.  The tick box and the detail side by side, so
- * the rule, the path and the addresses that produced it are all readable
- * without opening anything: deciding whether a hit is a false positive is
- * exactly the question of who sent it. */
+/* One row in the WAF hits list. Tick box and detail side by side, so the rule,
+ * path and source addresses are readable without opening anything. Who sent
+ * it is what decides whether a hit is a false positive. */
 label.wafhit {
     display: flex; gap: 10px; align-items: flex-start;
     padding: 8px 10px; border-bottom: 1px solid var(--line);
@@ -815,9 +790,8 @@ label.wafhit input:disabled { cursor: not-allowed; }
 
 /* The band drawn while dragging a time range on a chart.
  *
- * Positioned against the document rather than the chart, because the charts are
- * replaced wholesale on every refresh and anything parented to one would go
- * with them mid drag. */
+ * Positioned against the document, not the chart, because charts are replaced
+ * on every refresh and would take it with them mid drag. */
 #zoom-marker {
     position: absolute;
     display: none;
@@ -829,9 +803,8 @@ label.wafhit input:disabled { cursor: not-allowed; }
     z-index: 40;
 }
 
-/* Three fields side by side, wrapping on a narrow screen.  Used for the three
- * OIDC group names, which only make sense read together: they are one decision
- * about who gets which role, not three unrelated settings. */
+/* Three fields side by side, wrapping on a narrow screen. Used for the three
+ * OIDC group names, which are one decision about roles and read together. */
 .grid-3 {
   display: grid; gap: .8rem;
   grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
@@ -839,11 +812,9 @@ label.wafhit input:disabled { cursor: not-allowed; }
 
 /* The bar that says this page is older than the server.
  *
- * Pinned to the bottom rather than the top, because the top is where the
- * "saved but not applied" banner already lives and two stacked warnings push
- * the actual page off the screen.  It stays until somebody reloads: a toast
- * would fade, and the whole problem is that people carry on for ten minutes
- * wondering why a feature is missing. */
+ * Pinned to the bottom because the top already has the "saved but not
+ * applied" banner, and two stacked warnings push the page off screen. It
+ * stays until a reload, since a toast would fade and be missed. */
 .stale-bar {
     position: fixed;
     left: 0; right: 0; bottom: 0;

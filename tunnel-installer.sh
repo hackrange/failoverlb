@@ -5,22 +5,13 @@
 #   sudo ./tunnel-installer.sh install
 #   sudo ./tunnel-installer.sh check
 #
-# Run from the GUI, through a systemd unit, for the same reason the nginx build
-# is: the agent runs under ProtectSystem=strict with a short list of writable
-# paths, a child process inherits that sandbox, and a package manager needs far
-# more than that.  Widening the agent's paths to help this one job would take
-# the protection away from every other verb.
+# The GUI runs this through nfm-tunnel-install.service, since the agent's
+# sandbox is too tight for a package manager.  "check" changes nothing and
+# reports what is missing; the GUI uses it to decide whether to offer install.
 #
-# "check" changes nothing and says what is missing.  It is what the GUI asks
-# before it offers to install anything, so a box that is already set up is
-# never offered a button that would do nothing.
-#
-# Ubuntu 22.04 and up, and it should be equally happy on anything Debian based.
-# The two of those differ less than the machines do: a virtual machine with a
-# distribution kernel has wireguard already, a container gets whatever its host
-# loaded, and a minimal cloud image can be missing the tools that would tell
-# you either way.  So this checks rather than assumes, and says which of those
-# it found.
+# Ubuntu 22.04 and up, or anything Debian based.  VMs usually have the
+# wireguard module already, containers get whatever the host loaded, and
+# minimal cloud images may lack the tools, so this checks rather than assumes.
 # =============================================================================
 set -uo pipefail
 
@@ -33,33 +24,29 @@ fail() { echo "[tunnel] $*" >&2; }
 # What the tunnel needs, and how to tell whether it is here
 # -----------------------------------------------------------------------------
 #
-# Three separate things, which fail in different ways and are worth reporting
-# apart:
+# Three things, reported separately:
 #
 #   the tools    wg and wg-quick, from wireguard-tools
-#   the unit     wg-quick@.service, which is how the interface is owned
+#   the unit     wg-quick@.service, which owns the interface
 #   the datapath the kernel module, or wireguard-go if the kernel has none
 #
-# A box can have the tools and no datapath.  That is the case that looks fine
-# and carries nothing, so it gets checked properly rather than inferred from
-# the package being installed.
+# Tools without a datapath looks fine and carries nothing, so the datapath is
+# checked directly, not inferred from the package.
 
 have_tools()    { command -v wg >/dev/null 2>&1 && command -v wg-quick >/dev/null 2>&1; }
 have_unit()     { systemctl cat "wg-quick@${IFACE}.service" >/dev/null 2>&1; }
 have_userspace(){ command -v wireguard-go >/dev/null 2>&1; }
 
 have_module() {
-    # Loaded already, built in, or loadable.  A container usually cannot load
-    # anything and inherits whatever its host has, so "can we load it" has to
-    # be tried rather than assumed from the module file existing.
+    # Loaded, built in, or loadable.  Actually try modprobe: a container
+    # cannot load modules even when the module file exists.
     [[ -d /sys/module/wireguard ]] && return 0
     modprobe wireguard >/dev/null 2>&1 && [[ -d /sys/module/wireguard ]]
 }
 
 have_tun() { [[ -c /dev/net/tun ]]; }
 
-# The datapath question, answered honestly: the kernel if it will have us, the
-# userspace implementation if it will not, and nothing if neither.
+# Kernel if available, else userspace, else none.
 datapath() {
     if have_module; then
         echo kernel
@@ -125,10 +112,8 @@ fi
 
 export DEBIAN_FRONTEND=noninteractive
 
-# One update, and not a fatal one.  A box with a broken third party source
-# fails here through no fault of ours, and the packages we want are very likely
-# already fetchable.  Better to try the install and let that be the thing that
-# fails with a real reason.
+# Not fatal: a broken third party source can fail the update while our
+# packages are still fetchable.  Let the install fail with a real reason.
 say "refreshing the package lists"
 apt-get update -qq >/dev/null 2>&1 || say "could not refresh every package list, carrying on"
 
@@ -146,13 +131,9 @@ if ! have_tools; then
     exit 1
 fi
 
-# The datapath, if the kernel will not give us one.
-#
-# wireguard has been in the mainline kernel since 5.6 and Ubuntu 22.04 ships
-# 5.15, so the usual answer here is that it is already there.  The exception is
-# a container, which gets whatever its host loaded and cannot load anything
-# itself.  wireguard-go does the same job in userspace, needs no module, and
-# needs /dev/net/tun, which a container has to be given.
+# wireguard is in the kernel since 5.6 (22.04 ships 5.15), so this is mostly
+# for containers without the host module.  wireguard-go needs no module but
+# does need /dev/net/tun, which a container has to be given.
 if [[ "$(datapath)" == "none" ]]; then
     say "the kernel here has no wireguard, trying the userspace one"
     apt-get install -y -qq wireguard-go >/dev/null 2>&1 \
@@ -168,8 +149,7 @@ if [[ "$(datapath)" == "none" ]]; then
     fi
 
     if [[ "$(datapath)" == "userspace" ]]; then
-        # wg-quick has to be told, and told in a way that survives a reboot and
-        # a package upgrade, so a drop-in rather than an edited unit.
+        # A drop-in, so it survives package upgrades.
         say "telling wg-quick to use the userspace implementation"
         mkdir -p "/etc/systemd/system/wg-quick@${IFACE}.service.d"
         cat > "/etc/systemd/system/wg-quick@${IFACE}.service.d/userspace.conf" <<EOF
@@ -183,8 +163,7 @@ EOF
     fi
 fi
 
-# wg-quick@.service comes with wireguard-tools.  If it is missing after all
-# that, something is wrong that guessing will not fix.
+# Ships with wireguard-tools, so if it is missing something else is wrong.
 if ! have_unit; then
     fail "wireguard-tools is installed but wg-quick@.service is not there."
     fail "The tunnel is brought up through that unit, so it cannot work without it."

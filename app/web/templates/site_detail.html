@@ -19,14 +19,12 @@
   </div>
 </div>
 
-{# The warning that matters most on this page.  A site serving a name its
-   certificate does not carry is green here, valid on the certificates page, and
-   a browser warning to anybody who types that name.  Both lists are in the
-   database, so there is no reason for anybody to find this out from a visitor.
+{# The most important warning on this page. A site serving a name its
+   certificate does not cover looks fine here and on the certificates page,
+   and gives a browser warning to anyone using that name.
 
-   Rendered server side because the wildcard rule decides it, and that rule
-   belongs in one place rather than being written again in JavaScript slightly
-   differently. #}
+   Rendered server side so the wildcard rule lives in one place instead of
+   being reimplemented in JavaScript. #}
 {% if uncovered_names %}
   <div class="notice warn">
     <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.5 15 14H1L8 1.5zm0 3.2L3.4 12.8h9.2L8 4.7zM7.3 7h1.4v3H7.3V7zm0 3.7h1.4V12H7.3v-1.3z"/></svg>
@@ -53,13 +51,11 @@
 {% endif %}
 
 {#
-  Why this site is not being served, said where somebody is standing.
+  Why this site is not being served, shown where people will see it.
 
-  Both cases below end the same way: nginx has no server block for the name, so
-  the request goes to the default server and somebody is looking at a different
-  site's page.  That is the most confusing answer this system can give, and
-  until now nothing said any of it.  The only sign a site was off was an
-  unticked box on another tab.
+  Both cases end the same way: nginx has no server block for the name, so the
+  request hits the default server and shows a different site's page. That is
+  the most confusing outcome this system can produce.
 #}
 {% if not host.enabled %}
   <div class="notice warn">
@@ -134,10 +130,9 @@
           </label>
           <input type="text" id="f-names" value="{{ host.name_list()|join(' ') }}">
           <div class="hint">Space separated hostnames this site answers to.</div>
-          {# Offered rather than assumed.  Somebody who typed a bare domain
-             nearly always wants the www as well and will not think of it until
-             a visitor does.  Only shown when there is a pair worth making, so
-             it never appears on api.example.com. #}
+          {# Offered, not assumed. Someone who typed a bare domain nearly always
+             wants the www too. Only shown when there is a sensible pair, so
+             never on api.example.com. #}
           {% if www_partner %}
             <div class="hint mt">
               <button class="btn small" type="button" id="add-www"
@@ -183,12 +178,9 @@
         </div>
 
         {#
-          Which tunnel workloads this site actually depends on.
-
-          Filled in from the API, and hidden when there are none, so a fleet
-          not using the tunnel never sees it.  It covers the paths' pools as
-          well as this one, because a site with one backend here and another on
-          a path depends on both and the second is the one that gets forgotten.
+          Tunnel workloads this site depends on. Filled from the API and hidden
+          when there are none. Includes the pools used by paths, since a
+          backend on a path is the one that gets forgotten.
         #}
         <div class="field" id="tunnel-dep-field" hidden>
           <label>Tunnels used</label>
@@ -245,11 +237,10 @@
         <input type="checkbox" id="f-http2" {{ 'checked' if host.http2 }}>
         <label for="f-http2">HTTP/2</label>
       </div>
-      {# The job people actually arrive with, as one switch rather than a dozen
-         settings across three pages.  On the Basics tab because it is a
-         statement about what this site is for, the same as the mode picker
-         above it, and because somebody who wants it does not know yet that the
-         settings it turns off exist. #}
+      {# The common job as one switch rather than a dozen settings across
+         three pages. On Basics because, like the mode picker, it says what the
+         site is for, and people who want it do not know yet which settings it
+         turns off. #}
       <div class="checkline">
         <input type="checkbox" id="f-offload" {{ 'checked' if host.tls_offload_only }}>
         <label for="f-offload">
@@ -297,11 +288,8 @@
         </div>
       </div>
 
-      {# Putting a password on a site is a thing people come here looking for,
-         and until now the only way to it was to guess that it lives inside an
-         access list on a different page.  The engine was finished and
-         unreachable, which is the same shape as the access list picker itself
-         before it existed. #}
+      {# Password protection is something people come here looking for, and
+         otherwise it only lives inside an access list on another page. #}
       <div class="field mt" id="basic-auth-box">
         <label>A username and password in front of this site</label>
         <div id="basic-auth-state" class="hint"></div>
@@ -326,13 +314,11 @@
         </div>
       </div>
 
-      {# What the choice actually does, in the order nginx reads it.
+      {# What the choice does, in the order nginx reads it.
 
-         nginx takes the first rule that matches and stops there, so a deny
-         written under an allow for the same address never runs.  Somebody
-         looking at a list of addresses on the other page cannot see that, and
-         the way they find out is a rule that quietly does nothing.  So the
-         order is spelled out here, where the list gets attached to a site. #}
+         nginx stops at the first matching rule, so a deny under an allow for
+         the same address never runs. That is invisible from the list on the
+         other page, so the order is spelled out here. #}
       <div id="acl-effect" class="notice info mt" hidden>
         <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 3a.9.9 0 1 1 0 1.8A.9.9 0 0 1 8 4zm1.2 8H6.8v-.9h.7V7.9h-.7V7h2.1v4.1h.3V12z"/></svg>
         <div>
@@ -343,14 +329,12 @@
 
       {# The way back in.
 
-         Somebody will restrict a site to an address they are not on.  The plan
-         for this said the fix must not be editing files on the box, so the
-         check happens here, before saving, against the address this request
-         actually came from.
+         People will restrict a site to an address they are not on, and the
+         fix should not require editing files on the box. So check before
+         saving, against the address this request came from.
 
-         A warning and not a refusal: shutting yourself out on purpose is a
-         legitimate thing to do, and the person doing it is often about to move
-         to the address they just allowed. #}
+         A warning, not a refusal: locking yourself out on purpose is
+         legitimate, often right before moving to the allowed address. #}
       <div id="acl-lockout" class="notice warn mt" hidden>
         <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.5 15 14H1L8 1.5zm0 4.2a.8.8 0 0 0-.8.9l.3 3.1h1l.3-3.1a.8.8 0 0 0-.8-.9zM8 11a.85.85 0 1 0 0 1.7A.85.85 0 0 0 8 11z"/></svg>
         <div id="acl-lockout-text"></div>
@@ -444,16 +428,12 @@
 
 {# ============================ geo blocking ============================ #}
 {#
-  Its own tab, beside the config, rather than a line in the long list of
-  advanced settings.  It is a question about who may reach the site, which is
-  the sort of thing people go looking for, and a list of two letter codes typed
-  into a box is not something anybody wants to compose by hand.
+  Its own tab rather than a line in advanced settings. People go looking for
+  it, and nobody wants to type two letter codes into a box.
 
-  The ticks are countries that may reach the site, so a new site has all of
-  them ticked and blocks nobody.  What is stored is the other half, the list of
-  countries to refuse, because that is what nginx is asked to do and because a
-  country that appears in the world later is then allowed rather than silently
-  blocked.
+  The ticks are countries that may reach the site, so a new site blocks
+  nobody. What is stored is the inverse, countries to refuse, since that is
+  what nginx is told, and a new country code is then allowed by default.
 #}
 <div class="tab-panel" data-panel="geo" hidden>
   <div class="card">
@@ -480,11 +460,9 @@
         </p>
 
         {#
-          Check all and Uncheck all, rather than Select all and Clear.  Clear
-          is the word on a search box and it reads like one, and on a list of
-          tick boxes the pair of them should say the same thing in both
-          directions.  Both act on whatever the search has left on screen, so
-          finding a continent and unticking it is two moves.
+          "Check all" and "Uncheck all" rather than "Select all" and "Clear",
+          which reads like a search box action. Both act on what the search
+          left on screen, so finding a continent and unticking it is two steps.
         #}
         <div class="flex mb">
           <input type="search" id="geo-search" placeholder="Find a country"
@@ -513,14 +491,12 @@
 
 {# ============================ firewall ============================ #}
 {#
-  Its own tab for the same reason geo blocking has one.  It is a question about
-  what reaches the site rather than a knob, the four answers need explaining in
-  more than a hint, and the page has to say whether the fleet can actually do
-  it before somebody picks an answer that cannot be applied.
+  Its own tab, like geo blocking. The four choices need more explanation than
+  a hint, and the page has to say whether the fleet supports it before
+  anyone picks one.
 
-  The tab is hidden entirely when nginx was built without the module.  A tab
-  offering a setting that cannot be written is worse than no tab: it reads as
-  broken rather than as not installed.
+  Hidden entirely when nginx lacks the module, since a tab offering a setting
+  that cannot be written reads as broken.
 #}
 <div class="tab-panel" data-panel="waf" hidden>
   <div class="card">
@@ -568,13 +544,10 @@
       </div>
 
       {#
-        The positive model, and the opposite idea from everything above it.
-
-        Above, the rules describe attacks and anything they do not recognise is
-        allowed.  Here, a list describes the application and anything not on it
-        is refused.  Two settings rather than one because they genuinely
-        compose: knowing a path exists does not mean an attack against that
-        path is welcome, so the strongest answer is both.
+        The positive model, the opposite of everything above. Above, rules
+        describe attacks and anything unrecognized is allowed. Here, a list
+        describes the application and anything not on it is refused. They
+        compose, so the strongest setup is both.
       #}
       <div class="field" style="max-width:460px">
         <label for="waf-positive">The allowed surface</label>
@@ -592,14 +565,10 @@
       </div>
 
       {#
-        The two layers together, which is the combination worth having and was
-        invisible because they are two dropdowns.
-
-        A surface says which paths exist.  It says nothing about what is sent
-        to them, so an injection aimed at a page the testers walked is a
-        request to an allowed path and sails straight through.  Block known
-        malicious underneath catches that, and it is the one attack rule
-        setting that needs no tuning, so the pair is safe to switch on together.
+        Both layers together. A surface says which paths exist, not what is
+        sent to them, so an injection aimed at an allowed path gets through.
+        Block known malicious catches that and needs no tuning, so the pair is
+        safe to enable together.
       #}
       <div class="notice ok" id="waf-layer" hidden>
         <svg viewBox="0 0 16 16" fill="currentColor"><path d="M13.5 4.5 6 12 2.5 8.5l1-1L6 10l6.5-6.5 1 1z"/></svg>
@@ -618,12 +587,10 @@
   </div>
 
   {#
-    What the application actually is, as the testers walked it.
-
-    Its own card, next to the hits list rather than inside it, because the two
-    answer opposite questions from the same log.  The hits list is "which rules
-    fired", which tunes a negative model.  This is "which paths exist", which
-    builds a positive one.
+    The application as the testers walked it. Separate from the hits list
+    because they answer opposite questions from the same log: which rules
+    fired (tunes a negative model) and which paths exist (builds a positive
+    one).
   #}
   <div class="card" id="waf-surface-card" hidden>
     <div class="card-head">
@@ -671,13 +638,10 @@
   </div>
 
   {#
-    The learning session.
-
-    Its own card because it is an activity rather than a setting: it has a
-    start, an end and a result.  The addresses are asked for before anything
-    starts, which is the whole safeguard.  A firewall that excuses whatever
-    fired while it was learning is a gift to anybody scanning the site at the
-    time.
+    The learning session. Its own card because it is an activity with a
+    start, end and result. The trusted addresses are asked for before it
+    starts, and that is the safeguard: excusing whatever fired during learning
+    would excuse anyone scanning the site at the time.
   #}
   <div class="card">
     <div class="card-head">
@@ -736,15 +700,10 @@
       </div>
 
       {#
-        Rounds that have already finished.
-
-        Without this, stopping a session hid the evidence it had just
-        gathered.  The hits were never deleted, they were only unreachable:
-        the page could only ask "what has fired since the running session
-        started", so there was no window that described a session which had
-        ended.  Somebody who exercised an application properly and then
-        stopped watching before saving a profile had done all the work and
-        could not get back to it.
+        Rounds that have already finished. Without this, stopping a session
+        left its hits unreachable, since the page could only ask what fired
+        since the running session started, and the work was lost if no
+        profile had been saved yet.
       #}
       <div id="waf-past" hidden>
         <h3>Earlier rounds</h3>
@@ -756,8 +715,8 @@
         <div id="waf-past-list"></div>
       </div>
 
-      {# A load that failed used to leave this card looking idle, which reads
-         as "no session" rather than "we could not find out". #}
+      {# A failed load used to leave this card looking idle, which reads as
+         "no session" rather than "could not find out". #}
       <div class="notice warn" id="waf-session-error" hidden>
         <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.4 15 14H1z"/></svg>
         <div id="waf-session-error-text"></div>
@@ -766,12 +725,9 @@
   </div>
 
   {#
-    What this site is excusing right now.
-
-    The hits list below correctly hides itself outside a session, and until
-    this existed nothing replaced it: a site enforcing a tuned profile showed
-    no sign at all of which rules it was letting through.  That is the half of
-    a WAF somebody reviewing it actually needs to see.
+    What this site is excusing right now. The hits list hides outside a
+    session, and a site enforcing a tuned profile otherwise shows nothing
+    about which rules it lets through. Reviewers need to see that.
   #}
   <div class="card" id="waf-profile-card" hidden>
     <div class="card-head">
@@ -789,9 +745,8 @@
   </div>
 
   {#
-    What fired.  Only shown while a session is running or just after one
-    stopped: a list of hits against a site that is enforcing invites somebody
-    to tick things without the evidence that made ticking safe.
+    What fired. Only shown during or right after a session: a hit list on an
+    enforcing site invites ticking things without the evidence.
   #}
   <div class="card" id="waf-hits-card" hidden>
     <div class="card-head">
@@ -836,12 +791,9 @@
 <div class="tab-panel" data-panel="login" hidden>
 
   {#
-    Watching the login for guessing.
-
-    Its own tab rather than a line in the settings list, because the thing it
-    is looking for is not a setting: it is a pattern across the whole site over
-    a window, and the numbers only make sense next to what they are currently
-    finding.
+    Watching the login for password guessing. Its own tab because it is a
+    pattern across the site over time, not a setting, and the numbers only
+    make sense next to what they are finding.
   #}
   <div class="card">
     <div class="card-head"><h2>Watching this site's login</h2></div>
@@ -975,9 +927,8 @@
     </div>
     <div class="card-body">
 
-      {# The empty box is the thing that cost somebody an afternoon: a site
-         that is switched off has no config, so this renders blank, and blank
-         reads as a broken render rather than as an intentional state. #}
+      {# A disabled site has no config, so this renders blank. Say so, or
+         blank reads as a broken render. #}
       {% if not host.enabled %}
         <div class="notice warn">
           <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.5 15 14H1L8 1.5zm0 4a.7.7 0 0 0-.7.8l.25 3.2a.45.45 0 0 0 .9 0l.25-3.2A.7.7 0 0 0 8 5.5zm0 5.4a.8.8 0 1 0 0 1.6.8.8 0 0 0 0-1.6z"/></svg>
@@ -1194,8 +1145,8 @@ document.addEventListener("DOMContentLoaded", function () {
   const BASE = document.querySelector('meta[name=nfm-base]').content;
   const saved = {{ host.setting_map()|tojson }};
 
-  // The access lists, with enough of each to explain what picking it does
-  // without another round trip.
+  // The access lists, with enough detail to explain each choice without
+  // another round trip.
   const ACLS = {{ acl_summary|tojson }};
   const VIEWER_IP = {{ viewer_ip|tojson }};
   const MGMT_ADDRESSES = {{ node_addresses|tojson }};
@@ -1222,8 +1173,8 @@ document.addEventListener("DOMContentLoaded", function () {
     });
   });
 
-  // The hint under SSL offload only points at the tab where the greyed out
-  // settings are, so the link has to move the tabs rather than the page.
+  // The SSL offload hint links to the tab with the grayed out settings, so
+  // the link has to switch tabs rather than scroll.
   document.querySelectorAll("[data-goto-tab]").forEach(function (link) {
     link.addEventListener("click", function (event) {
       event.preventDefault();
@@ -1235,10 +1186,8 @@ document.addEventListener("DOMContentLoaded", function () {
 
   // ---- SSL offload only ----
   //
-  // The switch lives on Basics and decides what the Settings tab may offer, so
-  // ticking it redraws that tab rather than waiting for a save and a reload.
-  // Somebody who ticks it and goes looking for what changed should find the
-  // answer already on screen.
+  // The switch is on Basics but decides what the Settings tab offers, so
+  // ticking it redraws that tab right away rather than after a save.
   function offloadOnly() {
     const box = document.getElementById("f-offload");
     return !!(box && box.checked);
@@ -1260,16 +1209,13 @@ document.addEventListener("DOMContentLoaded", function () {
   syncMode();
 
   document.querySelectorAll("input, select, textarea").forEach(function (el) {
-    // Not the geo panel.  It has its own Save and writes the site itself, so
-    // nothing in it belongs to this form, and its search box is a filter
-    // rather than a setting at all.
+    // Not the geo panel. It has its own Save and writes the site itself, and
+    // its search box is a filter, not a setting.
     //
-    // Worth more than tidiness: the banner appears above the tabs and pushes
-    // the whole panel down by about fifty pixels.  A search box fires change
-    // when it loses focus, which is the moment you press a button, so the
-    // banner opened between the press and the release, the button moved out
-    // from under the pointer, and the browser threw the click away.  Check all
-    // and Uncheck all did nothing at all after a search, once, silently.
+    // It also matters for clicks: the banner above the tabs pushes the panel
+    // down about fifty pixels. The search box fires change on blur, which is
+    // when you press a button, so the button moved out from under the pointer
+    // and the click was lost.
     if (el.closest("[data-panel=geo]")) return;
     el.addEventListener("change", markDirty);
   });
@@ -1314,12 +1260,11 @@ document.addEventListener("DOMContentLoaded", function () {
       html += "</div></div>";
     });
 
-    // Said once at the top as well as on each greyed out control, because
-    // somebody arriving on this tab to change a header needs to know why before
-    // they start hunting for the setting that will not take.
+    // Said once at the top as well as on each grayed out control, so someone
+    // here to change a header knows why before hunting.
     //
-    // Added after the empty check rather than before it, or a filter matching
-    // nothing would show the notice and call that a result.
+    // Added after the empty check, or a filter matching nothing would show
+    // the notice as if it were a result.
     const notice = offloadOnly()
       ? '<div class="notice info"><div>This site is in <strong>SSL offload only' +
         '</strong> mode, so the settings that would rewrite a header are greyed ' +
@@ -1335,9 +1280,8 @@ document.addEventListener("DOMContentLoaded", function () {
       el.addEventListener("change", markDirty);
     });
 
-    // Make somebody read the warning before a setting that turns visitors away
-    // goes on.  Refusing puts the box back, so declining is the same as never
-    // having touched it.
+    // Make them read the warning before turning on a setting that turns
+    // visitors away. Declining puts the box back.
     holder.querySelectorAll("input[type=checkbox][data-confirm]").forEach(function (el) {
       el.addEventListener("click", function (event) {
         if (!el.checked) return;          // switching off never asks
@@ -1349,26 +1293,24 @@ document.addEventListener("DOMContentLoaded", function () {
     });
   }
 
-  // Used for the site's settings tab and for a path's, so the ids, the values it
-  // reads and the context the ? button asks about are all arguments.  The
-  // defaults are the site, which is what every existing caller wants.
+  // Used for both the site's settings tab and a path's, so the ids, values
+  // and ? button context are arguments. Defaults are for the site.
   //
-  // The ids matter more than they look.  Both sets of controls are in the page
-  // at the same time once a path dialog is open, and two elements sharing an id
-  // means the label stops working and the wrong control gets read.
+  // The ids matter: once a path dialog is open both sets of controls are in
+  // the page, and duplicate ids break labels and read the wrong control.
   function control(f, opts) {
     opts = opts || {};
     const store = opts.saved || saved;
     const val = store[f.key] !== undefined ? store[f.key] : f.default;
     const id = (opts.idPrefix || "s-") + f.key;
 
-    // Two separate reasons a control can be dead, and the message is not the
-    // same.  A module this build does not have is never going to work here.  A
-    // setting the site's mode decides is working exactly as asked, and the way
-    // to get it back is a checkbox on Basics, so the note says which one.
+    // Two reasons a control can be disabled, with different messages. A
+    // module missing from this build will never work here. A setting the
+    // site's mode controls is working as asked, and a checkbox on Basics
+    // brings it back.
     //
-    // Greyed out rather than hidden, and the stored value is still shown, so
-    // somebody can see what the site will go back to when the mode comes off.
+    // Grayed out rather than hidden, with the stored value still shown, so
+    // you can see what comes back when the mode is turned off.
     const forced = f.offload_forced && offloadOnly();
     const disabled = (f.available && !forced) ? "" : " disabled";
     const deadNote = !f.available
@@ -1381,14 +1323,12 @@ document.addEventListener("DOMContentLoaded", function () {
 
     let input = "";
     if (f.type === "bool") {
-      // A setting that can take the site away from most of the people using it
-      // carries its own warning, and the box stops you on the way on.  Turning
-      // it back off is how you recover, so that never asks.
-      // escapeHtml goes through textContent, which handles < > and & and
-      // leaves quotes alone.  That is fine for text between tags and not fine
-      // here, where a quote would close the attribute early and whatever came
-      // next would be parsed as markup.  Today's warning has no quotes in it,
-      // which is luck, not a design.
+      // Settings that can lock most visitors out carry a warning, and turning
+      // one on asks first. Turning it off is the recovery, so that never asks.
+      //
+      // escapeHtml uses textContent, which handles < > and & but not quotes.
+      // Fine between tags, not inside an attribute, where a quote would end
+      // it early. The current warning happens to have no quotes.
       const guard = f.confirm
         ? ' data-confirm="' + NFM.escapeHtml(f.confirm).replace(/"/g, "&quot;") + '"'
         : "";
@@ -1449,17 +1389,13 @@ document.addEventListener("DOMContentLoaded", function () {
   document.getElementById("show-advanced").addEventListener("change", renderSettings);
   document.getElementById("setting-filter").addEventListener("input", renderSettings);
 
-  // Scoped to a container on purpose.  This used to read the whole document,
-  // which was fine while the site tab was the only thing that had settings, and
-  // is not once a path dialog is open with a set of its own: saving the site
-  // would have swept the path's controls into the site's settings.
-  // A control this nginx build cannot run is drawn disabled, with the reason
-  // under it.  It is not something anybody can set, so it must not be collected
-  // and sent: a disabled checkbox still reports .checked, so http3_enabled went
-  // up as false on every save, and the server refused the whole blob because
-  // the module is missing.  The result was that on any fleet missing any
-  // module, no site setting could be saved at all, and the error named HTTP/3
-  // to somebody who was changing a timeout.
+  // Scoped to a container. Reading the whole document would sweep an open
+  // path dialog's controls into the site's settings.
+  //
+  // Disabled controls (features this nginx build lacks) are not collected.
+  // A disabled checkbox still reports .checked, so they used to be sent as
+  // false, and the server refused the whole save because the module was
+  // missing.
   function controlDisabled(el) {
     if (el.disabled) return true;
     const kids = el.querySelectorAll("input, select, textarea");
@@ -1498,15 +1434,13 @@ document.addEventListener("DOMContentLoaded", function () {
   // ---- saving ----
   // ---- who can reach this site -------------------------------------------
   //
-  // Two jobs.  Show the rules in the order nginx will read them, because first
-  // match wins and that is not visible anywhere else.  And say so when the
-  // person setting it up is not on an address the list lets through, because
-  // the alternative is finding out by being locked out.
+  // Two jobs: show the rules in the order nginx reads them, since first match
+  // wins, and warn when the person setting it up is not on an allowed address.
 
   function inRange(ip, cidr) {
-    // Enough to answer "is my address covered", for v4 and for a plain v6
-    // match.  Anything cleverer belongs on the server, and getting this wrong
-    // in the cautious direction only means an extra warning.
+    // Enough to answer "is my address covered" for v4 and exact v6. Anything
+    // smarter belongs on the server, and erring cautious only costs an extra
+    // warning.
     if (!ip || !cidr) return false;
     if (cidr === "all" || cidr === "0.0.0.0/0" || cidr === "::/0") return true;
     if (cidr.indexOf("/") === -1) return ip === cidr;
@@ -1514,8 +1448,8 @@ document.addEventListener("DOMContentLoaded", function () {
     const [net, bitsRaw] = cidr.split("/");
     const bits = parseInt(bitsRaw, 10);
     if (net.indexOf(":") !== -1 || ip.indexOf(":") !== -1) {
-      // v6: only claim a match on an exact address, rather than pretend to
-      // understand prefixes here.
+      // v6: only match an exact address rather than pretend to handle
+      // prefixes here.
       return ip === net;
     }
     const toInt = a => a.split(".").reduce((n, o) => (n << 8 >>> 0) + parseInt(o, 10), 0) >>> 0;
@@ -1535,10 +1469,8 @@ document.addEventListener("DOMContentLoaded", function () {
 
   // ---- a password on this site ------------------------------------------
   //
-  // The engine for this has always been there and lived entirely inside an
-  // access list, on a different page, which is not where anybody looks for
-  // "put a password on this site".  This says whether there is one and offers
-  // to make one without leaving.
+  // This lives in an access list on another page, which is not where people
+  // look for it. Show whether there is one and offer to make one here.
   function currentAcl() {
     const chosen = document.getElementById("f-acl").value;
     return ACLS.find(a => String(a.id) === String(chosen)) || null;
@@ -1555,9 +1487,9 @@ document.addEventListener("DOMContentLoaded", function () {
         ".  Manage them on the zones and access page.";
       button.textContent = "Add another login";
     } else if (acl && acl.basic_auth) {
-      // Turned on with nobody in it.  The renderer leaves the directives out
-      // on purpose, because nginx with an empty password file refuses every
-      // request, so the site would be unreachable rather than protected.
+      // Enabled with no users. The renderer leaves the directives out on
+      // purpose, since nginx with an empty password file refuses every
+      // request.
       line.textContent = "The list " + acl.name + " has the password switch on " +
         "and nobody in it, so nothing is asked for.  Add a login and it starts " +
         "working.";
@@ -1617,9 +1549,9 @@ document.addEventListener("DOMContentLoaded", function () {
       try {
         let target = acl;
         if (!target) {
-          // Named after the site so it is obvious later what it belongs to,
-          // and with default_action allow so it filters nobody by address:
-          // the password is the whole of the rule.
+          // Named after the site so its owner is obvious later, with
+          // default_action allow so it filters nobody by address. The password
+          // is the whole rule.
           const made = await NFM.api("/access-lists", {
             method: "POST",
             body: {
@@ -1642,8 +1574,8 @@ document.addEventListener("DOMContentLoaded", function () {
           }
         });
 
-        // Attach it and save, so the person is not left with a list made and
-        // nothing using it, which is the state that reads as "it did not work".
+        // Attach it and save, so there is not a list made and nothing using
+        // it, which looks like it did not work.
         await NFM.api("/hosts/" + HOST_ID, {
           method: "PUT",
           body: {access_list_id: target.id}
@@ -1670,9 +1602,8 @@ document.addEventListener("DOMContentLoaded", function () {
     if (!acl) {
       box.hidden = true;
       warn.hidden = true;
-      // Still has to run: "no list at all" is a state the password line has
-      // something to say about, and returning early left it blank on every
-      // site that had no access list, which is most of them.
+      // Still has to run: "no list at all" is something the password line
+      // reports on, and returning early left it blank on most sites.
       describeBasicAuth();
       return;
     }
@@ -1701,8 +1632,8 @@ document.addEventListener("DOMContentLoaded", function () {
     });
     box.hidden = false;
 
-    // A deny that sits under an allow covering the same ground never runs.
-    // Worth saying, because the page above makes it look like it will.
+    // A deny under an allow covering the same addresses never runs. Say so,
+    // since the list above makes it look like it will.
     describeBasicAuth();
 
     const shadowed = acl.deny.filter(d => acl.allow.some(a => a === d || inRange(d.split("/")[0], a)));
@@ -1731,11 +1662,9 @@ document.addEventListener("DOMContentLoaded", function () {
 
   // ---- paths within the site ---------------------------------------------
   //
-  // The order shown is not the order they are stored in.  nginx does not read
-  // locations top to bottom: it takes exact matches first, then the longest
-  // preferential prefix, then regexes in the order they appear, then the
-  // longest ordinary prefix.  Showing them in any other order teaches people
-  // something untrue about their own config, and they will act on it.
+  // Shown in nginx's resolution order, not storage order: exact matches,
+  // then the longest ^~ prefix, then regexes in order, then the longest plain
+  // prefix. Any other order misleads people about their own config.
 
   const POOLS = {{ pools|map(attribute='id')|list|tojson }};
   const POOL_NAMES = {{ pools|map(attribute='name')|list|tojson }};
@@ -1803,9 +1732,9 @@ document.addEventListener("DOMContentLoaded", function () {
       `<li><span class="mono">${NFM.escapeHtml(l.path)}</span>
        <span class="small faint">${NFM.escapeHtml(describeTarget(l))}</span></li>`).join("");
 
-    // Anything that would catch a request for / .  A bare prefix of / does it,
-    // and so does a regex, but we do not try to work out whether a regex
-    // matches, so only the prefix counts as cover.
+    // Anything that catches a request for /. A bare / prefix does, and so may
+    // a regex, but we do not try to evaluate regexes, so only the prefix
+    // counts.
     const covered = paths.some(l => l.enabled && l.path === "/" &&
                                (l.match_type === "prefix" || l.match_type === "preferential"));
     warn.hidden = covered;
@@ -1819,19 +1748,16 @@ document.addEventListener("DOMContentLoaded", function () {
     } catch (e) { NFM.toast(e.message || "could not load the paths"); }
   }
 
-  // Worth showing in the list rather than only in the dialog.  A path with its
-  // own error pages behaves differently from every other path on the site, and
-  // that is not something anybody should have to open each one to discover.
+  // Shown in the list, not just the dialog: a path with its own error pages
+  // behaves differently from the rest of the site.
   function errorPageNote(l) {
     if (!l.error_page_template_id) { return ""; }
     const t = ERROR_TEMPLATES.filter(x => x.id === l.error_page_template_id)[0];
     return " &middot; errors: " + NFM.escapeHtml(t ? t.name : "its own");
   }
 
-  // A path with its own access list, on the row rather than only inside the
-  // editor.  Who may reach something is the sort of fact that should be
-  // visible while scanning, not one you have to open each path to find, and a
-  // restriction nobody can see is one somebody removes by accident.
+  // Show a path's own access list on the row, not just in the editor. A
+  // restriction nobody can see is one someone removes by accident.
   function aclNote(l) {
     if (!l.access_list_id) { return ""; }
     const a = ACLS.find(x => String(x.id) === String(l.access_list_id));
@@ -1848,11 +1774,10 @@ document.addEventListener("DOMContentLoaded", function () {
     const aclOpts = ACLS.map(a =>
       `<option value="${a.id}" ${String(l.access_list_id) === String(a.id) ? "selected" : ""}>${NFM.escapeHtml(a.name)}</option>`).join("");
 
-    // Worth saying, because nginx's own rule here surprises people and we work
-    // around it: a location with any error_page of its own throws away every
-    // one it would have inherited.  We write the site's rules back in for the
-    // codes this path's template does not cover, so picking a small template
-    // for one path does not quietly drop the rest back to the stock pages.
+    // nginx surprises people here: a location with any error_page of its own
+    // drops every inherited one. We add back the site's rules for codes this
+    // path's template does not cover, so a small template does not revert the
+    // rest to stock pages.
     const siteTpl = ERROR_TEMPLATES.filter(t => t.id === SITE_ERROR_TEMPLATE)[0];
     const errHint = siteTpl
       ? `Leave it alone and this path shows ${NFM.escapeHtml(siteTpl.name)}, the same as the rest of the site.  ` +
@@ -1955,9 +1880,8 @@ document.addEventListener("DOMContentLoaded", function () {
         <label for="l-enabled">Enabled</label></div>`;
   }
 
-  // Adding the www, and showing the canonical choice once there is more than
-  // one name to choose between.  Both are about the same thing: two names is
-  // the ordinary case and nothing here used to acknowledge it.
+  // Adding the www, and choosing the canonical name once there is more than
+  // one. Two names is the common case.
   const namesField = document.getElementById("f-names");
   const canonicalWrap = document.getElementById("canonical-wrap");
 
@@ -2010,21 +1934,16 @@ document.addEventListener("DOMContentLoaded", function () {
     body.strip_prefix = (document.getElementById("l-strip") || {}).checked || false;
     body.mount_site = (document.getElementById("l-mount") || {}).checked || false;
 
-    // Only send settings once the controls have been built, and never an empty
-    // object because the section was left closed.  Sending {} would wipe every
-    // setting the path already had, which is the same trap the site save has a
-    // comment about, one level down.
+    // Only send settings once the controls are built, never an empty object
+    // from a closed section. {} would wipe the path's settings, the same trap
+    // as the site save.
     //
-    // And merged onto what the path already has rather than replacing it, the
-    // same as the site save, because a settings put replaces the whole blob and
-    // collectSettings leaves out every control that is drawn disabled.  A
-    // module missing from this build did that already; SSL offload only mode
-    // greys out a dozen more, so saving a path while it was on would have
-    // deleted exactly the settings the mode exists to preserve, and turning the
-    // mode back off would have given back a site with them gone.
+    // Merged onto the existing settings rather than replacing them, since a
+    // settings PUT replaces the whole blob and collectSettings skips disabled
+    // controls. SSL offload only mode disables a dozen of them, so without the
+    // merge saving a path would delete exactly what the mode is meant to keep.
     //
-    // A control that was built and left empty still means clear it, which is
-    // what collectSettings leaving it out has always meant.
+    // A built control left empty still means clear it.
     const lHolder = document.getElementById("l-settings-holder");
     if (lHolder && lHolder.getAttribute("data-built") === "yes") {
       const shown = collectSettings(lHolder);
@@ -2050,9 +1969,8 @@ document.addEventListener("DOMContentLoaded", function () {
     const sel = document.getElementById("l-mode");
     if (sel) sel.addEventListener("change", syncModeFields);
 
-    // Say the prefix back in the mount hint as it is typed.  "pointed back under
-    // /shop/" is a different sentence from "pointed back under this path": it is
-    // the one that lets somebody check the answer before saving.
+    // Echo the prefix in the mount hint as it is typed, so "pointed back
+    // under /shop/" can be checked before saving.
     const mountBox = document.getElementById("l-mount");
     const pathBox = document.getElementById("l-path");
     const prefixOut = document.getElementById("l-mount-prefix");
@@ -2063,9 +1981,8 @@ document.addEventListener("DOMContentLoaded", function () {
       prefixOut.textContent = p ? p + "/" : "this path";
     }
 
-    // A mount needs a prefix match, and the API refuses anything else.  Saying so
-    // here, and fixing it on the spot, beats a 400 explaining what could have
-    // been set for them.
+    // A mount needs a prefix match and the API refuses anything else. Fix it
+    // here instead of returning a 400.
     function syncMountMatch() {
       if (!mountBox || !mountBox.checked || !sel) return;
       const m = document.getElementById("l-match");
@@ -2086,10 +2003,9 @@ document.addEventListener("DOMContentLoaded", function () {
     if (mountBox) { mountBox.addEventListener("change", syncMountMatch); }
     syncMountHint();
 
-    // The path's own settings, built from the catalog the first time somebody
-    // asks for them.  Closed by default: most paths want the site's settings and
-    // a form of sixty odd controls in a dialog would bury the four fields that
-    // decide what the path does.
+    // The path's own settings, built from the catalog on first open. Closed
+    // by default: most paths use the site's settings, and sixty controls would
+    // bury the few fields that decide what the path does.
     const showSettings = document.getElementById("l-show-settings");
     const lHolder = document.getElementById("l-settings-holder");
     if (showSettings && lHolder) {
@@ -2102,8 +2018,8 @@ document.addEventListener("DOMContentLoaded", function () {
         try {
           locCatalog = await NFM.api("/catalog?context=location");
         } catch (err) {
-          // Left unbuilt on purpose, so the save cannot send an empty settings
-          // object and wipe what the path already had.
+          // Left unbuilt on purpose, so saving cannot send an empty settings
+          // object and wipe the path's settings.
           lHolder.innerHTML = '<div class="notice bad"><div>' +
             NFM.escapeHtml(err.message) + "</div></div>";
           return;
@@ -2204,22 +2120,18 @@ document.addEventListener("DOMContentLoaded", function () {
     if (mode === "static") body.document_root = document.getElementById("f-root").value.trim();
     if (mode === "redirect") body.redirect_target = document.getElementById("f-target").value.trim();
 
-    // Only send settings if the tab was opened.  Sending an empty object
-    // because the controls were never built would wipe every setting on the
-    // site, which is a nasty way to lose a config.
+    // Only send settings if the tab was opened. An empty object from never
+    // building the controls would wipe every setting on the site.
     //
-    // The same trap one step in, which cost somebody their rewrites: the tab
-    // being open does not mean every control was built.  renderSettings leaves
-    // out the advanced ones unless the box is ticked, and leaves out anything
-    // the filter box does not match.  A settings put replaces the whole blob,
-    // so collecting only what is on screen deletes the rest.  Turning HTTP/3
-    // on with advanced hidden dropped the site's rewrite rules; typing
-    // "rewrite" in the filter and saving dropped HTTP/3 straight back.
+    // An open tab does not mean every control was built either: advanced ones
+    // are skipped unless ticked, and the filter hides non-matches. A settings
+    // PUT replaces the whole blob, so saving only what is on screen deletes
+    // the rest (for example, rewrite rules lost when enabling HTTP/3 with
+    // advanced hidden).
     //
-    // So read the settings back and merge onto them, the way the firewall and
-    // geo panels already do, and only touch keys whose control actually
-    // existed.  A control that was built and left empty still means clear it,
-    // which is what collectSettings leaving it out has always meant.
+    // So read the settings back and merge, as the firewall and geo panels do,
+    // touching only keys whose control existed. A built control left empty
+    // still means clear it.
     if (catalog) {
       const holder = document.getElementById("settings-holder");
       const shown = collectSettings(holder);
@@ -2227,7 +2139,7 @@ document.addEventListener("DOMContentLoaded", function () {
       try {
         fresh = await NFM.api("/hosts/" + HOST_ID);
       } catch (err) {
-        // Better to save nothing than to save a blob built on a guess.
+        // Better to save nothing than a blob built on a guess.
         NFM.toast("Could not read the site back, so nothing was saved: " +
                   err.message, "bad");
         return;
@@ -2235,10 +2147,9 @@ document.addEventListener("DOMContentLoaded", function () {
       const merged = Object.assign({}, fresh.settings || {});
       holder.querySelectorAll("[data-setting]").forEach(function (el) {
         const key = el.getAttribute("data-setting");
-        // A disabled control is not a control somebody cleared, so leave
-        // whatever is stored alone rather than deleting it.  A module that
-        // goes missing for one release should not quietly wipe the setting
-        // that used it.
+        // A disabled control is not one someone cleared, so leave the stored
+        // value alone. A module missing for one release should not wipe the
+        // setting that used it.
         if (controlDisabled(el)) return;
         if (Object.prototype.hasOwnProperty.call(shown, key)) merged[key] = shown[key];
         else delete merged[key];
@@ -2261,10 +2172,8 @@ document.addEventListener("DOMContentLoaded", function () {
 
   // ---- clone ----
   //
-  // The hostname is asked for here rather than left to be fixed afterwards.
-  // Changing the name and changing what it answers to are the same job, and
-  // splitting them over two screens is how a clone spends a minute live on the
-  // original's hostname.
+  // Ask for the hostname here rather than fixing it afterward. Otherwise the
+  // clone briefly goes live on the original's hostname.
   const cloneBtn = document.getElementById("clone-site");
   if (cloneBtn) {
     cloneBtn.addEventListener("click", function () {
@@ -2307,7 +2216,7 @@ document.addEventListener("DOMContentLoaded", function () {
         <div class="mt"><button class="btn primary" id="cl-go">Clone it</button></div>`,
         true);
 
-      // Mirror the name into the hostnames until somebody types there.
+      // Mirror the name into the hostnames until someone types there.
       const nameBox = document.getElementById("cl-name");
       const namesBox = document.getElementById("cl-names");
       let edited = false;
@@ -2448,9 +2357,8 @@ document.addEventListener("DOMContentLoaded", function () {
       if (!rows.length) return;
 
       holder.innerHTML = rows.map(function (w) {
-        // A workload that was never enrolled is a backend that has never once
-        // answered, which is a different problem from one that is down, and
-        // the site page is where somebody is standing when they wonder why.
+        // A workload never enrolled is a backend that has never answered,
+        // a different problem from one that is down.
         const badge = !w.enabled
           ? '<span class="badge bad">disabled</span>'
           : (w.enrolled ? '<span class="badge ok">enrolled</span>'
@@ -2471,11 +2379,9 @@ document.addEventListener("DOMContentLoaded", function () {
 
   // ---- the WAF ----
   //
-  // Two settings on their own tab rather than two lines in the advanced list,
-  // and the tab is only there when nginx was built with the module.  The
-  // wording under the picker changes with the answer, because the difference
-  // between watching and blocking is the whole feature and a hint that says
-  // the same thing for all four answers explains none of them.
+  // Its own tab, only shown when nginx has the module. The text under the
+  // picker changes with the choice, because the difference between watching
+  // and blocking is the whole feature.
   (function waf() {
     const tab = document.getElementById("tab-waf");
     const mode = document.getElementById("waf-mode");
@@ -2506,17 +2412,17 @@ document.addEventListener("DOMContentLoaded", function () {
     let running = null;
 
     function fillParanoia(current) {
-      // The built in levels never go away.  Profiles append to them, so a
-      // fleet with none still gets the full picker and a site can always be
-      // put back on a plain level without deleting anything.
+      // The built in levels always stay. Profiles are appended, so a fleet
+      // with none still gets the full picker and a site can always go back to
+      // a plain level.
       const base = [
         ["1", "1, the default"],
         ["2", "2, stricter"],
         ["3", "3, stricter still"],
         ["4", "4, refuses ordinary things"],
       ];
-      // "in learning" or "in enforcement" is composed from the mode rather
-      // than stored, so one fact is said once.
+      // "in learning" or "in enforcement" is derived from the mode, not
+      // stored.
       const where = mode.value === "watching" ? "in learning" : "in enforcement";
       const custom = profiles.map(p => ["custom:" + p.name,
                                         "Custom - " + p.name + " (" + where + ")"]);
@@ -2554,8 +2460,8 @@ document.addEventListener("DOMContentLoaded", function () {
 
     function refresh() {
       explain.textContent = WORDS[mode.value] || "";
-      // Strictness only means anything when something is being checked, and it
-      // is ignored entirely by the locked preset.
+      // Strictness only matters when something is being checked, and the
+      // locked preset ignores it.
       const wrap = paranoia.closest(".field");
       wrap.hidden = mode.value === "off" || mode.value === "block_known";
       document.getElementById("waf-paranoia-hint").textContent =
@@ -2569,7 +2475,7 @@ document.addEventListener("DOMContentLoaded", function () {
       const effect = document.getElementById("waf-start-effect-text");
       if (effect) {
         // Starting a session must never lower protection, and the page says
-        // which of the two things it is about to do.
+        // which of the two it is about to do.
         effect.textContent = (mode.value === "off")
           ? "This site's firewall is off, so starting will put it into " +
             "watching.  Nothing gets refused; the rules only report."
@@ -2589,17 +2495,17 @@ document.addEventListener("DOMContentLoaded", function () {
       const button = document.getElementById("waf-save");
       button.disabled = true;
       try {
-        // Read the settings back and put them whole, the same as geo blocking.
-        // A settings put replaces the blob, so sending only these two keys
-        // would drop every other setting on the site.
+        // Read the settings back and put them whole, as geo blocking does.
+        // A settings PUT replaces the blob, so sending just these two keys
+        // would drop everything else.
         const host = await NFM.api("/hosts/" + HOST_ID);
         const settings = Object.assign({}, host.settings || {});
         if (mode.value === "off") {
           delete settings.waf_mode;
           delete settings.waf_paranoia;
-          // The surface rides on the same module, so switching the firewall
-          // off takes it with it.  Leaving it set would store a site that
-          // claims to be enforcing a surface with nothing enforcing anything.
+          // The surface uses the same module, so turning the firewall off
+          // clears it too. Otherwise the site would claim to enforce a surface
+          // with nothing enforcing it.
           delete settings.waf_positive;
         } else {
           settings.waf_mode = mode.value;
@@ -2625,9 +2531,9 @@ document.addEventListener("DOMContentLoaded", function () {
     // ---- the hits list ----
 
     function hitRows() {
-      // Candidates first, then mixed, then the rest.  Only candidates can be
-      // ticked: a hit from an address nobody vouched for is not evidence that
-      // it was legitimate, however often it fired.
+      // Candidates first, then mixed, then the rest. Only candidates can be
+      // ticked: a hit from an address nobody vouched for is not evidence it
+      // was legitimate, however often it fired.
       return hits.candidates.map(g => ({ g: g, kind: "candidate" }))
         .concat(hits.mixed.map(g => ({ g: g, kind: "mixed" })))
         .concat(hits.others.map(g => ({ g: g, kind: "other" })));
@@ -2723,9 +2629,8 @@ document.addEventListener("DOMContentLoaded", function () {
     document.getElementById("waf-hit-search")
       .addEventListener("input", drawHits);
 
-    // Check all and Uncheck all act on what the search has left on screen, so
-    // filtering to one address and ticking it is two moves.  Same behaviour as
-    // the country list, which people here already know.
+    // Check all and Uncheck all act on what the search left on screen, same
+    // as the country list.
     document.getElementById("waf-check-all").addEventListener("click", function () {
       document.querySelectorAll(".waf-hit").forEach(b => { b.checked = true; });
     });
@@ -2748,10 +2653,9 @@ document.addEventListener("DOMContentLoaded", function () {
       }
     }
 
-    // Which round the hits on screen came from.  Not the same thing as the
-    // running one: a finished round can be on screen while nothing is
-    // running, and the profile that gets saved has to be attributed to the
-    // round it actually came from rather than to whatever is running now.
+    // Which round the hits on screen came from. Not necessarily the running
+    // one: a finished round can be on screen, and a saved profile has to be
+    // attributed to the round it actually came from.
     let viewing = null;
 
     function tidy(stamp) {
@@ -2763,11 +2667,10 @@ document.addEventListener("DOMContentLoaded", function () {
       return isNaN(at) ? null : at / 1000;
     }
 
-    // One round's hits, whether it is still going or finished.
+    // One round's hits, running or finished.
     //
-    // A finished round is bounded at both ends.  Leaving the far end open
-    // would fold every hit since it stopped into the list, so traffic nobody
-    // was watching would arrive looking like something a tester produced.
+    // A finished round is bounded at both ends. Leaving the end open would
+    // pull in unwatched traffic after it stopped as if it came from testing.
     async function loadHits(session) {
       viewing = session;
       const from = seconds(session.started_at);
@@ -2778,10 +2681,9 @@ document.addEventListener("DOMContentLoaded", function () {
       if (to !== null) { q += "&until=" + to; }
       showHits(await NFM.api("/waf/hits/" + HOST_ID + q));
 
-      // The surface comes from the same window, so it is loaded here rather
-      // than behind a second button.  They are two readings of one round and
-      // splitting them across two clicks only invites somebody to save a
-      // profile from one and forget the other.
+      // The surface comes from the same window, so load it here too. They are
+      // two readings of one round, and separate clicks invite saving one and
+      // forgetting the other.
       try { await loadSurface(session); }
       catch (err) { NFM.toast("The surface would not load: " + err.message, "bad"); }
 
@@ -2926,13 +2828,9 @@ document.addEventListener("DOMContentLoaded", function () {
       layerAdvice();
     }
 
-    // What the two layers add up to.
-    //
-    // They are separate settings because they genuinely compose, and that was
-    // invisible: a surface says which paths exist and nothing about what is
-    // sent to them, so an injection aimed at a page the testers walked is a
-    // request to an allowed path and goes straight through.  The attack rules
-    // underneath are what catch that.
+    // What the two layers add up to. A surface says which paths exist, not
+    // what is sent to them, so an injection aimed at an allowed path gets
+    // through. The attack rules underneath catch that.
     function layerAdvice() {
       const box = document.getElementById("waf-layer");
       const add = document.getElementById("waf-layer-add");
@@ -3066,9 +2964,9 @@ document.addEventListener("DOMContentLoaded", function () {
       try {
         let profile = profiles.find(x => x.name === name);
         if (!profile) {
-          // A surface can be the first thing a profile ever holds, so it has
-          // to be able to create one.  The exclusions endpoint refuses an
-          // empty list, which is right for it and wrong here.
+          // A surface can be the first thing a profile holds, so this has to
+          // be able to create one. The exclusions endpoint refuses an empty
+          // list, which is right there and wrong here.
           profile = await NFM.api("/waf/profiles", {
             method: "POST",
             body: {
@@ -3153,9 +3051,9 @@ document.addEventListener("DOMContentLoaded", function () {
       try { host = await NFM.api("/hosts/" + HOST_ID); }
       catch (err) { return; }
 
-      // The module is what decides whether the tab exists at all.  Asked of
-      // the fleet rather than this node, because a setting that only one node
-      // can write is a setting that fails the apply on the other one.
+      // The module decides whether the tab exists. Ask the fleet, not this
+      // node, since a setting only one node can write fails the apply on the
+      // other.
       let modules;
       try { modules = await NFM.api("/upgrade/modules"); }
       catch (err) { modules = {}; }
@@ -3179,8 +3077,8 @@ document.addEventListener("DOMContentLoaded", function () {
       refresh();
       positiveRefresh();
 
-      // A running session brings the hits list with it, so somebody who
-      // navigated away mid round comes back to where they were.
+      // A running session brings the hits list with it, so navigating away
+      // mid round and back picks up where you were.
       try {
         const state = await NFM.api("/waf/sessions/" + HOST_ID);
         showSession(state.running);
@@ -3190,10 +3088,9 @@ document.addEventListener("DOMContentLoaded", function () {
           catch (err) { NFM.toast(err.message, "bad"); }
         }
       } catch (err) {
-        // Not swallowed any more.  A failure here used to leave the card
-        // looking idle, which reads as "there is no session" rather than "we
-        // could not find out", and those need different reactions from the
-        // person looking at it.
+        // Do not swallow this. An idle looking card reads as "no session"
+        // rather than "could not find out", and those call for different
+        // reactions.
         const box = document.getElementById("waf-session-error");
         if (box) {
           document.getElementById("waf-session-error-text").textContent =
@@ -3208,10 +3105,9 @@ document.addEventListener("DOMContentLoaded", function () {
 
   // ---- watching the login ----
   //
-  // Kept apart from the WAF, which answers a different question.  The WAF asks
-  // whether a request looks like an attack.  This asks whether a lot of
-  // ordinary looking requests add up to somebody working through a password
-  // list, and no single one of them looks like anything at all.
+  // Separate from the WAF. The WAF asks whether one request looks like an
+  // attack; this asks whether many ordinary requests add up to someone
+  // working through a password list.
   (function loginWatchTab() {
     const idEl = document.getElementById("lw-enabled");
     if (!idEl) return;
@@ -3340,10 +3236,9 @@ document.addEventListener("DOMContentLoaded", function () {
 
   // ---- geo blocking ----
   //
-  // The ticks are countries that may reach the site.  What gets stored is the
-  // other half, the ones to refuse, because that is what nginx is told to do
-  // and because a country that appears in the world later is then allowed
-  // rather than blocked by an omission nobody made on purpose.
+  // The ticks are countries that may reach the site. What is stored is the
+  // inverse, the countries to refuse, since that is what nginx is told, and
+  // a newly added country code is then allowed rather than blocked by default.
   (function geoBlocking() {
     const tab = document.getElementById("tab-geo");
     const list = document.getElementById("geo-list");
@@ -3371,8 +3266,7 @@ document.addEventListener("DOMContentLoaded", function () {
         label.classList.toggle("blocked", box && !box.checked);
       });
 
-      // Clearing the list blocks the planet, which is a thing somebody may
-      // mean and is never a thing to do by accident.
+      // An empty list blocks everyone. Possibly intended, never by accident.
       const warning = document.getElementById("geo-warning");
       const text = document.getElementById("geo-warning-text");
       if (blocked.length === countries.length && countries.length) {
@@ -3410,15 +3304,14 @@ document.addEventListener("DOMContentLoaded", function () {
         label.style.display = match ? "" : "none";
         if (match) shown += 1;
       });
-      // Say out loud what the two buttons are about to touch.  With a search
-      // running they act on what is left on screen, and a button that quietly
-      // means something different than it did a moment ago should say so.
+      // Say what the buttons will touch. With a search active they act only on
+      // what is on screen.
       document.getElementById("geo-scope").textContent =
         want ? "the two buttons act on these " + shown : "";
     });
 
-    // Only what is on screen, so a search then Check all does what it looks
-    // like it does rather than quietly touching the other two hundred.
+    // Only what is on screen, so search then Check all does not touch the
+    // other two hundred.
     function setVisible(checked) {
       list.querySelectorAll("label").forEach(function (label) {
         if (label.style.display === "none") return;
@@ -3435,9 +3328,8 @@ document.addEventListener("DOMContentLoaded", function () {
       const button = document.getElementById("geo-save");
       button.disabled = true;
       try {
-        // Read the settings back and put them whole.  A settings put replaces
-        // the blob, so sending only this key would drop every other setting on
-        // the site.
+        // Read the settings back and put them whole. A settings PUT replaces
+        // the blob, so sending only this key would drop everything else.
         const host = await NFM.api("/hosts/" + HOST_ID);
         const settings = Object.assign({}, host.settings || {});
         const blocked = blockedNow();
@@ -3467,8 +3359,8 @@ document.addEventListener("DOMContentLoaded", function () {
       const everywhere = nodes.length && nodes.every(n => n.present);
       const blocked = (host.settings || {}).geoip2_country_block || [];
 
-      // The tab appears once there is a database to block with, or if this site
-      // already blocks somewhere, so a setting cannot become invisible.
+      // Show the tab once there is a database to block with, or if this site
+      // already blocks somewhere, so the setting never becomes invisible.
       if (!anywhere && !blocked.length) return;
       tab.hidden = false;
 

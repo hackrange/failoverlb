@@ -1,22 +1,14 @@
 """
-Break glass account recovery.
-
-For the one case the GUI cannot help with: the only admin has lost their phone
-and has no recovery codes left.  There is nobody who can reset it for them from
-inside the tool, because the tool is what they cannot get into.
+Break glass account recovery, for when the only admin has lost their
+authenticator and has no recovery codes left.
 
     docker exec nginx-fleet-manager python -m app.reset_admin --list
     docker exec nginx-fleet-manager python -m app.reset_admin admin --reset-totp
     docker exec nginx-fleet-manager python -m app.reset_admin admin --new-password
 
-Getting to this needs shell on the box and the ability to exec into the
-container, which on any sane setup means root.  Somebody with that could read
-the database anyway, so this hands out nothing they could not already take.  It
-just saves them an afternoon with a sqlite prompt.
-
-Every use is written to the audit log as coming from the console, because an
-account recovery done outside the GUI is exactly the sort of thing that should
-be obvious when somebody reads the log later.
+This needs a shell in the container, which normally means root. Anyone with
+that could read the database anyway, so it grants nothing new. Every use is
+audit logged as coming from the console so it stands out later.
 """
 
 import argparse
@@ -78,9 +70,8 @@ def reset_totp(username: str):
 
 def new_password(username: str, password: str = None):
     if not password:
-        # A generated one beats asking, because a person picking a password at a
-        # console under pressure picks a bad one, and this is only meant to last
-        # until they sign in and change it.
+        # Generate one rather than asking; it only has to last until they
+        # sign in and change it.
         password = secrets.token_urlsafe(18)
         generated = True
     else:
@@ -116,11 +107,7 @@ def new_password(username: str, password: str = None):
 
 
 def make_admin(username: str):
-    """
-    Last resort: there is no working admin at all any more.
-
-    Happens when the only admin account gets disabled or deleted by mistake.
-    """
+    """Last resort for when the only admin was disabled or demoted."""
     with session_scope() as session:
         user = session.query(User).filter(User.username == username).first()
         if not user:

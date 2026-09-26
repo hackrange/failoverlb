@@ -1,18 +1,12 @@
 """
-Starting the manager.
+Manager entry point.
 
-Two separate listeners, on two ports, on purpose:
+Two listeners on two ports, on purpose. 7443 is the web GUI, a normal HTTPS
+server. 7444 is node to node: it only trusts client certificates signed by
+this cluster's CA, and every message is also signed with the sender's key.
 
-  7443 is the web GUI.  A normal https server with a server certificate.
-
-  7444 is node to node.  It demands a client certificate signed by this
-  cluster's own CA, and nothing else is trusted, so a browser pointed at it does
-  not even complete the handshake.  On top of that every message is signed with
-  a key only the sending node has.
-
-Keeping them apart matters.  On one port with a path check, one routing mistake
-puts a peer endpoint on the public side.  Two listeners means the isolation is
-in the TLS layer, where a bug in our code cannot undo it.
+Keeping them apart puts the isolation in the TLS layer. With one port and a
+path check, a single routing mistake would expose a peer endpoint publicly.
 """
 
 import asyncio
@@ -62,9 +56,8 @@ def setup_logging():
         stream=sys.stdout,
     )
 
-    # These two are chatty at info and say nothing we want.  httpx logs a line
-    # for every health check, which on a fleet with 20 backends buries anything
-    # useful within seconds.
+    # Chatty at info. httpx logs every health check, which buries anything
+    # useful on a fleet with a few dozen backends.
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     logging.getLogger("apscheduler").setLevel(logging.WARNING)
@@ -76,10 +69,8 @@ def setup_logging():
 
 async def register_self():
     """
-    Make sure this node has a row for itself and it is current.
-
-    Runs on every start.  A container that got a new address, or a box that had
-    nginx rebuilt with different modules, needs that picked up.
+    Make sure this node has a current row for itself. Runs on every start
+    so a new address or a rebuilt nginx gets picked up.
     """
     settings = get_settings()
 
@@ -92,28 +83,19 @@ async def register_self():
                 address=settings.node_address,
                 is_self=True,
                 state=NodeState.ONLINE,
-                # A single node cluster is active from the start.  Waiting for an
-                # election with nobody to elect would leave it read only and the
-                # first thing anybody tries would be refused.
+                # A single node cluster is active from the start. Waiting
+                # for an election with nobody to elect leaves it read only.
                 role=NodeRole.ACTIVE,
             )
             session.add(node)
             log.info("registered this node as %s", settings.node_name)
 
         else:
-            # Do not assume we are still active because we were when we stopped.
-            #
-            # A node that has been away has no idea what happened while it was
-            # gone, and the usual answer is that the other node took over.
-            # Coming back still believing it is active means its own roster says
-            # two nodes are active until the first election tidies up, which is
-            # a handful of seconds of the GUI telling two different people they
-            # are both on the node that takes writes.
-            #
-            # Standing down and waiting to be elected costs nothing.  The
-            # election runs within seconds, and if this node should be active it
-            # will be, by the same rule everybody else is using.  A cluster of
-            # one elects itself immediately, so nothing is stuck read only.
+            # Don't assume we're still active. A node that has been away
+            # usually lost the role to its peer, and coming back as active
+            # would show two active nodes until the next election. Standing
+            # down is cheap: the election runs within seconds, and a cluster
+            # of one elects itself immediately.
             peers = session.query(Node).filter(Node.name != settings.node_name).count()
             if peers and node.role == NodeRole.ACTIVE:
                 log.info("starting up as standby until an election says otherwise")
@@ -131,11 +113,9 @@ async def register_self():
 
 async def refresh_local_state():
     """
-    Ask the agent what nginx looks like on this box.
-
-    This is where the module list comes from, and the module list is what
-    decides which settings the GUI even shows.  Without it we would be guessing,
-    and guessing wrong means offering a setting that makes nginx refuse to start.
+    Ask the agent what nginx looks like on this box. The module list decides
+    which settings the GUI offers, and offering an unsupported one would
+    stop nginx from starting.
     """
     settings = get_settings()
     agent = get_agent()
@@ -169,13 +149,9 @@ async def refresh_local_state():
             node.disk_free_bytes = status.get("disk_free")
             node.last_heartbeat = utcnow()
 
-            # The agent answered, so whatever it said last time it did not is
-            # over.  This was never cleared, so one slow reply left "the agent
-            # did not answer status within 30s" sitting on the node for good,
-            # next to a module count and a heartbeat from a second ago that
-            # proved the opposite.  An error that does not go away when the
-            # problem does is worse than no error, because people stop believing
-            # any of them.
+            # The agent answered, so clear any earlier error. Leaving a stale
+            # timeout message next to a fresh heartbeat teaches people to
+            # ignore errors.
             node.last_error = None
             session.commit()
 
@@ -193,24 +169,15 @@ async def refresh_local_state():
     except AgentError:
         pass
 
-    # If this fleet asked for the WAF module, make sure nginx has been told it
-    # exists.
+    # If the fleet wants the WAF module and it is built but not loaded, load
+    # it. The upgrade path now does this, but older nodes can be stuck with
+    # the .so present and no load_module line; this recovers them without a
+    # rebuild.
     #
-    # Building the module and loading it are two different things, and only the
-    # first used to happen: the .so landed in the modules directory, the fleet
-    # recorded that it wanted the WAF, and nothing ever wrote the load_module
-    # line.  The upgrade walk now does it as part of the build, which is the
-    # right place.  This is the way back for a node that is already in that
-    # state, so recovering does not mean rebuilding nginx from source again.
-    #
-    # Only ever loads, never unloads.  Turning the module off is a rebuild
-    # decision and belongs with the rebuild; quietly unloading it here because
-    # a setting says false could take the module out from under a site that is
-    # using it, at the worst possible moment, which is a manager restart.
-    #
-    # The verb refuses when the .so is not there, tests nginx afterwards and
-    # puts the old state back if the test fails, so the worst case here is a
-    # line in the log.
+    # Only ever loads. Unloading is a rebuild decision, and doing it here on
+    # a manager restart could pull the module out from under a live site.
+    # The agent verb refuses if the .so is missing and rolls back if the
+    # nginx test fails.
     try:
         from app.core.settings_store import get as _setting
 
@@ -222,12 +189,9 @@ async def refresh_local_state():
             await agent.call("waf_module", enabled=True)
             status = await agent.call("waf_module_status")
 
-        # Write down whether nginx here has actually been told about the
-        # module, because `nginx -V` cannot say.  It reports what was compiled
-        # in, and built is not loaded: the gate that decides whether the GUI
-        # offers the WAF used to be satisfied by the build alone, so a node
-        # that was built and not loaded passed it, the setting was offered, and
-        # the apply failed fleet wide with a raw emerg.
+        # Record whether the module is actually loaded. `nginx -V` only shows
+        # what was compiled in, and gating the GUI on that let a built but
+        # unloaded node offer the WAF and fail the apply fleet wide.
         with session_scope() as session:
             node = session.query(Node).filter(Node.name == settings.node_name).first()
             if node:
@@ -241,24 +205,17 @@ async def refresh_local_state():
 
 async def refresh_frontend_state():
     """
-    Put a request through this node's own listener and write down the answer.
+    Probe this node's own listener and record the result.
 
-    Runs far more often than refresh_local_state, because this is the signal
-    the GSLB withdraws a node on and the record's TTL is measured in seconds.
-    Checking it once a minute would mean a minute of handing out a black hole
-    before DNS even began to move.
-
-    Kept out of refresh_local_state on purpose.  That function talks to the
-    host agent and does a lot of other work, so a slow agent would delay this,
-    and this is the one thing here that has to stay quick.
+    This is the signal GSLB withdraws a node on, and the record TTL is
+    seconds, so it runs much more often than refresh_local_state. Kept
+    separate so a slow agent cannot delay it.
     """
     settings = get_settings()
     probe = get_probe()
 
-    # Empty means ask on the address this node was configured with, which is
-    # the one a gslb answer hands out for it.  Nothing about the address is
-    # hard coded here: a fleet that renumbers changes NFM_NODE_ADDRESS and this
-    # follows it.
+    # Empty means use the configured node address, which is the one GSLB
+    # hands out for this node.
     host = settings.frontend_probe_host.strip() or settings.node_address
 
     try:
@@ -271,9 +228,8 @@ async def refresh_frontend_state():
             settings.frontend_probe_pass_after,
         )
     except Exception:
-        # Never let a broken probe be the thing that decides a node is down.
-        # Leaving the last verdict alone is the safe failure here: a bug in
-        # this code should not be able to take a working node off the internet.
+        # A broken probe must never mark a node down. Keep the last verdict
+        # so a bug here can't take a working node off the internet.
         log.exception("the frontend probe blew up, leaving the last verdict alone")
         return
 
@@ -288,9 +244,9 @@ async def refresh_frontend_state():
             node.nginx_serving_detail = probe.detail[:255]
             session.commit()
 
-    # Withdrawing from DNS routes around the problem.  This is the part that
-    # fixes it.  Deliberately after the write above, so the node is already on
-    # its way out of the answer before its listener drops for a restart.
+    # DNS withdrawal routes around the problem; this tries to fix it. Runs
+    # after the write above so the node is already leaving the answer
+    # before its listener drops for a restart.
     if verdict is False and settings.frontend_watchdog:
         await get_watchdog().repair(
             time.time(),
@@ -302,11 +258,8 @@ async def refresh_frontend_state():
 
 async def refresh_public_ip():
     """
-    Work out our public address.
-
-    This is the number that decides which node gets to answer a certificate
-    challenge, so it is worth getting right and worth refreshing.  A box behind
-    NAT that fails over has a different answer than it did an hour ago.
+    Refresh our public address. It decides which node answers certificate
+    challenges, and a box behind NAT can change it on failover.
     """
     settings = get_settings()
     try:
@@ -336,10 +289,9 @@ def ensure_pki():
     """
     Make sure this node has its cluster identity.
 
-    A brand new single node makes its own CA and signs itself.  A node that is
-    going to join an existing cluster gets its cert during the join, so it does
-    not make a CA here.  We can tell the difference by whether there are peers
-    on the roster.
+    A new single node creates its own CA and signs itself. A node about to
+    join gets its certificate during the join, so we don't create a CA when
+    peers are already on the roster.
     """
     settings = get_settings()
     ca = ClusterCA()
@@ -347,15 +299,9 @@ def ensure_pki():
     with session_scope() as session:
         peer_count = session.query(Node).filter(Node.name != settings.node_name).count()
 
-    # Three states, and only one of them is a problem.
-    #
-    # This used to ask ca.exists(), which is "can this node sign for the
-    # cluster", and report a false answer as "this node is not in the cluster".
-    # Only the founding node holds the CA key; every node that joined is given
-    # the CA certificate and never the key, on purpose.  So every joined node
-    # in every fleet printed "This node needs to rejoin the cluster" at every
-    # startup while it was working perfectly, and rejoining on that advice is
-    # disruptive for no reason.
+    # has_identity, not exists. Only the founding node holds the CA key;
+    # joined nodes get the CA certificate only, so checking for the key
+    # would tell every healthy joined node to rejoin.
     if not ca.has_identity():
         if peer_count > 0:
             log.warning(
@@ -372,16 +318,11 @@ def ensure_pki():
         log.info("this node joined the cluster rather than starting it, so it "
                  "holds the CA certificate and not the CA key")
 
-    # A CA whose certificate and key do not match cannot sign anything the rest
-    # of the fleet will accept.  Say so here, plainly, rather than letting it
-    # surface later as peer connections failing for no visible reason.
-    #
-    # Not repaired automatically on purpose.  Every node certificate out there
-    # was signed by this CA, so replacing it would quietly invalidate all of
-    # them and every node would have to rejoin.  That is a decision for a person.
-    # Only meaningful where there is a key to match against the certificate,
-    # which is the founding node.  Asking it anywhere else compares a
-    # certificate with a key that is not supposed to be there.
+    # A CA whose cert and key don't match can't sign anything the fleet will
+    # accept. Say so loudly instead of letting peer connections fail
+    # mysteriously later. Not auto repaired: a new CA would invalidate every
+    # node certificate, and that is a decision for a person. Only checked
+    # where the key exists, which is the founding node.
     if ca.exists() and not ca.ca_pair_ok():
         log.error("=" * 70)
         log.error("The cluster CA certificate and its key do not match.")
@@ -442,11 +383,9 @@ def start_scheduler():
 
     asyncio.get_event_loop().create_task(start_checker())
 
-    # The health loop ticks often and cheaply.  Each pool has its own interval
-    # and the checker skips any pool that is not due yet, so a fast tick costs
-    # almost nothing and means a pool asking for a 3 second check actually gets
-    # one.  Ticking at the slowest interval instead would quietly round every
-    # pool up to that.
+    # Tick often. Each pool has its own interval and the checker skips pools
+    # that aren't due, so a fast tick is cheap and a 3 second check really
+    # runs every 3 seconds.
     scheduler.add_job(
         checker.run_cycle,
         "interval",
@@ -474,9 +413,8 @@ def start_scheduler():
         coalesce=True,
     )
 
-    # The country database, if anybody asked for one.  Hourly ticks, and the
-    # job itself decides whether anything is due, so changing the schedule from
-    # monthly to daily takes effect without a restart.
+    # GeoIP database, if configured. The job decides whether an update is
+    # due, so schedule changes take effect without a restart.
     async def _geoip():
         from app.core import geoip
 
@@ -491,9 +429,8 @@ def start_scheduler():
         coalesce=True,
     )
 
-    # The WAF rule set, on the same hourly tick and for the same reasons.  Its
-    # own job rather than sharing the country database's, so a source that is
-    # unreachable stops one of them and not both.
+    # WAF rule set, same pattern. A separate job so one unreachable source
+    # doesn't stop both.
     async def _waf_rules():
         from app.core import waf_rules
 
@@ -508,15 +445,9 @@ def start_scheduler():
         coalesce=True,
     )
 
-    # Rotating the firewall's audit logs.  Every fifteen minutes rather than
-    # hourly, and from every node rather than the active one.
-    #
-    # A site being scanned in watching mode writes steadily, and nobody looks
-    # at the disk on a load balancer until it is full.  An hour of a determined
-    # scan is a lot of JSON, and a standby that filled its own disk is a
-    # standby that cannot be failed over to, which is found out at the worst
-    # possible moment.  The job itself is cheap when there is nothing to do,
-    # which is nearly every tick.
+    # Rotate WAF audit logs every 15 minutes on every node. A scan in
+    # watching mode writes steadily, and a standby with a full disk can't be
+    # failed over to. Cheap when there's nothing to do.
     async def _waf_logs():
         from app.core import waf_hits
 
@@ -531,8 +462,7 @@ def start_scheduler():
         coalesce=True,
     )
 
-    # Catching up nodes that were offline.  Runs often, does nothing when the
-    # queue is empty, which is nearly always.
+    # Catch up nodes that were offline. Usually a no-op.
     scheduler.add_job(
         cluster.drain_pending,
         "interval",
@@ -542,18 +472,12 @@ def start_scheduler():
         coalesce=True,
     )
 
-    # Accounts, converging on their own.
-    #
-    # The push after a change is the fast path.  This is what makes the fleet
-    # agree again when that push could not be delivered, which is exactly the
-    # case that matters: an account taken away while the other box was down must
-    # not come back when it returns.  Does nothing on a standby, and nothing on
-    # the active node when the accounts already match.
-    # DNS zones, converging the same way and for a sharper reason.  A zone
-    # renders no nginx config at all, so it never travelled with a config
-    # apply, and a standby with no zones runs no listener.  Losing the active
-    # node then took the whole fleet's DNS with it, which is the one thing this
-    # feature exists to survive.  Does nothing on a standby.
+    # DNS zones and accounts converge on their own. The push after a change
+    # is the fast path; this covers pushes that could not be delivered, so
+    # an account removed while a peer was down stays removed. Zones render
+    # no nginx config and never travel with an apply, so without this a
+    # standby would have no zones and DNS would die with the active node.
+    # Both are no-ops on a standby.
     scheduler.add_job(
         cluster.replicate_gslb,
         "interval",
@@ -581,21 +505,16 @@ def start_scheduler():
         coalesce=True,
     )
 
-    # Bring the dns listener up, if anything is configured to be served.
-    #
-    # A failure here is logged and stepped over rather than raised.  Port 53
-    # may be taken by a resolver the distribution installed, and a manager that
-    # refuses to start because of that would take the whole GUI away over a
-    # feature most fleets will never turn on.
+    # Start the DNS listener if anything is configured. Failure is logged,
+    # not raised: port 53 may be held by the distro's resolver, and that
+    # shouldn't take the whole GUI down.
     try:
         gslb.refresh()
         if gslb.get_server().data.zones:
             gslb.get_server().start()
-            # Scheduled rather than awaited, because this function is not async
-            # and the redirect wants the agent, which is.  Once, a few seconds
-            # in, so the listener is certainly up before anything is pointed at
-            # it: a rule with nothing behind it answers no queries at all,
-            # which looks exactly like the box being down.
+            # Scheduled because this function isn't async and the redirect
+            # needs the agent. A few seconds in, so the listener is up
+            # before traffic is pointed at it.
             scheduler.add_job(
                 gslb.ensure_redirect,
                 "date",
@@ -605,17 +524,13 @@ def start_scheduler():
     except Exception as exc:
         log.error("the dns listener did not start, so gslb is off: %s", exc)
 
-    # Keep the dns answers in step with which nodes are actually serving, and
-    # the listener in step with whether there is anything to serve.
+    # Keep DNS answers in step with which nodes are serving, and the
+    # listener in step with whether there's anything to serve. Ten seconds
+    # to stay well inside the short TTL.
     #
-    # Ten seconds because the whole point of this feature is a short TTL, and a
-    # snapshot that lags the TTL would hand out an address for a box that has
-    # been down since before the answer was cached.
-    #
-    # reconcile rather than refresh, because the block above only starts the
-    # listener if a zone is already in the database at boot.  A node joining an
-    # existing cluster is empty at that moment and gets its config seconds
-    # later, so it lost that race every time and never looked again.
+    # reconcile rather than refresh: the block above only starts the
+    # listener if zones exist at boot, and a joining node gets its zones a
+    # few seconds later.
     scheduler.add_job(
         gslb.reconcile,
         "interval",
@@ -625,11 +540,9 @@ def start_scheduler():
         coalesce=True,
     )
 
-    # Connection numbers, so the dashboard has something moving on it.
-    #
-    # Fifteen seconds because these are counters and the useful thing is the
-    # rate between two readings.  Too far apart and a spike is averaged away,
-    # too close and it is all noise from the manager's own health checks.
+    # Connection counters for the dashboard. The useful number is the rate
+    # between readings; 15s is a balance between hiding spikes and noise
+    # from our own health checks.
     scheduler.add_job(
         get_collector().collect,
         "interval",
@@ -639,13 +552,8 @@ def start_scheduler():
         coalesce=True,
     )
 
-    # Telemetry written down, so it survives a restart.
-    #
-    # Every minute, and on every node.  The job folds the completed minute out
-    # of memory, rolls anything past 48 hours into five minute buckets, and
-    # prunes past thirty days.  All three are cheap and two of them usually do
-    # nothing, which is what lets this run on a timer rather than being
-    # something somebody has to remember.
+    # Persist telemetry every minute on every node: fold the last minute,
+    # roll data past 48 hours into 5 minute buckets, prune past 30 days.
     def _store_metrics():
         from app.core import metrics_store
 
@@ -660,12 +568,8 @@ def start_scheduler():
         coalesce=True,
     )
 
-    # What the backends say about themselves, for anything publishing it.
-    #
-    # Slower than our own numbers on purpose.  This reaches out to somebody
-    # else's servers, cpu and memory do not need fifteen second resolution to
-    # be useful, and being a polite visitor to a box we do not own matters more
-    # than the extra detail.
+    # Backend self-reported metrics. Slower than our own because these are
+    # someone else's servers and CPU/memory don't need 15s resolution.
     scheduler.add_job(
         get_collector().collect_members,
         "interval",
@@ -685,9 +589,8 @@ def start_scheduler():
         coalesce=True,
     )
 
-    # Notice a domain that stopped pointing at us, while the certificate it
-    # belongs to is still valid and there is time to do something about it.
-    # Hourly is plenty: DNS moves when a person moves it, not on its own.
+    # Catch a domain that stopped pointing at us while its certificate is
+    # still valid. Hourly is plenty.
     scheduler.add_job(
         get_cert_manager().check_dns,
         "interval",
@@ -700,14 +603,14 @@ def start_scheduler():
     scheduler.add_job(refresh_local_state, "interval", seconds=60, id="local_state",
                       max_instances=1, coalesce=True)
 
-    # Much more often than local_state, because this is what takes a wedged
-    # node out of DNS and the record's TTL is 30 seconds on a normal setup.
+    # More often than local_state: this takes a wedged node out of DNS, and
+    # the record TTL is typically 30 seconds.
     scheduler.add_job(refresh_frontend_state, "interval",
                       seconds=get_settings().frontend_probe_interval,
                       id="frontend_probe", max_instances=1, coalesce=True)
 
-    # The public address does not move often, so once an hour is plenty and it
-    # keeps us from hammering the services that tell us.
+    # The public address rarely changes; hourly avoids hammering the lookup
+    # services.
     scheduler.add_job(refresh_public_ip, "interval", seconds=3600, id="public_ip",
                       max_instances=1, coalesce=True)
 
@@ -720,11 +623,8 @@ def start_scheduler():
 
 async def cleanup_old_rows():
     """
-    Throw away old health events and expired sessions.
-
-    Health events pile up fast.  A fleet with 30 backends flapping generates
-    thousands a day, and none of them matter after a couple of weeks.  The audit
-    log is deliberately not touched here, that is kept.
+    Delete old health events and expired sessions. Health events pile up
+    fast and are useless after a couple of weeks. The audit log is kept.
     """
     from datetime import timedelta
 
@@ -771,14 +671,12 @@ async def lifespan(app: FastAPI):
     ensure_pki()
     await refresh_local_state()
 
-    # Kick this off in the background.  It reaches out to the internet and can
-    # take a few seconds, and blocking startup on it means a box with no route
-    # out sits there looking hung.
+    # In the background: it reaches out to the internet, and blocking on it
+    # makes a box with no outbound route look hung.
     asyncio.create_task(refresh_public_ip())
 
-    # Put the certbot hooks on the host now rather than waiting for the first
-    # certificate.  Finding out they are missing halfway through an issue is a
-    # bad time to find out.
+    # Install the certbot hooks now instead of discovering they're missing
+    # halfway through an issue.
     async def _hooks():
         from app.core import acme_hooks
 
@@ -786,10 +684,8 @@ async def lifespan(app: FastAPI):
 
     asyncio.create_task(_hooks())
 
-    # Check the certificate files now rather than waiting five minutes.  A node
-    # that just came back without them would otherwise spend that time unable
-    # to apply anything, with an error about a file rather than about the
-    # certificate.
+    # Check certificate files now rather than in five minutes, so a node
+    # that came back without them reports it right away.
     async def _certs():
         from app.core.acme import get_cert_manager
 
@@ -800,26 +696,14 @@ async def lifespan(app: FastAPI):
 
     start_scheduler()
 
-    # Settle who is active now, rather than up to one election interval from
-    # now.
+    # Run an election now instead of waiting a full interval. register_self
+    # stands a returning node down, and until an election runs the node
+    # refuses config changes, which used to mean a window after every
+    # restart where there was no active node at all.
     #
-    # register_self stands a returning node down to standby on purpose, and
-    # until an election has run this node refuses config changes.  The election
-    # job is on an interval and an interval job does not fire until one whole
-    # interval has passed, so that refusal lasts about twice the heartbeat
-    # every time the container restarts, which is every upgrade.  Somebody
-    # applying in that window used to be told to go and use the active node,
-    # and there was no active node to go to.
-    #
-    # A heartbeat first, then the election.  The other way round the election
-    # judges the peers on last_heartbeat values written before this node went
-    # down, so a node that has been away a while sees a peer that is alive and
-    # serving as dead and can take the role off it for a couple of seconds.
-    # Asking the peers first costs one round trip and means the first election
-    # runs on better information than the periodic ones do.
-    #
-    # In the background, because it talks to the network and a node with an
-    # unreachable peer must not sit in startup waiting for a timeout.
+    # Heartbeat first so the election judges peers on fresh data rather
+    # than last_heartbeat values from before this node went down. In the
+    # background so an unreachable peer doesn't stall startup.
     async def _settle_role():
         cluster = get_cluster()
         began = time.monotonic()
@@ -832,12 +716,8 @@ async def lifespan(app: FastAPI):
         except Exception as exc:
             log.warning("the first election did not run: %s", exc)
 
-        # Worth a line of its own.  This is the window in which the node
-        # refuses config changes after a restart, and until it was measured
-        # nobody knew it was there at all: it was filed as a node that
-        # "briefly believed it was a standby" with no cause.  Saying how long
-        # it took, every time, means the next person can see it rather than
-        # deduce it.
+        # Log how long it took. This is the window where the node refuses
+        # config changes after a restart, and it's easy to miss otherwise.
         with session_scope() as session:
             me = cluster.self_node(session)
             role = me.role.value if me else "not in the roster"
@@ -858,22 +738,13 @@ async def lifespan(app: FastAPI):
     if scheduler.running:
         scheduler.shutdown(wait=False)
 
-    # Give port 53 back before going away.
+    # Remove the port 53 redirect before exiting. The nftables rule lives on
+    # the host and outlives the container; left behind, it points at a port
+    # with nothing listening, and resolvers wait for a timeout instead of
+    # moving to the other nameserver. See clear_redirect.
     #
-    # The redirect lives on the host, in nftables, and outlives this container
-    # completely.  Stopping the manager left the rule behind pointing at a port
-    # with nothing listening on it, so the box went on accepting DNS on 53 and
-    # answering none of it.
-    #
-    # That is worse than the box being down, and clear_redirect's own docstring
-    # says why: a resolver that gets silence sits there until it times out,
-    # while a resolver that cannot reach the address at all moves on to the
-    # other nameserver immediately.  On a two node fleet it looks like DNS has
-    # failed everywhere when one node's container was stopped.
-    #
-    # Best effort and time limited.  A node that cannot reach its agent on the
-    # way out must not hang the shutdown; the agent clears a stale rule on its
-    # own as well.
+    # Best effort with a timeout so shutdown can't hang. The agent also
+    # clears stale rules on its own.
     try:
         from app.core import gslb
 
@@ -904,19 +775,18 @@ def create_gui_app() -> FastAPI:
         title="Failover LB",
         version=__version__,
         lifespan=lifespan,
-        # Tells FastAPI it is being served under a prefix, so it does not get
-        # confused about its own paths.  The templates do the rest.
+        # Tells FastAPI it is served under a prefix. The templates handle
+        # the rest.
         root_path=settings.root_path.rstrip("/"),
-        # No interactive docs.  They are handy in development and they are a
-        # map of every endpoint for anybody who gets this far in production.
+        # No interactive docs; in production they're just a map of every
+        # endpoint.
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
     )
 
-    # Order matters and it is the reverse of what you might expect.  Starlette
-    # runs the last one added first, so the allow list ends up outermost and
-    # turns people away before anything else does any work.
+    # Starlette runs the last added middleware first, so the allow list is
+    # outermost and rejects requests before anything else does work.
     app.add_middleware(SecurityHeadersMiddleware)
     app.add_middleware(RateLimitMiddleware)
     app.add_middleware(AdminAllowlistMiddleware)
@@ -928,17 +798,16 @@ def create_gui_app() -> FastAPI:
     app.include_router(pages_router)
     app.include_router(account_router)
     app.include_router(api_router, prefix="/api")
-    # The tunnel carries its own full paths: the managed half under /api and
-    # the enrolment half at /tunnel, which has to be reachable by a workload
-    # that is not on the management allow list.  On the GUI listener, never the
-    # peer one, which demands a client certificate no workload will ever have.
+    # The tunnel router carries its own paths: the managed half under /api
+    # and enrollment under /tunnel, which must be reachable by workloads
+    # outside the admin allow list. GUI listener only; workloads never have
+    # a peer client certificate.
     app.include_router(tunnel_router)
     app.include_router(backup_router)
 
     @app.get("/healthz", include_in_schema=False)
     async def healthz():
-        # Deliberately says almost nothing.  This is reachable without logging
-        # in, so the version number and node name stay out of it.
+        # Says almost nothing: this is reachable without logging in.
         return {"status": "ok"}
 
     return app
@@ -946,11 +815,8 @@ def create_gui_app() -> FastAPI:
 
 def create_peer_app() -> FastAPI:
     """
-    The node to node app.
-
-    No session cookies, no CSRF, no HTML.  Every route checks the signature on
-    the message before it does anything.  There is no login here because the
-    client certificate is the login.
+    The node to node app. No cookies, CSRF or HTML. Every route checks the
+    message signature first; the client certificate is the login.
     """
     from app.web.routes_peer import router as peer_router
 
@@ -971,31 +837,17 @@ def create_peer_app() -> FastAPI:
 
 def gui_ssl_context(settings) -> dict:
     """
-    The certificate for the web GUI.
-
-    Self signed, generated on first start.  Your browser will complain and that
-    is expected for a management tool on a private network.  You can point this
-    at a real certificate in Settings once you have one.
-
-    A self signed certificate here is still worth a lot.  It stops anybody on
-    the network reading your session cookie, which is the actual risk.  The
-    warning is about identity, not encryption.
+    Certificate for the web GUI. Self signed on first start and can be
+    replaced with a real one in Settings. Browsers will warn, but it still
+    protects the session cookie on the wire, which is the real risk.
     """
     cert_path = settings.pki_dir / "gui.crt"
     key_path = settings.pki_dir / "gui.key"
 
-    # Both there is not the same as both good.
-    #
-    # This used to check only that the files existed.  A pair that does not go
-    # together, which is what you get if a run was interrupted between writing
-    # the key and writing the certificate, passed that check happily.  uvicorn
-    # then refused to build an SSL context, the process died before it listened
-    # on anything, and docker restarted it into the same wall forever.  A crash
-    # loop with no way out, over two files we can simply make again.
-    #
-    # So check they actually match, and rebuild them if they do not.  There is
-    # nothing to lose by regenerating: it is a self signed certificate for a
-    # management GUI, not something anybody has pinned.
+    # Check that the pair actually matches, not just that both files exist.
+    # A mismatched pair (from an interrupted write) made uvicorn fail before
+    # listening and docker restart it into the same failure forever. It's a
+    # throwaway self signed cert, so regenerating is always safe.
     remake = not cert_path.is_file() or not key_path.is_file()
 
     if not remake:
@@ -1064,16 +916,9 @@ def _make_gui_cert(settings, cert_path: Path, key_path: Path):
         .sign(key, hashes.SHA256())
     )
 
-    # Write both to one side first, then move them into place together.
-    #
-    # These were written straight over the top, key first and certificate
-    # second.  Dying in the gap between the two left a new key beside the old
-    # certificate, which do not match, and the app would not start again.
-    #
-    # Two renames are still two operations, so this narrows the window rather
-    # than closing it.  What actually closes it is gui_ssl_context checking that
-    # the pair matches and rebuilding them when it does not.  Both, because a
-    # window this cheap to shrink is worth shrinking.
+    # Write both to temp files and then rename into place. Two renames still
+    # leave a small window; the match check in gui_ssl_context is what
+    # actually recovers from a mismatched pair.
     key_tmp = key_path.with_suffix(".key.tmp")
     cert_tmp = cert_path.with_suffix(".crt.tmp")
 
@@ -1097,27 +942,15 @@ def peer_ssl_config(settings) -> dict:
     """
     TLS for the peer port.
 
-    CERT_OPTIONAL, not CERT_REQUIRED, and the reason is worth writing down
-    because CERT_REQUIRED looks stricter and is the obvious thing to reach for.
+    CERT_OPTIONAL, not CERT_REQUIRED. A joining node has no cluster
+    certificate yet (getting one is the point of the join), so CERT_REQUIRED
+    would fail the handshake and joining would look like a network problem.
 
-    A node that is joining does not have a cluster certificate yet.  Getting one
-    is the entire point of the join.  With CERT_REQUIRED the handshake fails
-    before the joiner can ask, so joining is impossible and the error looks like
-    a network problem.  That is a chicken and egg you cannot code your way out
-    of on one port.
-
-    CERT_OPTIONAL still verifies a certificate when one is presented, so a
-    forged or expired one is rejected exactly as before.  It only allows a
-    connection with no certificate at all through to the application.
-
-    That is safe because the certificate was never the only gate.  Every peer
-    route verifies an HMAC signature made with a key only that node holds, with
-    a timestamp and a nonce so a captured request cannot be replayed, and it
-    checks the source address against the node roster.  The one route that does
-    not is /peer/join, and that one demands a single use join token instead.
-
-    So a caller with no certificate can open a connection and get told no by
-    every route except the one designed to be reached that way.
+    A presented certificate is still verified, so forged or expired ones are
+    rejected. The certificate was never the only gate: every peer route
+    checks an HMAC signature with a timestamp and nonce, plus the source
+    address against the roster. The one exception is /peer/join, which
+    requires a single use join token.
     """
     ca = ClusterCA()
 
@@ -1139,19 +972,11 @@ def peer_ssl_config(settings) -> dict:
 async def serve():
     settings = get_settings()
 
-    # Set up the database and this node's certificate before we build the
-    # listeners, not inside the app's startup hook.
-    #
-    # uvicorn reads the TLS settings when the Config object is built, which
-    # happens before the app has started and therefore before any startup hook
-    # has run.  Doing the certificate work in the hook meant a brand new node
-    # had no certificate at the moment we decided whether to open the peer
-    # port, so it silently came up without one and could not be joined until
-    # somebody restarted it.  It worked on the second boot, which made it a
-    # confusing thing to chase.
-    #
-    # Both of these are safe to call twice, and the startup hook still calls
-    # them, so ordering is the only thing that changed here.
+    # Set up the database and node certificate before building the
+    # listeners, not in the startup hook. uvicorn reads TLS settings when the
+    # Config is built, before any hook runs, so a brand new node used to come
+    # up without a peer port until it was restarted. Both calls are
+    # idempotent and the hook still makes them.
     init_db()
     ensure_pki()
 

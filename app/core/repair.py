@@ -1,42 +1,23 @@
 """
-Work out what to take out of a config nginx will not load, and say so first.
+Work out what to remove from a config nginx will not load, and show it first.
 
-This exists because of a class of failure that is nobody's fault and lands at
-the worst moment.  Config comes in from somewhere else, an import or a paste
-into a custom config box, carrying a directive that is perfectly good nginx in
-the place it came from and not allowed where it has ended up.  `ssl_session_cache`
-is the one that started this: fine in a server block, refused in a location.
-The site looks right on the page, the rows are all there, and the next apply
-dies on a generated file nobody hand edited.
+Imported or pasted config can carry a directive that is valid where it came
+from but not where it landed (`ssl_session_cache` in a location, for
+example).  The site looks fine in the GUI and the next apply fails on a
+generated file.
 
-**Nothing here applies anything and nothing here edits by itself.**  It works
-out a repair, says exactly what it would take out and why, and hands that back
-for a person to agree to.  `apply_repair` is a separate call and only ever acts
-on changes that came out of `plan_repair`.
+Nothing here applies or saves anything.  plan_repair works out what it would
+comment out and why, for a person to approve; applying it is a separate step.
 
-Three things shaped how this works.
+Design choices:
 
-**nginx is the oracle, not a table of directives.**  The obvious design is a
-list of which directives are allowed in which block, checked before writing.  It
-does not work.  The directives that end up misplaced are exactly the ones the
-catalog does not model, because a directive the catalog models becomes a setting
-and gets rendered in the right place by construction.  `ssl_session_cache` is
-not in the catalog, and neither is most of what people paste.  Covering it would
-mean hand maintaining the context rules for hundreds of nginx directives, which
-would drift, and drift silently.  So we ask nginx, which already knows, and
-which answers with the directive, the file and the line.
-
-**The repair goes into the source, not the rendered file.**  Commenting out a
-line in rendered output fixes nothing: the next render builds it again from the
-database.  So a complaint has to be traced back to the field it came from, which
-is some site's or some path's custom config, and commented out there.  That is
-what makes it stick and what makes it visible to whoever looks next.
-
-**Commented out, never deleted.**  Same bargain the importer already makes in
-`_commented`.  A commented directive changes nothing, still loads, and is still
-there for somebody who knows why it was needed to put it back somewhere valid.
-Deleting it would be tidier and would throw away the only record that it was
-ever wanted.
+  - nginx is the oracle.  The misplaced directives are the ones the settings
+    catalog doesn't model, and hand-maintaining context rules for hundreds of
+    directives would drift.  nginx reports the directive, file and line.
+  - The fix goes into the source custom config field, not the rendered file,
+    or the next render would bring the line back.
+  - Lines are commented out, never deleted (as the importer's `_commented`
+    does), so the record of what was wanted survives.
 """
 
 import logging
@@ -46,51 +27,39 @@ from app.models import Location, VirtualHost
 
 log = logging.getLogger("nfm.repair")
 
-# Where the live config lives, and what the agent rewrites its paths to before
-# handing the output back.  A complaint names /etc/nginx/nginxmgr/sites/x.conf
-# and the render calls the same file sites/x.conf.
+# Live config root.  A complaint about /etc/nginx/nginxmgr/sites/x.conf maps
+# to the rendered file sites/x.conf.
 LIVE_ROOT = "/etc/nginx/nginxmgr/"
 
-# nginx says a lot of different things and almost all of them end the same way:
-# some complaint, then "in <file>:<line>".  Matching the tail rather than each
-# individual message means a phrasing we have never seen still gets placed.
+# Most nginx errors end with "in <file>:<line>".  Matching that tail handles
+# messages we have never seen.
 _WHERE = re.compile(r"in (?P<file>/\S+?):(?P<line>\d+)")
 
 # The directive it is complaining about, when it names one.
 _WHICH = re.compile(r'"(?P<name>[A-Za-z0-9_]+)"')
 
-# What we are willing to repair by taking a line out.
-#
-# Deliberately a short list.  Every one of these is "this line cannot be here",
-# which a line removal genuinely fixes.  Anything else, a bad argument or a file
-# that is missing, is a different problem and taking the line out would paper
-# over it, so those are reported and left alone.
+# Errors that removing the line genuinely fixes.  Others (bad arguments,
+# missing files) are reported, not papered over.
 REPAIRABLE = (
     "directive is not allowed here",
     "directive is duplicate",
     "unknown directive",
-    # A whole block rather than a line, and it needs the whole block taking out.
-    # This is what a config imported before the importer stopped writing every
-    # path twice still has in it, so it is worth being able to clear up rather
-    # than telling somebody to import the file again.
+    # Needs the whole block removed.  Left behind by older imports that
+    # wrote every path twice.
     "duplicate location",
 )
 
-# How many times round before we give up.  One complaint is fixed per pass,
-# because nginx stops at the first one, so a file with several needs several
-# passes.  The cap is a backstop against a repair that does not actually help
-# and would otherwise loop.
+# nginx stops at the first error, so each pass fixes one.  The cap guards
+# against looping on a repair that doesn't help.
 MAX_PASSES = 25
 
-# `cannot load certificate "/path/to.pem": BIO_new_file() failed ...`, and the
-# same shape for a key.  The quoted path is the only thing in the message that
-# says where the trouble is.
-# The directives that name a certificate file.  Taking out only one of a pair
-# leaves nginx complaining about the other, so all of them go together, which
-# is what "remove it and the ssl related directives" means in practice.
+# Directives naming a certificate file.  Removing only one of a pair leaves
+# nginx complaining about the other, so they go together.
 _CERT_DIRECTIVES = ("ssl_certificate", "ssl_certificate_key",
                     "ssl_trusted_certificate", "ssl_client_certificate")
 
+# `cannot load certificate "/path/to.pem": BIO_new_file() failed ...`, and
+# the same for a key.  The quoted path is the only location information.
 _CERT_TROUBLE = re.compile(
     r'cannot load certificate(?: key)?\s+"(?P<path>[^"]+)"')
 
@@ -105,9 +74,8 @@ class Complaint:
         self.rel_path = rel_path          # e.g. sites/example.com.conf
         self.line_no = line_no            # 1 based, into the rendered file
         self.reason = reason
-        # Set when nginx complained about a certificate file rather than about
-        # a line.  That complaint carries no file and no line number, so it is
-        # placed by looking for the path instead.
+        # Set for certificate load errors, which have no file or line and are
+        # located by searching for the path.
         self.cert_path = cert_path
 
     def __repr__(self):
@@ -116,10 +84,10 @@ class Complaint:
 
 def read_complaint(output: str):
     """
-    Turn what nginx said into something we can act on.
+    Parse the first [emerg] line of nginx output into a Complaint.
 
-    None when it is not about a file we generated, or not a thing a line removal
-    would fix.  Saying nothing is the right answer far more often than guessing.
+    None when it isn't about a file we generated or isn't fixable by removing
+    a line.  Better to say nothing than guess.
     """
     if not output:
         return None
@@ -132,13 +100,8 @@ def read_complaint(output: str):
     if not first:
         return None
 
-    # A certificate nginx cannot read.  This one is different in shape from
-    # every other complaint here: it names a file it tried to open, and it
-    # carries no config file and no line number at all, so the usual placement
-    # by file and line finds nothing and the whole thing was reported as
-    # unrepairable.  It is also one of the commonest ways a config stops
-    # loading, since a certificate can be deleted, renamed, or simply not
-    # issued yet.
+    # Unreadable certificate: names the cert file but no config file or line.
+    # A common failure, since certs get deleted, renamed or not issued yet.
     cert = _CERT_TROUBLE.search(first)
     if cert:
         return Complaint(
@@ -159,13 +122,12 @@ def read_complaint(output: str):
 
     path = where.group("file")
     if not path.startswith(LIVE_ROOT):
-        # The candidate file itself, or something outside what we write.  Not
-        # ours to edit.
+        # Not a file we write.
         return None
 
     which = _WHICH.search(first)
     reason = first.split("[emerg]", 1)[1].strip()
-    # The file and line are for us, not for the person reading it.
+    # Drop the file:line from the message shown to the user.
     reason = _WHERE.sub("", reason).strip().rstrip(",")
 
     return Complaint(
@@ -186,14 +148,11 @@ def _line_at(text: str, line_no: int) -> str:
 
 def _location_around(text: str, line_no: int):
     """
-    Which `location` block a line of rendered config falls inside, if any.
+    Which `location` block a rendered line falls inside, if any.
 
-    Needed because the same directive can sit in a site's custom config and in a
-    path's, and commenting out the wrong one leaves the config still broken
-    while looking like something was done about it.
-
-    Counts braces rather than matching indentation, because the custom config
-    boxes take text as typed and its indentation means nothing.
+    The same directive may be in both the site's and a path's custom config,
+    and commenting out the wrong one fixes nothing.  Counts braces, since
+    custom config indentation is arbitrary.
     """
     depth = 0
     current = None
@@ -212,7 +171,7 @@ def _location_around(text: str, line_no: int):
         depth += raw.count("{") - raw.count("}")
 
         if current is not None and depth <= opened_at:
-            # That block closed before reaching the line we care about.
+            # Block closed before our line.
             current = None
             opened_at = None
 
@@ -230,11 +189,9 @@ def _match_path(spec: str) -> str:
 
 def _comment_out(text: str, target: str, why: str) -> tuple:
     """
-    Comment out the first line matching `target`, with the reason beside it.
-
-    Gives back (new_text, True) when something changed.  Compared on the
-    stripped line so that the renderer's indentation, which is added on the way
-    out, does not stop a match.
+    Comment out the first line matching `target`, with the reason.  Returns
+    (new_text, changed).  Compares stripped lines, since the renderer adds
+    indentation.
     """
     wanted = (target or "").strip()
     if not wanted:
@@ -254,12 +211,9 @@ def _comment_out(text: str, target: str, why: str) -> tuple:
 
 def _comment_out_block(text: str, opener: str, why: str) -> tuple:
     """
-    Comment out a whole `location` block, opener to matching close.
-
-    A duplicate location cannot be fixed a line at a time.  Taking out only the
-    line nginx named leaves the body behind, loose in the server block, which is
-    both wrong and a fresh pile of errors.  So the braces are counted and the
-    lot goes.
+    Comment out a whole `location` block, opener to matching close.  For a
+    duplicate location, removing only the opener would leave its body loose
+    in the server block.
     """
     wanted = (opener or "").strip()
     if not wanted:
@@ -282,8 +236,7 @@ def _comment_out_block(text: str, opener: str, why: str) -> tuple:
             end = index
             break
     if end is None:
-        # Never closed, so the safest reading is that everything after it
-        # belonged to it.  Refuse rather than guess.
+        # Never closed.  Refuse rather than guess.
         return text, False
 
     out = lines[:start]
@@ -294,7 +247,7 @@ def _comment_out_block(text: str, opener: str, why: str) -> tuple:
 
 
 def _site_for(session, rel_path: str):
-    """The site a rendered file belongs to.  sites/example.com.conf -> the row."""
+    """The VirtualHost row for a rendered file like sites/example.com.conf."""
     if not rel_path.startswith("sites/") or not rel_path.endswith(".conf"):
         return None
     name = rel_path[len("sites/"):-len(".conf")]
@@ -303,16 +256,13 @@ def _site_for(session, rel_path: str):
 
 async def plan_repair(session, render, test) -> dict:
     """
-    Render, ask nginx, and work out what would have to come out.
+    Render, test with nginx, and work out what would have to come out.
 
-    `render` is called with no arguments and gives back the files dict.  `test`
-    is awaited with a files dict and gives back (ok, output).  Both are passed
-    in so this can be exercised without an agent and so the caller decides what
-    "test" means.
+    `render()` returns the files dict; `await test(files)` returns
+    (ok, output).  Injected so this runs without an agent.
 
-    Writes nothing.  The changes it works out are held against the objects in
-    this session and rolled back by the caller; `apply_repair` is what makes any
-    of it real.
+    Commits nothing.  Changes are made to objects in this session and the
+    caller rolls them back unless the repair is approved.
     """
     files = render()
     ok, output = await test(files)
@@ -326,19 +276,14 @@ async def plan_repair(session, render, test) -> dict:
     for _ in range(MAX_PASSES):
         complaint = read_complaint(output)
         if complaint is None:
-            # Something is wrong that taking a line out will not fix.  Report it
-            # as it stands rather than keep cutting.
+            # Not fixable by removing a line; stop cutting.
             return {"ok": False, "fixed": False, "changes": changes,
                     "output": output, "unrepairable": output}
 
-        # A certificate nginx cannot read is placed by the path it names rather
-        # than by a line number, because the message carries neither a file nor
-        # a line.  Everything a person typed is searched for a directive naming
-        # that file, and those lines come out.  Generated certificate lines are
-        # left alone on purpose, the same rule the rest of this follows: those
-        # come from a certificate attached on the Basics tab, and the answer
-        # there is to issue it or detach it, not to have this quietly edit the
-        # config out from under somebody.
+        # Unreadable certificate: search all custom config for directives
+        # naming that path and comment them out.  Generated cert lines (from a
+        # certificate attached on the Basics tab) are left alone; the fix
+        # there is to issue or detach the certificate.
         if complaint.cert_path:
             hit_any = False
             for site in session.query(VirtualHost).all():
@@ -395,9 +340,8 @@ async def plan_repair(session, render, test) -> dict:
             return {"ok": False, "fixed": False, "changes": changes,
                     "output": output, "unrepairable": output}
 
-        # Prefer the path the line actually sits in.  Falling back to the site
-        # matters: a directive the renderer wrote into a location can still have
-        # come from the site's own custom config.
+        # Prefer the location the line sits in, then fall back to the site:
+        # site custom config can also render inside a location.
         holder = None
         where = "the site"
         spec = _location_around(text, complaint.line_no)
@@ -421,9 +365,7 @@ async def plan_repair(session, render, test) -> dict:
                 holder = site
 
         if holder is None:
-            # It is in generated config rather than in anything somebody typed,
-            # so there is no source line to comment out.  That is a bug in the
-            # renderer and quietly editing the output would hide it.
+            # Generated, not typed: a renderer bug that editing would hide.
             return {"ok": False, "fixed": False, "changes": changes,
                     "output": output,
                     "unrepairable": (
@@ -434,7 +376,7 @@ async def plan_repair(session, render, test) -> dict:
 
         key = (complaint.rel_path, offending.strip(), where)
         if key in seen:
-            # Cut the same thing twice and we are not making progress.
+            # Same cut twice: no progress.
             return {"ok": False, "fixed": False, "changes": changes,
                     "output": output, "unrepairable": output}
         seen.add(key)

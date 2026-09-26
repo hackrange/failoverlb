@@ -1,28 +1,19 @@
 """
 Upgrading nginx across the fleet, and adding or dropping modules.
 
-These are the same job.  Modules are compiled into the binary, so the only way
-to add one is to build nginx again, which is also how you change version.
+Both are the same job: modules are compiled in, so adding one means
+rebuilding nginx.
 
-The rule that shapes everything here is one node at a time.  A build takes ten
-to twenty minutes and ends with the service restarting, so doing all your load
-balancers at once means every one of them is down or half built simultaneously.
-Walking them in order means the fleet keeps serving throughout, and a bad build
-stops the walk instead of taking the lot.
+One node at a time.  A build takes ten to twenty minutes and ends with a
+restart, so rolling through the fleet keeps it serving, and a bad build stops
+the walk instead of breaking every node.
 
-What happens per node:
+Per node: build, wait, check nginx is running, the config passes and the
+version changed, re-read the module list, then move on.
 
-  1. Check the rest of the fleet is healthy enough to lose this one.
-  2. Kick off the build and watch it.
-  3. When it finishes, check nginx is actually running and its config still
-     passes, and that the version really changed.
-  4. Re-read the module list, since that is the whole point of a module change.
-  5. Only then move to the next node.
-
-Anything that fails stops the walk with the remaining nodes untouched.  A fleet
-where two boxes are upgraded and two are not is a normal, working state: they
-all serve the same config, and the manager already refuses to offer a setting
-the oldest node cannot handle.
+A failure stops the walk with the remaining nodes untouched.  A partly
+upgraded fleet is a normal working state; the manager only offers settings
+the oldest node supports.
 """
 
 import asyncio
@@ -41,26 +32,19 @@ log = logging.getLogger("nfm.upgrade")
 
 def wants_waf_module() -> bool:
     """
-    Whether nginx should be built with the WAF module in it.
+    Whether nginx should be built with the WAF module.
 
-    Every rebuild has to answer this, not just the one that turns the WAF on.
-    The installer builds from the module list it is handed rather than from
-    whatever happens to be on the box, so a version upgrade six months later
-    that forgets to mention the WAF produces an nginx without it, and every
-    site with the WAF switched on then fails its config test at once.  That is
-    a fleet outage caused by an upgrade nobody connected to the WAF.
-
-    So this is read fresh on every build, from one fleet wide setting rather
-    than from the sites.  A per site switch decides where the WAF runs; this
-    decides whether the binary can run one at all.
+    Every rebuild must answer this, not just the one that enables the WAF.
+    The installer builds from the list it is given, so a later version
+    upgrade that omitted the WAF would drop it and break every site using it.
+    Read fresh from one fleet-wide setting on each build.
     """
     from app.core import settings_store
 
     return bool(settings_store.get("waf_module"))
 
-# How long to let a build run before calling it stuck.  A full source build of
-# nginx with OpenSSL and a dozen modules is ten to twenty minutes on a normal
-# box, so this is generous rather than tight.
+# Build timeout.  A full source build with OpenSSL and a dozen modules takes
+# ten to twenty minutes, so this is generous.
 BUILD_TIMEOUT = 45 * 60
 
 # How often to ask a node how its build is going.
@@ -75,10 +59,9 @@ class UpgradeRunner:
     """
     Walks the fleet, one node at a time.
 
-    Progress is kept in memory and read by the GUI while it runs.  It is not in
-    the database on purpose: an upgrade is a thing somebody is watching, not a
-    thing that has to survive a restart, and a half finished walk that resumed
-    on its own after the manager bounced would be a surprise nobody wants.
+    Progress lives in memory for the GUI to poll.  Deliberately not
+    persisted: a half-finished walk should not resume on its own after the
+    manager restarts.
     """
 
     def __init__(self):
@@ -98,10 +81,8 @@ class UpgradeRunner:
 
     async def plan(self, nginx_version=None, openssl_version=None) -> dict:
         """
-        Work out the order and whether it is safe to start.
-
-        Shown before anybody commits to it, because a fleet wide rebuild is a
-        forty minute operation and worth reading first.
+        Work out the order and whether it is safe to start.  Shown for review
+        before a long fleet-wide rebuild begins.
         """
         with session_scope() as session:
             nodes = session.query(Node).all()
@@ -151,10 +132,8 @@ class UpgradeRunner:
                         f"out before adding a rebuild on top."
                     )
 
-            # Standbys first, active last.  The active node is the one taking
-            # config changes, so it is the one you want working while the others
-            # are busy, and the one you want to still have a way back if an
-            # early build goes wrong.
+            # Standbys first, active last, so the node taking config changes
+            # stays working and a bad early build can still be backed out.
             order = [i["name"] for i in info if i["role"] != "active" and i["reachable"]]
             order += [i["name"] for i in info if i["role"] == "active" and i["reachable"]]
 
@@ -225,9 +204,8 @@ class UpgradeRunner:
                              result="success" if ok else "failed", detail=str(detail)[:2000])
 
                 if not ok:
-                    # Stop the walk.  A fleet part upgraded is a working state;
-                    # a fleet where we kept going after a failure and broke the
-                    # rest of the boxes the same way is not.
+                    # Stop.  A partly upgraded fleet works; carrying on could
+                    # break the rest the same way.
                     self.state["stopped_because"] = (
                         f"{name} did not come back cleanly, so the remaining nodes "
                         f"were left alone.  Sort {name} out and start again."
@@ -247,7 +225,7 @@ class UpgradeRunner:
             self.state["finished"] = utcnow().isoformat()
 
     async def _upgrade_one(self, name: str):
-        """Build on one node and wait for it to come back.  True when it worked."""
+        """Build on one node and wait for it.  Returns (ok, detail)."""
         settings_before = await self._node_version(name)
 
         try:
@@ -270,9 +248,8 @@ class UpgradeRunner:
             try:
                 status = await self._call(name, "nginx_upgrade_status", {"lines": 12})
             except (AgentError, NodeUnreachable, ClusterError) as exc:
-                # A node going quiet mid build is expected for a moment when the
-                # service restarts at the end.  Keep waiting rather than calling
-                # it a failure straight away.
+                # A node briefly goes quiet when the service restarts at the
+                # end of the build.  Keep waiting.
                 self.state["nodes"][name] = {
                     "state": "building",
                     "note": f"not answering just now: {exc}",
@@ -293,24 +270,14 @@ class UpgradeRunner:
         else:
             return False, f"the build did not finish within {BUILD_TIMEOUT // 60} minutes"
 
-        # The module is built.  Now tell nginx it exists.
+        # Built is not loaded: write (or remove) the load_module line.
+        # Without it, enabling the WAF on one site renders
+        # `modsecurity on;`, nginx rejects it as an unknown directive, and
+        # since applies are all or nothing the whole fleet can't apply.
         #
-        # Building it and loading it are two different things, and for a while
-        # only the first happened: the .so landed in the modules directory, the
-        # fleet recorded that it wanted the WAF, and nothing ever wrote the
-        # load_module line.  nginx therefore had no idea the directive existed.
-        #
-        # That is worse than a feature not working.  With the module in the
-        # build the GUI starts offering the WAF, somebody turns it on for one
-        # site, the renderer writes `modsecurity on;`, and nginx answers
-        # `unknown directive "modsecurity"`.  An apply is all or nothing, so
-        # that is the whole fleet unable to apply any config at all, from a
-        # tick box the product invited them to tick.
-        #
-        # The verb does the careful part: it refuses when the .so is missing,
-        # tests nginx afterwards, and puts the old state back if the test
-        # fails.  So a node that cannot load the module fails here rather than
-        # coming back looking healthy and breaking at the next apply.
+        # The agent verb refuses if the .so is missing, tests nginx, and
+        # rolls back on failure, so a node that can't load the module fails
+        # here instead of at the next apply.
         wants = wants_waf_module()
         try:
             await self._call(name, "waf_module", {"enabled": wants})
@@ -319,11 +286,11 @@ class UpgradeRunner:
                 f"the build finished but the WAF module could not be "
                 f"{'loaded' if wants else 'unloaded'}: {exc}")
 
-        # It says it worked.  Check that for ourselves rather than believing it.
+        # Verify independently.
         return await self._verify(name, settings_before, last_log)
 
     async def _verify(self, name: str, version_before, build_log: str):
-        """Is nginx actually up, happy, and different from before."""
+        """Check nginx is up, its config passes, and the version changed."""
         await asyncio.sleep(3)
 
         try:
@@ -343,8 +310,7 @@ class UpgradeRunner:
         if not test.get("ok"):
             return False, f"nginx will not load its config after the build:\n{test.get('output', '')}"
 
-        # Pick up the new version and module list, because a module change is
-        # often the whole reason for doing this and the GUI keys off it.
+        # Record the new version and module list; the GUI keys off them.
         from app.core.capabilities import parse_build_info
 
         build_info = status.get("build_info", "")
@@ -396,10 +362,7 @@ class UpgradeRunner:
 
     async def _call(self, name: str, verb: str, payload: dict):
         """
-        Run a verb on a node, whether it is this one or a peer.
-
-        Peers go through the peer API, which forwards to their own agent.  Same
-        verb either way, so the walk does not have to care which node it is on.
+        Run an agent verb on this node or, via the peer API, on a peer.
         """
         settings = get_cluster().settings
 

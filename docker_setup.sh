@@ -4,19 +4,15 @@
 #
 # Author: Tim Rice
 #
-# Installs Docker CE from Docker's own apt repository, which is what you want.
-# The docker.io package Ubuntu ships is usually a long way behind and does not
-# come with the compose plugin.
+# Installs Docker CE from Docker's apt repository. Ubuntu's docker.io
+# package is usually well behind and lacks the compose plugin.
 #
 #   sudo bash docker_setup.sh
 #
-# If Docker is already here this leaves it alone.  It will not reinstall over
-# the top of a working setup and it will not restart the daemon out from under
-# containers that are running, unless you ask for it with --force.
+# An existing install is left alone unless you pass --force, so running
+# containers are not restarted by accident.
 #
-# The whole thing is wrapped in a { } block so "curl | bash" reads the entire
-# file before running any of it.  Without that, a dropped connection halfway
-# through leaves you running half a script.
+# Wrapped in { } so "curl | bash" reads the whole file before running it.
 # =============================================================================
 {
 set -euo pipefail
@@ -85,8 +81,7 @@ header "Checks"
 
 [[ "$(id -u)" -eq 0 ]] || fail "Run this with sudo."
 
-# We only claim this works on Ubuntu.  It will very likely work on Debian too,
-# but the repository path is different and untested here, so we say so.
+# Tested on Ubuntu only. Debian likely works but uses a different repo path.
 if [[ ! -f /etc/os-release ]]; then
     fail "Cannot tell what distribution this is.  No /etc/os-release."
 fi
@@ -140,9 +135,8 @@ fi
 # ------------------------------------------------ clear out the old packages
 header "Clearing out old packages"
 
-# Ubuntu's own docker packages conflict with Docker's.  They install to the
-# same paths, so having both is a mess.  These are safe to remove because they
-# are the ones we are replacing, and remove keeps any config and volumes.
+# Ubuntu's docker packages install to the same paths as Docker's and
+# conflict. apt-get remove keeps config and volumes.
 OLD_PACKAGES=(docker.io docker-doc docker-compose docker-compose-v2 podman-docker containerd runc)
 REMOVED=false
 for pkg in "${OLD_PACKAGES[@]}"; do
@@ -169,9 +163,7 @@ success "Dependencies installed."
 # ----------------------------------------------------------- apt key and repo
 header "Docker apt repository"
 
-# The key goes in /etc/apt/keyrings, not the old apt-key store.  apt-key has
-# been deprecated for years because a key added that way is trusted for every
-# repository on the box, not just the one you added it for.
+# Use /etc/apt/keyrings, not apt-key, which trusts a key for every repo.
 install -m 0755 -d /etc/apt/keyrings
 
 if [[ ! -f /etc/apt/keyrings/docker.asc ]]; then
@@ -184,13 +176,11 @@ else
     info "The signing key is already here."
 fi
 
-# Pin the repo to this one key with signed-by.  Without it, any key in the
-# keyring can sign for this repo.
+# signed-by pins the repo to this one key.
 CODENAME="${VERSION_CODENAME:-jammy}"
 
-# Ubuntu releases the installer sometimes runs on are newer than what Docker
-# has built packages for.  Falling back to the most recent one they do have is
-# better than failing outright, and the packages work fine.
+# Docker may not have packages for a brand new Ubuntu release yet. Fall
+# back to the newest release they do have; those packages work fine.
 if ! curl -fsSI "https://download.docker.com/linux/ubuntu/dists/${CODENAME}/Release" >/dev/null 2>&1; then
     warn "Docker has no repository for '${CODENAME}' yet."
     for fallback in noble jammy; do
@@ -233,10 +223,8 @@ if ! $SKIP_DAEMON_CONFIG; then
     else
         mkdir -p /etc/docker
 
-        # Log rotation is the important part here.  The default json-file driver
-        # has no size limit at all.  One container logging steadily will
-        # eventually eat the whole filesystem, and the first sign of trouble is
-        # usually everything on the box breaking at once.
+        # The default json-file driver has no size limit, so one chatty
+        # container can fill the disk. Rotation is the important part.
         cat > /etc/docker/daemon.json <<'DAEMON'
 {
   "log-driver": "json-file",
@@ -281,9 +269,8 @@ if $ADD_USER && [[ -n "$DOCKER_USER" ]] && [[ "$DOCKER_USER" != "root" ]]; then
         info "Or run: newgrp docker"
     fi
 
-    # Worth being straight about this.  Being in the docker group is the same
-    # as being root, because you can mount the host filesystem into a container
-    # and do whatever you like.  It is convenient, and people should know.
+    # The docker group is root-equivalent: members can mount the host
+    # filesystem into a container. Say so.
     echo
     warn "Being in the docker group is effectively root on this box."
     info "Anybody in it can mount / into a container and take over.  That is"

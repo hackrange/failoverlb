@@ -1,57 +1,41 @@
 """
-Turning an error page template into the HTML nginx will actually serve.
+Turning an error page template into the HTML nginx will serve.
 
-Kept apart from render.py because none of it is nginx config.  It is somebody
-else's HTML, four string swaps, and a list of rules about what an upload is
-allowed to be, and that mix wants to be readable on its own.
+Separate from render.py because none of this is nginx config: it is user
+HTML, a few string swaps, and rules for what an upload may be.
 
-How the whole thing hangs together, since it is not obvious from any one file:
+  - A template is rendered once per status code it covers, so the code is
+    baked in before nginx sees the page.  Nothing happens at request time.
+  - Rendered pages go into the config bundle like any generated file, so
+    they are staged, tested, swapped in atomically and replicated.
+  - Images are inlined as data URIs, so a page has nothing to fetch while
+    the site is already in trouble.
 
-  * A template is one piece of HTML with placeholders in it.  We render it once
-    per status code it covers, so the code is filled in before nginx ever sees
-    the page.  There is no substitution at request time and nothing dynamic on
-    the page at all.
-  * The rendered pages go into the config bundle like any other generated file,
-    which means they stage, they get tested, they swap into place atomically,
-    and they replicate to every node, all through paths that already exist.  No
-    second copy of any of that.
-  * Pictures are inlined as data URIs, so a finished page carries everything it
-    needs.  Nothing to fetch means nothing to be missing at the moment the site
-    is already in trouble.
-
-The one thing that bites, and it is a permissions problem rather than an nginx
-one: when nginx cannot *read* the file an error_page points at, it throws away
-the real status and answers 403.  A 502 turns into a 403 and the log line is
-about a file, not about the backend that actually failed.  A file that is
-simply *missing* is fine, nginx falls back to its own page and keeps the real
-status.  So the rendered pages have to be world readable, because nginx workers
-are www-data and everything else we stage is root only.  That is why the agent
-writes this one folder with a different mode.
+Gotcha: if nginx cannot read the file an error_page points at, it answers
+403 instead of the real status, and the log talks about a file rather than
+the failed backend.  (A missing file is fine; nginx falls back to its own
+page.)  So these pages must be world readable for www-data, while everything
+else we stage is root only.  The agent writes this folder with a different
+mode for that reason.
 """
 import base64
 import html as html_mod
 import re
 
-# Where the rendered pages live, and the URI a site's error_page points at.
-#
-# The path is the same on every node on purpose.  One render goes to the whole
-# fleet, so anything node specific in it is an outage on the boxes you did not
-# render on.
+# Where rendered pages live.  Same path on every node, since one render is
+# shipped to the whole fleet.
 PAGES_DIR = "errorpages"
 
-# Deliberately ugly, because it shares a URI space with whatever the site
-# already serves and a collision means somebody's real page stops working.  The
-# location is `internal`, so this is never reachable from outside whatever the
-# name is, but it still has to not be a path anybody would have chosen.
+# Deliberately odd so it can't collide with a real path on the site.  The
+# location is `internal`, so it is never reachable from outside.
 URI_PREFIX = "/__nfm_error"
 
-# What nginx will take on an error_page line.  Below 300 is not an error and
-# above 599 is not a status.
+# Range nginx accepts on an error_page line.
 MIN_CODE = 300
 MAX_CODE = 599
 
-# The codes a new template starts out covering.  Everything a site in front of
-# a backend actually produces, and nothing that would never reach a browser.
+# Codes a new template covers by default: what a proxied site commonly
+# returns.
 DEFAULT_CODES = [400, 401, 403, 404, 405, 408, 413, 429, 500, 502, 503, 504]
 
 # What each code says on the page when the template asks for {{message}}.
@@ -91,7 +75,7 @@ MESSAGES = {
     508: "Loop Detected",
 }
 
-# A friendlier line under the heading, for the codes somebody actually meets.
+# Friendlier line under the heading, for the common codes.
 EXPLANATIONS = {
     400: "The request could not be understood.",
     401: "You need to sign in to see this.",
@@ -107,12 +91,8 @@ EXPLANATIONS = {
     504: "The service behind this page took too long to answer.",
 }
 
-# Pictures we will take, keyed by the bytes a file of that type starts with.
-#
-# The check is on the file's own first bytes and not on what the browser said
-# it was, because the browser is only repeating the name the uploader typed.
-# An .png that is really something else is the ordinary case here, not a clever
-# one, and there is no reason to store it.
+# Accepted image types, by magic bytes.  We check the content rather than
+# the declared type, which only reflects the filename.
 IMAGE_SIGNATURES = (
     (b"\x89PNG\r\n\x1a\n", "image/png"),
     (b"\xff\xd8\xff", "image/jpeg"),
@@ -121,22 +101,17 @@ IMAGE_SIGNATURES = (
     (b"\x00\x00\x01\x00", "image/x-icon"),
 )
 
-# One picture, and everything one template holds.  A logo and a background is
-# the case this is built for.  These travel in every config apply to every node,
-# so the ceiling is about what is polite to push around a fleet rather than
-# about what a disk can hold.
+# Per image and per template limits.  Images travel with every apply to
+# every node, so keep them small (a logo and a background).
 MAX_IMAGE_BYTES = 256 * 1024
 MAX_IMAGES_TOTAL_BYTES = 1024 * 1024
 
-# What one rendered page is allowed to come to, pictures included.  An error
-# page is the thing you serve when the site is already struggling, so a page
-# that is megabytes of base64 is the wrong answer to that.
+# Limit for one rendered page, images included.  Error pages are served when
+# the site is already struggling.
 MAX_PAGE_BYTES = 512 * 1024
 
-# The whole placeholder language.  There is no expression, no condition and no
-# loop, because there is no engine: it is str.replace, four times, on text that
-# came out of a form.  Anything that could evaluate what is written here would
-# be a way from that form into this process.
+# The entire placeholder language.  Plain str.replace, no template engine,
+# so nothing typed into the form can be evaluated in this process.
 PLACEHOLDER_HELP = [
     ("{{code}}", "The status code, like 404."),
     ("{{message}}", "What that code is called, like Not Found."),
@@ -151,7 +126,7 @@ _IMAGE_TOKEN = re.compile(r"\{\{image:([A-Za-z0-9._-]{1,128})\}\}")
 
 
 class ErrorPageProblem(Exception):
-    """Something about a template or an upload that has to be said out loud."""
+    """A template or upload problem to show the user."""
 
 
 def message_for(code: int) -> str:
@@ -164,11 +139,9 @@ def explain_for(code: int) -> str:
 
 def valid_codes(raw) -> list:
     """
-    Clean up a list of status codes, or say why it cannot be used.
-
-    nginx refuses an error_page outside 300 to 599 and refuses a duplicate for
-    the same code in the same block, so both are settled here rather than at
-    apply time on somebody else's box.
+    Validate, dedupe and sort status codes.  nginx rejects codes outside
+    300-599 and duplicates in one block, so catch both here rather than at
+    apply time.
     """
     out = []
     for item in raw or []:
@@ -188,14 +161,11 @@ def valid_codes(raw) -> list:
 
 def sniff_image(raw: bytes, declared_name: str = "") -> str:
     """
-    Work out what an upload really is, and refuse it if it is not a picture.
+    Return the content type of an uploaded image, or raise.
 
-    SVG is the exception to reading the first bytes, because it is text and has
-    no signature to read.  It is also the only one of these that can carry
-    script, so it is checked for that rather than waved through: a browser will
-    not run script in an SVG loaded as an image, but the same file dropped into
-    a page by somebody later would, and the upload does not know which it will
-    be.
+    SVG is text with no magic bytes, and it can carry script.  Browsers don't
+    run script in an SVG loaded via <img>, but the same file inlined into a
+    page would, so SVGs with script are refused.
     """
     if not raw:
         raise ErrorPageProblem("that file is empty")
@@ -234,22 +204,16 @@ def data_uri(content_type: str, encoded: str) -> str:
 
 def _needs_bare_uri(text: str, pos: int) -> bool:
     """
-    Is the token at this offset somewhere that wants the address on its own?
+    Does the token at this offset want just the data: URI?
 
-    Three places want the bare data: address and nothing around it:
-
-      inside a quoted attribute, which is <img src="{{image:logo}}">
-      inside a CSS url(), which is background: url({{image:logo}})
-      anywhere in a <style> block, which is the same thing spread over lines
-
-    Everywhere else the person has written the token into the body of the page
-    on its own, and what they mean by that is "put the picture here".  A bare
-    data: address there renders as a screenful of base64, which is what a
-    person reported after following the help text to the letter.
+    True inside a quoted attribute (<img src="{{image:logo}}">), inside a CSS
+    url(), or anywhere in a <style> block.  Elsewhere the token stands alone
+    in the page and should become an <img> tag; a bare URI there would render
+    as a screen of base64.
     """
     before = text[:pos]
 
-    # In a style block: count the tags, because a </style> closes it.
+    # Inside a <style> block?
     if before.count("<style") > before.count("</style"):
         return True
 
@@ -257,12 +221,12 @@ def _needs_bare_uri(text: str, pos: int) -> bool:
     if re.search(r"url\(\s*[\"']?\s*$", before):
         return True
 
-    # In a tag at all?  If the last angle bracket before us opened one.
+    # Inside a tag at all?
     opened = before.rfind("<")
     if opened == -1 or before.rfind(">") > opened:
         return False
 
-    # In a tag, so in a quoted value if the quotes so far are unbalanced.
+    # Inside a quoted value if the quotes so far are unbalanced.
     quote = None
     for char in before[opened:]:
         if quote:
@@ -275,10 +239,8 @@ def _needs_bare_uri(text: str, pos: int) -> bool:
 
 def render_page(template, code: int, images_by_name: dict = None) -> str:
     """
-    Fill one template in for one status code.
-
-    Four string swaps and nothing else.  See PLACEHOLDER_HELP for why it is
-    swaps rather than a template engine.
+    Fill in one template for one status code.  Plain string swaps; see
+    PLACEHOLDER_HELP.
     """
     images_by_name = images_by_name or {}
     text = template.html or ""
@@ -287,16 +249,12 @@ def render_page(template, code: int, images_by_name: dict = None) -> str:
         name = match.group(1)
         found = images_by_name.get(name)
         if not found:
-            # A picture that is not there leaves the page short of a picture,
-            # which beats leaving the site short of an error page.  The name
-            # comes out rather than staying in as a visible {{image:...}}.
+            # Missing image: drop the token rather than fail the page.
             return ""
         uri = data_uri(found["content_type"], found["data"])
         if _needs_bare_uri(text, match.start()):
             return uri
-        # On its own in the page, so write the tag as well.  The help text and
-        # the toast after an upload both say to put the token in the page, and
-        # taking them at their word used to print the data: address as text.
+        # Standalone token: emit a full <img> tag.
         return f'<img src="{uri}" alt="{html_mod.escape(name)}">'
 
     text = _IMAGE_TOKEN.sub(swap_image, text)
@@ -319,11 +277,8 @@ def images_for(template) -> dict:
 
 def rendered_files(template) -> dict:
     """
-    Every page one template turns into, as relative path to contents.
-
-    One file per status code, because the code has to be in the page before
-    nginx serves it and nginx will not put it there.  They are small and they
-    are text, so a dozen of them is nothing.
+    All pages one template renders to, as {relative path: contents}.  One
+    file per status code, since nginx can't fill the code in itself.
     """
     folder = f"{PAGES_DIR}/{_folder_name(template.name)}"
     images = images_for(template)
@@ -349,12 +304,8 @@ def _folder_name(name: str) -> str:
 
 def starter_html() -> str:
     """
-    What a brand new template starts as.
-
-    Something that already works, because the alternative is an empty box and
-    a person guessing at the placeholder names.  No external anything: this is
-    served by a site that may well be the reason somebody cannot reach the
-    internet right now.
+    Starting HTML for a new template: a working example of the
+    placeholders, with no external resources.
     """
     return """<!doctype html>
 <html lang="en">

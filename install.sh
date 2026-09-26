@@ -4,14 +4,14 @@
 #
 # Author: Tim Rice
 #
-# Run this on every nginx box you want managed.  It sets up the host side, then
-# builds and starts the container.
+# Run this on every nginx box you want managed. It sets up the host side,
+# then builds and starts the container.
 #
 #   sudo ./install.sh                          # first node, starts a cluster
 #   sudo ./install.sh --join lb-01:7444 --token <token>   # every node after
 #   sudo ./install.sh --upgrade                # after a git pull, on every node
 #
-# What it does, in order:
+# In order, it:
 #
 #   1. Checks nginx is here and was built from source
 #   2. Makes the nginxmgr group, which is how the container reaches the agent
@@ -21,17 +21,12 @@
 #   6. Joins an existing cluster, if you gave it a token
 #   7. Turns off certbot.timer, and explains why
 #
-# --upgrade does the host side and the container and nothing else.  It exists
-# because the agent lives outside the container: pulling and rebuilding the
-# image, which is what an upgrade looks like from the outside, leaves the agent
-# exactly as it was.  A month later it is running old code against a new
-# manager, and nothing anywhere says so.
+# --upgrade does only the host side and the container. The agent lives
+# outside the container, so rebuilding the image alone leaves it running old
+# code against a new manager with no warning.
 #
-# It is safe to run again.  Anything already done is left alone, and your .env
-# is never overwritten without asking.
-#
-# The whole thing is wrapped in a { } block so "curl | bash" reads the entire
-# file before running any of it.
+# Safe to rerun. Finished steps are skipped and .env is never overwritten
+# without asking. Wrapped in { } so "curl | bash" reads the whole file first.
 # =============================================================================
 {
 set -euo pipefail
@@ -65,17 +60,10 @@ success() { echo "${c_grn}$*${c_reset}"; }
 fail()    { echo "${c_red}[error]${c_reset} $*" >&2; exit 1; }
 header()  { echo; echo "${c_cyn}== $* ==${c_reset}"; }
 
-# Things that went wrong but are not worth stopping over.
-#
-# Most of what this script does is independent.  The agent not starting has
-# nothing to do with whether the container will run, and the manager is built to
-# come up without it and say so.  So a problem gets written down and repeated at
-# the end with the fix next to it, rather than killing the install halfway and
-# leaving somebody with a half configured box and no GUI.
-#
-# Only a handful of things are actually fatal: not being root, not being in the
-# project folder, no docker, and the image not building.  Everything else is a
-# note.
+# Non-fatal problems. Most steps are independent (the manager runs without
+# the agent and says so), so problems are collected and repeated at the end
+# with a fix instead of aborting halfway with no GUI. Only no root, wrong
+# folder, no docker, or a failed image build are fatal.
 PROBLEMS=()
 problem() {
     # problem "<short title>" "<what to do about it>"
@@ -173,9 +161,7 @@ else
     log "nginx ${NGINX_VERSION}"
 fi
 
-# The manager drives the installer script when you rebuild nginx from the GUI,
-# so it needs a copy somewhere predictable.  nginx-installer.sh ships in this
-# folder for exactly this reason.
+# GUI rebuilds of nginx run the installer, so keep a copy at a known path.
 if [[ -f "$SCRIPT_DIR/nginx-installer.sh" ]]; then
     if [[ ! -f "$INSTALLER_PATH" ]] || ! cmp -s "$SCRIPT_DIR/nginx-installer.sh" "$INSTALLER_PATH"; then
         install -m 0700 "$SCRIPT_DIR/nginx-installer.sh" "$INSTALLER_PATH"
@@ -194,9 +180,8 @@ if [[ -z "$NODE_NAME" ]]; then
     NODE_NAME="$(hostname -s)"
 fi
 if [[ -z "$NODE_ADDRESS" ]]; then
-    # The address on the default route, which is usually the one peers can
-    # reach.  Worth checking though, since a box with a separate management
-    # network probably wants that address instead.
+    # The default route's source address is usually what peers can reach.
+    # Boxes with a separate management network may want that one instead.
     NODE_ADDRESS="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' | head -1)"
     [[ -n "$NODE_ADDRESS" ]] || fail "Could not work out this box's address.  Pass --address."
     warn "Guessed this node's address as ${NODE_ADDRESS}."
@@ -210,8 +195,7 @@ if [[ -n "$JOIN_TARGET" && -z "$JOIN_TOKEN" ]]; then
 fi
 
 if $UPGRADE; then
-    # An upgrade of nothing is a first install wearing the wrong hat, and it
-    # would skip every step that makes a first install work.  Better to say so.
+    # An upgrade with nothing installed would skip the first-install steps.
     [[ -f "$SCRIPT_DIR/.env" ]] || \
         fail "There is no .env here, so this node has never been installed.  Run install.sh without --upgrade."
     [[ -n "$JOIN_TARGET" ]] && \
@@ -244,9 +228,7 @@ header "Host agent"
 
 mkdir -p "$AGENT_DIR"
 
-# What was there before, so the end of the run can say whether it actually
-# moved.  "installed the agent" is what you print either way, and it is not an
-# answer to the only question anybody has after an upgrade.
+# Remember the old hash so we can report whether the agent actually changed.
 AGENT_WAS=""
 if [[ -f "$AGENT_DIR/nginx-mgr-agent.py" ]]; then
     AGENT_WAS="$(sha256sum "$AGENT_DIR/nginx-mgr-agent.py" | cut -c1-12)"
@@ -263,44 +245,10 @@ else
     log "agent updated, ${AGENT_WAS} -> ${AGENT_NOW}"
 fi
 
-# Everything the unit file lists under ReadWritePaths has to exist before the
-# agent will start.  ProtectSystem=strict makes systemd bail out with a bare
-# 226/NAMESPACE if even one of them is missing, and it does not say which.
-#
-# The letsencrypt folders normally turn up the first time certbot runs, which
-# on a new box has not happened yet.  Making them here is cheap and saves a
-# confusing failure.  The unit also marks the optional ones with a dash, so
-# this is belt and braces.
-#
-# /etc/nginx is in this list even though nginx owns it, and that is not an
-# oversight either.  This installer says the GUI comes up whether or not nginx
-# is here yet, and it leaves nginx-installer.sh behind so nginx can be built
-# later from the GUI.  Building it from the GUI means asking the agent to do
-# it.  So on a box with no nginx, the agent has to start before /etc/nginx
-# exists, or the one thing that would create it can never run.
-#
-# It is not marked optional in the unit, because an agent that starts happily
-# and then cannot write any config is worse than one that refuses to start.
-# Making the folder here is what keeps both of those true.
-# WireGuard, for the tunnel, and only if the tunnel is switched on.
-#
-# It used to go on every box.  The argument was that it is small and the
-# kernel side has been mainline for years, so it costs nothing on a box that
-# never uses it.  That is true about disk and false about everything else:
-# installing a network package nobody asked for is a decision to make on
-# somebody's server, not one to make for them.  The tunnel is off until it is
-# turned on, and so is this.
-#
-# The database is the only thing that knows whether it is on, so that is what
-# gets asked.  Read only, and no answer means no.
-#
-# It still cannot be installed at the moment somebody turns the tunnel on, for
-# the reason it was put here in the first place: the agent runs under a read
-# only filesystem with holes for the few folders it writes, and a package
-# manager needs far more than that.  Loosening that sandbox so it could
-# install software would be a much worse trade.  So a box that has the tunnel
-# turned on after this ran needs this run again, and until then the tunnel
-# verbs say wireguard is not installed on that node rather than pretending.
+# WireGuard is installed only if the tunnel is enabled, per the database
+# (read only; no answer means no). It cannot be installed later from the
+# agent, whose sandbox is too tight for a package manager, so enabling the
+# tunnel after this ran means running this again.
 tunnel_is_on() {
     command -v docker >/dev/null 2>&1 || return 1
 
@@ -310,8 +258,7 @@ tunnel_is_on() {
     path="$(docker volume inspect "$vol" --format '{{ .Mountpoint }}' 2>/dev/null)" || return 1
     [[ -f "$path/fleet.db" ]] || return 1
 
-    # python3 rather than sqlite3, which is not on every box.  The agent
-    # already needs python3, so it is always here.
+    # python3 rather than sqlite3, which is not on every box.
     python3 - "$path/fleet.db" >/dev/null 2>&1 <<'ASK'
 import sqlite3, sys
 con = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
@@ -332,6 +279,9 @@ else
     warn "the tunnel is on, but this is not apt based and wireguard-tools is not here"
 fi
 
+# Every ReadWritePaths entry in the unit must exist or systemd fails with a
+# bare 226/NAMESPACE. /etc/nginx is included so the agent can start (and
+# build nginx from the GUI) on a box where nginx is not installed yet.
 mkdir -p /var/backups/nginx-fleet-manager /var/lib/nginx-fleet-manager \
          /usr/local/lib/nginx-fleet-manager /var/www/certbot \
          /etc/letsencrypt /var/log/letsencrypt /var/lib/letsencrypt \
@@ -340,22 +290,15 @@ chmod 0750 /usr/local/lib/nginx-fleet-manager
 
 install -m 0644 "$SCRIPT_DIR/host-agent/nginx-mgr-agent.service" "$AGENT_UNIT"
 
-# The build and revert units.  These run unsandboxed, on purpose, because a
-# source build writes where a package manager writes and the agent must not be
-# allowed to.  The reasoning is in the files themselves, which is why they are
-# shipped rather than assembled at run time.
+# Build and revert units run unsandboxed on purpose: a source build writes
+# where the agent is not allowed to. The reasoning is in the unit files.
 install -m 0644 "$SCRIPT_DIR/host-agent/nginx-rebuild.service" \
         /etc/systemd/system/nginx-rebuild.service
 install -m 0644 "$SCRIPT_DIR/host-agent/nginx-revert.service" \
         /etc/systemd/system/nginx-revert.service
 
-# The tunnel install unit, and the script it runs.  Same shape and the same
-# reason: a package manager writes where the agent is not allowed to.
-#
-# These go on every box even when the tunnel is off, which is not the same
-# decision as installing wireguard itself.  A unit file and a script that do
-# nothing until asked are how somebody turns the tunnel on later without
-# finding a shell; the package is the part that waits to be wanted.
+# Tunnel install unit and script, same reason. These go on every box; they
+# do nothing until the tunnel is turned on from the GUI.
 install -m 0644 "$SCRIPT_DIR/host-agent/nfm-tunnel-install.service" \
         /etc/systemd/system/nfm-tunnel-install.service
 if [[ -f "$SCRIPT_DIR/tunnel-installer.sh" ]]; then
@@ -364,16 +307,14 @@ else
     warn "No tunnel-installer.sh in this folder, so the tunnel cannot be set up from the GUI."
 fi
 
-# Both units name the installer by its shipped path.  If it lives somewhere
-# else on this box, point them at it, the same as the agent unit above.
+# Both units name the installer by its shipped path. Fix it if it moved.
 if [[ -f "$INSTALLER_PATH" && "$INSTALLER_PATH" != "/opt/nginx-installer.sh" ]]; then
     sed -i "s|^ExecStart=/opt/nginx-installer.sh|ExecStart=${INSTALLER_PATH}|" \
         /etc/systemd/system/nginx-rebuild.service \
         /etc/systemd/system/nginx-revert.service
 fi
 
-# The unit ships with a default installer path.  Point it at wherever it really
-# is on this box.
+# Point the agent unit at the real installer path too.
 if [[ -f "$INSTALLER_PATH" ]]; then
     if ! grep -q "NFM_INSTALLER" "$AGENT_UNIT"; then
         sed -i "/^Environment=NFM_ACME_WEBROOT/a Environment=NFM_INSTALLER=${INSTALLER_PATH}" "$AGENT_UNIT"
@@ -401,9 +342,8 @@ else
     journalctl -u nginx-mgr-agent -n 15 --no-pager 2>/dev/null | sed 's/^/        /'
     echo
 
-    # 226/NAMESPACE means systemd could not build the sandbox, which nearly
-    # always means a folder in ReadWritePaths is missing.  The bare number tells
-    # you nothing, so spell it out and point at the likely one.
+    # 226/NAMESPACE means systemd could not build the sandbox, nearly always
+    # a missing ReadWritePaths folder. Spell that out.
     if systemctl show nginx-mgr-agent -p ExecMainStatus --value 2>/dev/null | grep -q '^226$'; then
         warn "That is 226/NAMESPACE: systemd could not set up the agent's sandbox."
         info "Nearly always a folder the unit wants to write does not exist."
@@ -416,9 +356,8 @@ else
         info "Make any missing folder above, then: systemctl restart nginx-mgr-agent"
     fi
 
-    # signal=SYS means seccomp shot it.  The message never says which syscall,
-    # so point at the two settings that cause it rather than leaving somebody
-    # reading "code=dumped, signal=SYS" and guessing.
+    # signal=SYS means seccomp killed it. The log never names the syscall,
+    # so point at the two settings that cause it.
     if systemctl show nginx-mgr-agent -p Result --value 2>/dev/null | grep -q 'core-dump' \
        || journalctl -u nginx-mgr-agent -n 20 --no-pager 2>/dev/null | grep -q 'signal=SYS'; then
         warn "That is SIGSYS: the syscall filter killed it, not the agent crashing."
@@ -469,26 +408,15 @@ if [[ -f "$ENV_FILE" ]]; then
         warn ".env already exists, leaving it alone."
         info "Delete it and run again if you want a fresh one."
     fi
-    # Keep the existing secret.  Generating a new one would make every stored
-    # TOTP seed and peer key unreadable, which looks exactly like the cluster
-    # falling apart.
+    # Keep the existing secret. A new one would make every stored TOTP seed
+    # and peer key unreadable.
     SECRET_KEY="$(grep '^NFM_SECRET_KEY=' "$ENV_FILE" | cut -d= -f2- || true)"
     [[ -n "$SECRET_KEY" ]] || fail "That .env has no NFM_SECRET_KEY in it."
 
-    # The .env decides who this node is, and everything above worked out who it
-    # thought this node was.  When those disagree, the .env silently wins, and
-    # up to here this script has been printing the other one.
-    #
-    # That is worth stopping for, because of how it fails.  The node comes up
-    # under the stale name, joins, and every heartbeat is refused by the other
-    # end with "it may need to rejoin", which points at credentials.  The
-    # credentials are fine.  The name is wrong, and nothing on either box says
-    # so.  Hours go into that one.
-    #
-    # It happens most often the way you would expect: somebody copies a folder
-    # from a working node to a new one to save a download, and the .env comes
-    # with it.  The file says not to in its own header, which is not much use
-    # once it has already been copied.
+    # .env decides this node's identity and silently wins over what was
+    # detected above. A mismatch, usually from copying a folder off another
+    # node, brings the node up under the wrong name, and peers then refuse
+    # its heartbeats in a way that looks like a credentials problem.
     ENV_NAME="$(grep '^NFM_NODE_NAME=' "$ENV_FILE" | cut -d= -f2- || true)"
     ENV_ADDR="$(grep '^NFM_NODE_ADDRESS=' "$ENV_FILE" | cut -d= -f2- || true)"
     if [[ -n "$ENV_NAME" && "$ENV_NAME" != "$NODE_NAME" ]]; then
@@ -501,9 +429,7 @@ if [[ -f "$ENV_FILE" ]]; then
         info "      sudo rm ${ENV_FILE} && sudo $0 $*"
         info "  To keep the name in the .env, pass --name ${ENV_NAME} to silence this."
         if [[ -n "$JOIN_TARGET" ]]; then
-            # Refused rather than warned for a join, because joining is the
-            # point at which the wrong name stops being this box's problem and
-            # starts being the whole cluster's.
+            # Refuse on a join: a wrong name then affects the whole cluster.
             fail "Not joining a cluster under a name this box does not own."
         fi
     fi
@@ -561,21 +487,19 @@ EOF
     log "wrote .env with a fresh secret"
 fi
 
-# Only worth saying on a first install.  On an upgrade the allow list is
-# whatever is in the .env we just refused to touch, and this variable is empty
-# because nobody passed the flag, not because the setting is missing.
+# First install only. On an upgrade the variable is just unset; the real
+# value is in the untouched .env.
 if [[ -z "$ADMIN_ALLOWLIST" ]] && ! $UPGRADE; then
     warn "No GUI allow list set."
     info "Anybody who can reach port 7443 gets the login page.  Set"
     info "NFM_ADMIN_ALLOWLIST in .env to your management networks and restart."
 fi
 
-# Staging is on by default on purpose.  The real service will lock you out for
-# a week if you get it wrong five times, and people always get it wrong at
-# least once.
+# Real certificates are the default.  The real service locks you out for a
+# week after five failures, so say where the switch is.
 if ! $UPGRADE; then
-    info "Certificates are pointed at the Lets Encrypt staging service to start."
-    info "Turn that off in Settings once you have one working."
+    info "Certificates come from the real Lets Encrypt service."
+    info "Turn on staging in Settings while testing an issuance that may fail."
 fi
 
 # ============================================================== build and start
@@ -598,16 +522,9 @@ if ! docker compose ps --status running 2>/dev/null | grep -q .; then
 fi
 success "      container is running"
 
-# Prove the container is running the code in this checkout.
-#
-# "docker restart does not pick up a rebuilt image" is a trap that has cost
-# time here before, and compose deciding a container is up to date is its
-# judgement rather than an answer.  Comparing image ids is no good either:
-# buildx writes a fresh attestation manifest on every build, so two ids differ
-# for identical code and the check would cry wolf every time.
-#
-# So compare the code itself.  It is the actual question, it is cheap, and
-# there is nothing to interpret.
+# Check the container runs the code in this checkout. restart does not pick
+# up a rebuilt image, and image ids differ on every build (buildx writes a
+# new attestation manifest), so compare hashes of the code itself.
 code_hash_local() {
     find "$SCRIPT_DIR/app" \( -name '*.py' -o -name '*.html' \) -type f \
         -exec sha256sum {} + 2>/dev/null | awk '{print $1}' | sort | sha256sum | cut -c1-12
@@ -652,10 +569,8 @@ if [[ -n "$JOIN_TARGET" ]]; then
         sleep 2
     done
 
-    # Keep the output.  The join says exactly why it failed, and that line is
-    # the whole diagnosis, but it used to scroll past and the summary at the end
-    # just said it did not work.  That is useless: "could not reach" and "token
-    # refused" are completely different problems.
+    # Keep the join output; its error line is the diagnosis ("could not
+    # reach" and "token refused" are very different problems).
     JOIN_LOG="$(mktemp)"
     if docker compose exec -T nginx-fleet-manager \
         python -m app.join "$JOIN_TARGET" "$JOIN_TOKEN" 2>&1 | tee "$JOIN_LOG"; then
@@ -717,10 +632,8 @@ header "Done"
 echo
 
 if $UPGRADE; then
-    # Ask the agent what it is running, rather than assuming the restart above
-    # picked up the new file.  systemd restarting cleanly and the new code
-    # being loaded are two different claims, and only one of them is worth
-    # anything after an upgrade.
+    # Ask the running agent for its fingerprint. A clean restart does not
+    # prove the new code is loaded.
     RUNNING_FP=""
     if [[ -S /run/nginxmgr/agent.sock ]]; then
         RUNNING_FP="$(python3 - <<'PYEOF' 2>/dev/null || true
@@ -767,9 +680,7 @@ info "Peers: ${NODE_ADDRESS}:7444  (firewall this to your other nodes)"
 echo
 
 if [[ -z "$JOIN_TARGET" ]]; then
-    # Dig the first login out of the log rather than telling somebody to go and
-    # grep for it.  It is printed once and once only, so the moment it scrolls
-    # off you are into resetting the account instead.
+    # Pull the first admin password from the log. It is printed only once.
     ADMIN_PW="$(docker compose logs 2>/dev/null \
         | grep -A3 'Made the first admin' | grep 'password:' \
         | sed 's/.*password: //' | tr -d '\r' | tail -1)"

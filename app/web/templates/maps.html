@@ -60,8 +60,7 @@
 </style>
 
 <script nonce="{{ csp_nonce }}">
-// Waits for app.js, which the layout loads after this block, so window.NFM
-// exists by the time anything here runs.
+// Waits for app.js, which the layout loads after this block.
 document.addEventListener("DOMContentLoaded", function () {
   const CAN_EDIT = {{ 'true' if can('edit_sites') else 'false' }};
   let SOURCES = [];

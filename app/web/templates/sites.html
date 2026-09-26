@@ -45,9 +45,9 @@
         </thead>
         <tbody>
           {% for h in hosts %}
-            {#- Server names matter as much as the site name here.  People look
-                for the name a visitor types, which is often not what the site
-                is called in this tool. -#}
+            {#- Server names matter as much as the site name. People search
+                for what a visitor types, which is often not the site's name
+                here. -#}
             {%- set searchable = [
                   h.name, h.mode or '', h.document_root or '',
                   h.pool.name if h.pool else '',

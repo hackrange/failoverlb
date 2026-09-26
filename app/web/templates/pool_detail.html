@@ -965,10 +965,8 @@ Same result, put together from parts that are in the free build.</p>
 
 {% block scripts %}
 <script nonce="{{ csp_nonce }}">
-// nginx will not accept a backup server in a pool that balances by hashing,
-// and its own complaint arrives only after an apply has been refused.  The
-// boxes are turned off here instead, with the reason next to them, so the
-// restriction is visible before anybody spends a change on finding out.
+// nginx rejects backup servers in a hashing pool, but only says so after an
+// apply fails. Disable the boxes here with the reason next to them instead.
 document.addEventListener("DOMContentLoaded", function () {
   var NO_BACKUP = {
     ip_hash: "pinning by client address",
@@ -1002,8 +1000,8 @@ document.addEventListener("DOMContentLoaded", function () {
   }
   sel.addEventListener("change", sync);
   sync();
-  // The member rows are drawn from the api after load, so run it again once
-  // they exist rather than only against the markup that shipped with the page.
+  // Member rows are drawn from the api after load, so run again once they
+  // exist.
   new MutationObserver(sync).observe(document.body, {childList: true, subtree: true});
 });
 </script>
@@ -1019,8 +1017,8 @@ document.addEventListener("DOMContentLoaded", function () {
     document.getElementById("unsaved").hidden = false;
   }
 
-  // Scoped to [data-tab] so the snippet sub tabs further down do not get
-  // swept up by this and hide the panel they live in.
+  // Scoped to [data-tab] so the snippet sub tabs below are not caught by this
+  // and hide their own panel.
   document.querySelectorAll(".tab[data-tab]").forEach(function (t) {
     t.addEventListener("click", function () {
       document.querySelectorAll(".tab[data-tab]").forEach(x => x.classList.remove("active"));
@@ -1040,8 +1038,7 @@ document.addEventListener("DOMContentLoaded", function () {
   document.getElementById("p-lb").addEventListener("change", function () { syncHash(); markDirty(); });
   syncHash();
 
-  // The name only means anything when we are actually speaking TLS, so keep it
-  // out of the way until then.
+  // The name only matters when speaking TLS, so hide it until then.
   function syncBackendTls() {
     document.getElementById("wrap-backendtlsname").style.display =
       document.getElementById("p-backendtls").checked ? "" : "none";
@@ -1065,13 +1062,10 @@ document.addEventListener("DOMContentLoaded", function () {
     const btn = this;
     btn.disabled = true;
     try {
-      // A settings put replaces the whole blob, and the fields below are the
-      // ones this page has controls for, which is not the same as every
-      // setting a pool can hold.  adaptive_floor_ms is the live example: the
-      // api takes it, the adaptive weighting reads it, and no control here
-      // offers it, so saving a pool from this page used to delete it without
-      // saying anything.  Read the pool back and merge, the way the site page
-      // does.  If the read fails, save nothing rather than a guess.
+      // A settings PUT replaces the whole blob, and this page only has
+      // controls for some fields. adaptive_floor_ms, for example, has no
+      // control here, so saving used to silently drop it. Read the pool back
+      // and merge, as the site page does. If the read fails, save nothing.
       let existing;
       try {
         existing = await NFM.api("/pools/" + POOL_ID);
@@ -1263,8 +1257,7 @@ document.addEventListener("DOMContentLoaded", function () {
           body: { text: document.getElementById("im-text").value }
         });
         NFM.closeModal();
-        // Say what was skipped.  Silently dropping the duplicates would leave
-        // somebody counting rows to work out what happened.
+        // Say what was skipped rather than silently dropping duplicates.
         if (res.skipped && res.skipped.length) {
           NFM.toast("added " + res.added.length + ", already there: " + res.skipped.join(", "), "warn");
           setTimeout(function () { window.location.reload(); }, 2500);
@@ -1303,8 +1296,8 @@ document.addEventListener("DOMContentLoaded", function () {
     renderSnippet();
   }
 
-  // The value only appears here after Show, so a shoulder surfer looking at an
-  // open pool page does not get the secret for free.
+  // Only shown after Show, so a passer-by glancing at the page does not see
+  // the secret.
   function tokenForSnippet() {
     return shownToken || "PRESS-SHOW-THE-TOKEN-TO-SEE-THIS";
   }

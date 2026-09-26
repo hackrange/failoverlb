@@ -1,9 +1,7 @@
 # Keep the build context small and keep secrets out of the image.
 #
-# Two reasons this file matters.  A smaller context means faster builds and
-# better layer caching.  More important, anything you COPY into an image stays
-# in that layer forever, even if a later line deletes it.  So a .env that
-# sneaks in here is baked into the image and shows up for anybody who pulls it.
+# Anything COPY'd into an image stays in that layer even if a later step
+# deletes it, so a stray .env would ship to anyone who pulls the image.
 
 # ==============================================================================
 # Secrets.  These must never land in an image layer.
@@ -49,9 +47,8 @@ logs/
 .gitlab-ci.yml
 
 # ==============================================================================
-# Python leftovers.  The image installs from requirements.txt, so a virtualenv
-# from the host would just be dead weight and might not even be the right
-# architecture.
+# Python leftovers.  The image installs from requirements.txt; a host
+# virtualenv is dead weight and may be the wrong architecture.
 # ==============================================================================
 __pycache__/
 *.py[cod]
@@ -74,8 +71,7 @@ dist/
 # Stuff that does not belong in the container
 # ==============================================================================
 
-# The host agent runs on the host, outside the container, on purpose.  Shipping
-# it inside the image would be confusing at best.
+# The host agent runs on the host, outside the container, on purpose.
 host-agent/
 
 # Docs and the installer are for people, not for the runtime.

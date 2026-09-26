@@ -6,8 +6,8 @@
 // Waits for app.js, which the layout loads after this block.
 document.addEventListener("DOMContentLoaded", function () {
   function cell(v) {
-    // A rate we do not have yet is different from a rate of zero, and showing
-    // 0 for "no second sample" makes a busy box look idle.
+    // No rate yet is not a rate of zero. Showing 0 before the second sample
+    // makes a busy box look idle.
     return v === null || v === undefined ? '<span class="faint">-</span>' : v;
   }
 
@@ -91,9 +91,8 @@ document.addEventListener("DOMContentLoaded", function () {
   </div>
 </div>
 
-{# The things that need attention go at the very top, before the numbers.
-   A pool with nothing healthy in it is the only thing that matters when it is
-   happening, and it should not be three scrolls down. #}
+{# Things needing attention go first. A pool with nothing healthy in it
+   should not be three scrolls down. #}
 
 {% if not allowlist_set %}
   <div class="notice warn">
@@ -187,13 +186,11 @@ document.addEventListener("DOMContentLoaded", function () {
   </div>
 </div>
 
-{# What nginx is actually doing right now, per node.
+{# What nginx is doing right now, per node.
 
-   Free nginx gives seven numbers for the whole server and nothing per site, so
-   this is deliberately modest: connections and the rates behind the counters.
-   The per site and per backend picture needs the access log parsed, which is
-   written up in docs/plus-parity.md as a plan and is not built.  Saying that
-   plainly here beats a page that looks like it should have more on it. #}
+   Free nginx only exposes seven server wide counters, so this is just
+   connections and rates. Per site and per backend numbers need access log
+   parsing, which is planned in docs/plus-parity.md but not built. #}
 <div class="card">
   <div class="card-head">
     <h2>What nginx is doing</h2>
@@ -314,8 +311,8 @@ document.addEventListener("DOMContentLoaded", function () {
   </div>
 </div>
 
-{# Help content that is not a nginx directive, so it lives in the page rather
-   than in the catalog.  Hidden until the ? is clicked. #}
+{# Help text that is not an nginx directive, so it lives here rather than in
+   the catalog. Hidden until the ? is clicked. #}
 <div hidden id="help-build">
   <div class="help-section">
     <p>The manager reads <code>nginx -V</code> off this box and works out which

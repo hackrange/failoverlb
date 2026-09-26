@@ -1,9 +1,8 @@
 # Failover LB.  One of these runs on every nginx box you have.
 #
-# There is no central server to lose.  Every node runs the same container and
-# they form a trust group.  One node is ACTIVE and takes the writes, the rest
-# sit as STANDBY and stay in sync.  Losing any one node, even the active one,
-# does not take your nginx config or your certs with it.
+# No central server.  Every node runs the same container and they form a
+# trust group: one ACTIVE node takes writes, the rest are STANDBY and stay in
+# sync.  Losing any one node, even the active one, loses no config or certs.
 #
 #   cp .env.example .env      # then edit .env
 #   docker compose up -d
@@ -19,14 +18,11 @@ services:
     container_name: nginx-fleet-manager
     restart: unless-stopped
 
-    # Host networking, and yes we mean it.  Three reasons, all of them real:
-    #
-    #   1. Health checks have to reach your backends the same way nginx does,
-    #      from the same source address.  On a bridge network the NAT would
-    #      make our idea of a pool look different from what nginx sees, and
-    #      then you are debugging a difference that does not exist.
-    #   2. Finding the public IP has to watch the host's real path out to the
-    #      internet.  That answer is what picks which node asks for the cert.
+    # Host networking is deliberate:
+    #   1. Health checks must reach backends from the same source address
+    #      nginx uses; bridge NAT would make results differ from nginx's view.
+    #   2. Public IP detection needs the host's real route out.  That decides
+    #      which node requests the cert.
     #   3. Peers talk to each other on the host's real addresses.
     network_mode: host
 
@@ -46,21 +42,16 @@ services:
       # install.sh generates this.  It encrypts the OIDC client secret, any DNS
       # provider tokens, and the peer keys where they sit in the database.
       NFM_SECRET_KEY: ${NFM_SECRET_KEY:?set NFM_SECRET_KEY in .env}
-      # Which networks are even allowed to load the web GUI.  Leaving it empty
-      # means anybody can, so set it before this sees anything but a jump box.
+      # Networks allowed to load the web GUI.  Empty means anyone can, so set
+      # it before this is reachable from anywhere but a jump box.
       NFM_ADMIN_ALLOWLIST: ${NFM_ADMIN_ALLOWLIST:-}
 
-      # Whose X-Forwarded-For we believe.  Empty means we ignore the header and
-      # use the address the connection came from, which is right when the GUI is
-      # reached directly.  Set it to the proxy's address, and only that, when
-      # you put one in front.
+      # Whose X-Forwarded-For to trust.  Empty ignores the header and uses the
+      # peer address, which is right when the GUI is reached directly.  Set it
+      # to the proxy's address only when you put one in front.
       NFM_TRUSTED_PROXIES: ${NFM_TRUSTED_PROXIES:-}
-      # Serving the GUI under a path, for putting it behind a reverse proxy at
-      # something like /lb.  Every link, form action and cookie path is built
-      # from this.  It was missing here, so the setting existed, the templates
-      # used it, and there was no way to give it a value: the login page came
-      # out with no stylesheet, which is exactly the symptom its own comment in
-      # config.py warns about.
+      # Path prefix when served behind a reverse proxy (e.g. /lb).  Links,
+      # form actions and cookie paths are built from it.
       NFM_ROOT_PATH: ${NFM_ROOT_PATH:-}
       NFM_SESSION_TIMEOUT_MINUTES: ${NFM_SESSION_TIMEOUT_MINUTES:-60}
 
@@ -85,19 +76,16 @@ services:
       NFM_DATA_DIR: /data
 
     volumes:
-      # This socket is the only way we reach the host.  Everything that needs
-      # root goes through it: writing nginx config, reloading the service,
-      # running certbot, reading cert files.  The far side checks every request
-      # against a short verb list and a path allow list.  The container has no
-      # write access to /etc/nginx or /etc/letsencrypt on its own.
+      # The only way to reach the host.  Everything that needs root (writing
+      # nginx config, reloads, certbot, reading certs) goes through it, and the
+      # agent checks each request against a verb list and a path allowlist.
       - /run/nginxmgr:/run/nginxmgr
 
       # Database, cluster CA, and this node's key pair.  Back this up.
       - nfm-data:/data
 
-      # Read only look at the nginx config so the GUI can show you what is
-      # really running, compare it to what we think we wrote, and tell you when
-      # somebody edited a file by hand.  We never write through this mount.
+      # Read-only view so the GUI can show what is really running and flag
+      # hand edits.  Never written through.
       - /etc/nginx:/host/etc/nginx:ro
       - /etc/letsencrypt:/host/etc/letsencrypt:ro
 
@@ -113,8 +101,8 @@ services:
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=64m
 
-    # This matches the nginxmgr group install.sh makes on the host and puts on
-    # the agent socket.  Without it a non root uid in here cannot open it.
+    # The host's nginxmgr group (created by install.sh), which owns the agent
+    # socket.  Without it the non-root user can't open the socket.
     group_add:
       - ${NFM_HOST_GID:-10001}
 

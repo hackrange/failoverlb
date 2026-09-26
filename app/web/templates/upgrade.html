@@ -201,9 +201,8 @@ document.addEventListener("DOMContentLoaded", function () {
       const m = await NFM.api("/upgrade/modules");
       const d = m.differences || {};
 
-      // Show what the next rebuild will actually do.  Defaulting this to
-      // unticked would quietly take the module back out of the build for
-      // anybody who rebuilt for an unrelated reason.
+      // Reflect what the next rebuild will do. Defaulting to unticked would
+      // quietly drop the module for anyone rebuilding for another reason.
       const waf = document.getElementById("u-waf");
       if (waf) waf.checked = !!m.waf_module;
       let html = '<dl class="kv">' +
@@ -363,7 +362,7 @@ document.addEventListener("DOMContentLoaded", function () {
         loadCurrent();
       }
     } catch (err) {
-      // A poll failing is not worth shouting about, the next one will do.
+      // A failed poll is not worth reporting; the next one will do.
     }
   }
 

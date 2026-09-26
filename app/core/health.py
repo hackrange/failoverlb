@@ -1,23 +1,14 @@
 """
-Watching the backends.
+Active backend health checks, in place of the NGINX Plus feature.
 
-This is the piece that replaces the paid version's active health checks.  The
-free nginx only notices a backend is bad after a real request to it already
-failed, which means a user got the error first.  We probe on a schedule instead,
-so a dead backend is out of the rotation before anybody hits it.
+Open source nginx only marks a backend bad after a real request fails.  This
+probes members on a schedule instead:
 
-How a check turns into config:
-
-  1. Probe every member on its interval.
-  2. Count passes and fails in a row.  One bad check does nothing, because a
-     single dropped packet is not an outage.
-  3. Once a member crosses its threshold, its state flips.
-  4. A state change asks for a config rewrite.  Those get debounced, so twenty
-     backends flapping at once is still one reload.
-
-The debounce is not a nicety.  Without it a network blip that fails thirty
-checks at once would queue thirty reloads, and nginx would spend the next minute
-doing nothing else.
+  1. Probe each member on its pool's interval.
+  2. Count consecutive passes and fails.
+  3. Flip the member's state once it crosses the rise/fall threshold.
+  4. Request a config rewrite.  Requests are debounced and rate limited, so
+     many members changing at once still means one reload.
 """
 
 import asyncio
@@ -36,15 +27,13 @@ from app.models import HealthEvent, MemberState, Pool, PoolMember, utcnow
 
 log = logging.getLogger("nfm.health")
 
-# Defaults for the three limits on how often a flapping backend may rewrite the
-# config.  All three are settings now, and these are only the fallback for a
-# caller that has no settings to hand.  See app/config.py for what they mean
-# and why they are as slow as they are.
+# Fallbacks for the reload rate limits; the real values come from settings.
+# See app/config.py.
 RELOAD_DEBOUNCE_SECONDS = 5
 MIN_SECONDS_BETWEEN_RELOADS = 60
 MAX_RELOADS_PER_HOUR = 12
 
-# The window the hourly ceiling is counted over.
+# Window for MAX_RELOADS_PER_HOUR.
 RELOAD_WINDOW_SECONDS = 3600
 
 
@@ -52,9 +41,8 @@ class HealthChecker:
     def __init__(self, node_name: str, on_change=None):
         self.node_name = node_name
 
-        # Called when config needs rewriting.  Set by whoever wires this up,
-        # normally the cluster manager, so a change here goes out to the fleet
-        # rather than just this node.
+        # Called when config needs rewriting.  Normally set by the cluster
+        # manager so the change goes to the whole fleet.
         self.on_change = on_change
 
         self._running = False
@@ -63,31 +51,24 @@ class HealthChecker:
         self._last_reload = 0.0
         self._lock = asyncio.Lock()
 
-        # When each of the last hour's config rewrites happened, so the ceiling
-        # can be counted over a rolling window rather than a fixed one.  A
-        # fixed window lets twice the limit through across its boundary, which
-        # on a flapping fleet is exactly when it matters.
+        # Timestamps of recent rewrites, for a rolling hourly limit.  A fixed
+        # window would allow twice the limit across its boundary.
         self._recent_reloads = deque()
 
-        # So the "something is flapping" message is said once per episode
-        # rather than on every held change.
+        # Log the throttling message once per episode.
         self._throttle_announced = False
 
-        # When each pool is next due a round of checks.  Keyed by pool id.
-        # This is what lets a pool have its own interval while the loop itself
-        # runs on the shortest one.
+        # Next check time per pool id, so each pool keeps its own interval.
         self._next_due = {}
 
-        # One client, reused.  Making a fresh one per check would redo the TLS
-        # handshake every time and the connection pool would never do anything.
+        # Shared client so connections and TLS sessions are reused.
         self._client = None
 
     async def start(self):
         self._running = True
 
-        # verify=False by default because backends very often have self signed
-        # certs, and a health check that fails on the cert tells you nothing
-        # about whether the app is up.  Per pool you can turn verification on.
+        # verify=False by default since backends often use self signed
+        # certs.  Pools can turn verification on.
         self._client = httpx.AsyncClient(
             verify=False,
             timeout=httpx.Timeout(10.0),
@@ -109,12 +90,10 @@ class HealthChecker:
 
     async def run_cycle(self):
         """
-        Check everything once.
+        Run one round of checks for every pool that is due.
 
-        Called on a timer by the scheduler.  We check every member of every pool
-        at the same time rather than one after another, because a pool with 20
-        backends and a 5 second timeout would take 100 seconds to walk serially,
-        by which point the answers at the start are already stale.
+        Called by the scheduler.  Members are checked concurrently, since
+        serial checks with timeouts would take too long on large pools.
         """
         if not self._running:
             return
@@ -125,11 +104,8 @@ class HealthChecker:
             pools = session.query(Pool).filter(Pool.health_check_enabled == True).all()  # noqa: E712
             work = []
             for pool in pools:
-                # Each pool sets its own interval, and this loop runs on the
-                # shortest one in the fleet.  So we skip any pool that is not
-                # due yet.  Without this, setting a pool to check every 60
-                # seconds would do nothing, because the loop would check it
-                # every time it ran anyway.
+                # The loop runs on the shortest interval; skip pools that
+                # are not due yet.
                 due_at = self._next_due.get(pool.id, 0)
                 if now < due_at:
                     continue
@@ -138,8 +114,8 @@ class HealthChecker:
                 for member in pool.members:
                     if not member.enabled:
                         continue
-                    # An admin taking a box out beats any check.  Do not waste a
-                    # probe on it and do not let a passing check put it back.
+                    # Maintenance overrides health; a passing check must
+                    # not bring it back.
                     if member.admin_state == "maintenance":
                         continue
                     work.append((pool, member))
@@ -188,7 +164,7 @@ class HealthChecker:
         return {"ok": ok, "detail": detail, "ms": round(elapsed, 1)}
 
     async def _check_tcp(self, address, port, timeout):
-        """Just open a socket.  Right for databases and anything not http."""
+        """TCP connect check, for non-HTTP backends."""
         try:
             reader, writer = await asyncio.wait_for(
                 asyncio.open_connection(address, port), timeout=timeout
@@ -210,19 +186,15 @@ class HealthChecker:
         url = f"{scheme}://{member.address}:{port}{path}"
 
         headers = {}
-        # The Host header matters a lot here.  A backend serving several sites
-        # by name will hand back the wrong one, or a 404, if we do not tell it
-        # which site we are asking about.  Then the health check says the
-        # backend is down when it is perfectly fine.
+        # Name-based virtual hosts need the right Host header, or they may
+        # return the wrong site or a 404 and fail the check.
         if pool.health_check_host_header:
             headers["Host"] = pool.health_check_host_header
 
         headers["User-Agent"] = "nginx-fleet-manager/health-check"
 
-        # Send the pool token if there is one.  Without this, turning on backend
-        # trust would make every health check fail the moment the backend starts
-        # enforcing it, and the manager would mark a perfectly healthy pool down
-        # and pull it out of service.  The check has to look like real traffic.
+        # Send the pool token, or backends enforcing it would fail every
+        # check and be marked down.
         if pool.token_active:
             token = pool.token
             if token:
@@ -261,14 +233,13 @@ class HealthChecker:
     # =========================================================================
 
     def _apply_result(self, session, pool, member, result) -> bool:
-        """Update the member.  Gives back True when the state actually changed."""
+        """Record a check result on the member.  True if config must change."""
         old_state = member.state
         member.last_check_at = utcnow()
         member.last_response_ms = result["ms"]
         member.check_count = (member.check_count or 0) + 1
 
-        # Rolling average, weighted toward recent checks.  A plain average over
-        # all time would take hours to notice a backend that just got slow.
+        # Exponential moving average, so recent slowness shows up quickly.
         if member.avg_response_ms:
             member.avg_response_ms = round(member.avg_response_ms * 0.8 + result["ms"] * 0.2, 1)
         else:
@@ -278,8 +249,7 @@ class HealthChecker:
             member.consecutive_ok += 1
             member.consecutive_fail = 0
             member.last_error = None
-            # Cleared here, not on the transition, so a member that recovers
-            # never carries a stale reason into the next render.
+            # Cleared on any success, not only on the transition.
             member.down_reason = None
 
             if old_state != MemberState.UP and member.consecutive_ok >= (pool.health_check_rise or 2):
@@ -298,15 +268,13 @@ class HealthChecker:
             if old_state != MemberState.DOWN and member.consecutive_fail >= (pool.health_check_fall or 3):
                 member.state = MemberState.DOWN
                 member.last_state_change = utcnow()
-                # Captured once, at the transition, and left alone from here.
-                # See PoolMember.down_reason for why this is not last_error.
+                # Set only at the transition.  See PoolMember.down_reason.
                 member.down_reason = (result["detail"] or "")[:255]
                 self._record_event(session, pool, member, old_state, MemberState.DOWN,
                                    result["detail"], result["ms"])
                 return True
 
-        # Slow start ramp.  Once a member is up, its weight climbs back to
-        # normal over the ramp window instead of taking full traffic instantly.
+        # Slow start: step the weight of a recovered member back up.
         if member.state == MemberState.UP and self._advance_slow_start(pool, member):
             return True
 
@@ -318,13 +286,10 @@ class HealthChecker:
 
     def _start_slow_start(self, pool, member):
         """
-        A member just came back.  Start it at a low weight.
+        Start a recovered member at weight 1.
 
-        This is what stops a recovered backend from being knocked straight back
-        over.  A JVM app that just restarted has a cold JIT and an empty
-        connection pool, and giving it a third of your traffic immediately is a
-        good way to make it fall over again.  Then it flaps, which is worse than
-        it having stayed down.
+        A freshly restarted app (cold caches, empty connection pools) can be
+        knocked over again by full traffic and start flapping.
         """
         cfg = pool.setting_map()
         if not cfg.get("slow_start_enabled"):
@@ -337,7 +302,7 @@ class HealthChecker:
         log.info("%s is back, ramping it up from weight 1", member.label)
 
     def _advance_slow_start(self, pool, member) -> bool:
-        """Move a ramping member's weight up a step.  True when it changed."""
+        """Advance a ramping member's weight.  True if it changed."""
         cfg = pool.setting_map()
         if not cfg.get("slow_start_enabled"):
             return False
@@ -351,9 +316,7 @@ class HealthChecker:
         started = state.get("ramp_started", time.time())
         elapsed = time.time() - started
 
-        # Climb in a handful of steps.  Continuous would be nicer but every
-        # change is a config reload, so five steps over the window is the right
-        # trade between smooth and hammering nginx.
+        # Five steps over the window, since each step is a config reload.
         steps = 5
         step_time = max(window / steps, 1)
         target_step = min(int(elapsed / step_time) + 1, steps)
@@ -376,20 +339,11 @@ class HealthChecker:
 
     def adjust_weights(self, session, pool) -> bool:
         """
-        Nudge weights based on how fast each backend has been answering.
+        Shift weights toward faster backends, using health check timings.
 
-        The paid version has least_time, which picks the fastest backend per
-        request.  We cannot do that from out here, but we are already timing
-        every health check, so we can lean traffic toward the quicker boxes.
-
-        Two rails on this, because something that automatically moves traffic
-        around can easily make a bad day worse:
-
-          - weights move a little at a time, with a floor and a ceiling, so one
-            slow check cannot pull a server out of rotation
-          - if everything is slow we leave it alone, because that means the
-            problem is downstream and shuffling weights would just pile load
-            onto whichever box is least broken
+        A rough substitute for the Plus least_time method.  Weights move one
+        step per cycle within min/max bounds, and nothing changes when every
+        member is slow, since that points to a shared downstream problem.
         """
         cfg = pool.setting_map()
         if not cfg.get("adaptive_weight_enabled"):
@@ -404,12 +358,12 @@ class HealthChecker:
         fastest = min(times)
         average = sum(times) / len(times)
 
-        # Everything is uniformly slow, so this is not a per backend problem.
+        # Slow across the board: not a per-backend problem.
         if fastest > float(cfg.get("adaptive_floor_ms", 1000)):
             log.debug("pool %s is slow across the board, leaving weights alone", pool.name)
             return False
 
-        # Everything is close enough that moving weights would just be noise.
+        # Differences too small to act on.
         if average > 0 and (max(times) - fastest) / average < 0.25:
             return False
 
@@ -422,8 +376,7 @@ class HealthChecker:
             ideal = base * (fastest / m.avg_response_ms) if m.avg_response_ms else base
             ideal = max(min_w, min(max_w, round(ideal)))
 
-            # Move one step at a time.  Jumping straight to the ideal makes
-            # traffic slosh back and forth between backends every cycle.
+            # One step at a time to avoid oscillation.
             if ideal > m.weight:
                 new = min(ideal, m.weight + 1)
             elif ideal < m.weight:
@@ -472,13 +425,10 @@ class HealthChecker:
 
     async def _wait_for_room(self, cap):
         """
-        Hold here until the last hour has room for another rewrite.
+        Wait until the rolling hourly limit has room for another rewrite.
 
-        Held, not dropped.  A change that is thrown away leaves the config
-        disagreeing with reality until something unrelated happens to apply,
-        and the whole point of this file is that the config says which backends
-        are usable.  So a flapping pool makes the next rewrite late, never
-        missing.
+        Changes are delayed, never dropped, so the config eventually matches
+        actual backend state.
         """
         while True:
             now = time.time()
@@ -504,22 +454,13 @@ class HealthChecker:
 
     async def _request_reload(self):
         """
-        Ask for a config rewrite, but not right this second.
+        Request a config rewrite, subject to three limits.
 
-        Three limits, and each one exists because of a different way this goes
-        wrong.  The debounce collects a burst into one rewrite, so a switch
-        rebooting and taking six backends with it is one reload rather than
-        six.  The floor puts a hard minimum between rewrites.  The hourly
-        ceiling catches the case neither of those does: a backend that flaps
-        steadily, slowly, for hours.
-
-        That last one is not theoretical.  On 24 August 2026 a pool went up and
-        down repeatedly, each transition rewrote the config on every node, and
-        four nginx reloads landed inside 102 seconds.  The fourth one killed
-        every worker on one node and took the site down for over an hour.  The
-        module that actually crashed has since been removed, but a health check
-        that can drive nginx that hard is worth fixing on its own, because the
-        next module to be unhappy about it will not announce itself either.
+        The debounce merges a burst of changes into one rewrite, the floor
+        sets a minimum gap between rewrites, and the hourly cap catches a
+        backend that flaps slowly for hours.  On August 24, 2026 a flapping
+        pool caused four reloads in 102 seconds, and the last one killed every
+        worker on a node.
         """
         debounce, floor, cap = self._reload_limits()
 
@@ -542,9 +483,8 @@ class HealthChecker:
                 self._recent_reloads.append(now)
                 self._last_reload = now
         finally:
-            # Cleared however we leave, including cancellation.  Left set, this
-            # node would never rewrite its config again for a health change and
-            # would look perfectly healthy while doing it.
+            # Must be cleared even on cancellation, or health changes would
+            # silently never trigger a rewrite again.
             async with self._lock:
                 self._reload_pending = False
 
@@ -561,11 +501,8 @@ class HealthChecker:
 
 def _status_matches(status: int, expected: str) -> bool:
     """
-    Does this status code count as healthy.
-
-    Takes a comma separated list of codes and ranges, like "200-399" or
-    "200,204,301".  Ranges are handy since most people mean "anything that is
-    not an error" rather than one exact code.
+    Whether a status code is healthy.  `expected` is a comma separated list
+    of codes and ranges, e.g. "200-399" or "200,204,301"; empty means 2xx/3xx.
     """
     if not expected:
         return 200 <= status < 400

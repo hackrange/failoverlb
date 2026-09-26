@@ -30,20 +30,17 @@
     {% endif %}
 
     {% if stage == 'totp' %}
-      {# Second stage.  The password already checked out, and what is carried
-         forward is a ticket that says so rather than the password itself. #}
+      {# Second stage. The password already passed, and what is carried
+         forward is a ticket saying so, not the password itself. #}
       <form method="post" action="{{ base }}/auth/login">
-        {# Posted back with the form and compared against the cookie.  A form on
-           somebody else's site can carry your cookie but cannot read it to fill
-           this in, which is what stops a cross site post. #}
+        {# Compared against the cookie. Another site can make the browser send
+           the cookie but cannot read it to fill this in, which stops CSRF. #}
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        {# A ticket, not the password.
-           The password used to be carried back through the browser here and
-           posted a second time.  Autoescaping meant it was never an injection
-           point, but it sat in the page's DOM and in the tab's history for the
-           length of the login.  This stands for "this address got the password
-           right a moment ago", expires in five minutes, is bound to the address
-           it was issued to, and is thrown away the moment a code works. #}
+        {# A ticket, not the password. The password used to be posted back a
+           second time, which left it in the DOM and tab history during login.
+           The ticket means "this address got the password right a moment
+           ago": it expires in five minutes, is bound to the issuing address,
+           and is discarded once a code works. #}
         <input type="hidden" name="half" value="{{ half }}">
 
         <div class="field">
@@ -65,10 +62,9 @@
       </div>
 
     {% else %}
-      {# Local passwords are switched off when the fleet is on the provider
-         only.  Hiding the form is presentation and nothing more; the check
-         that means it is in authenticate_local, because a form nobody can see
-         is still a URL anybody can post to. #}
+      {# Local passwords are off when the fleet is provider only. Hiding the
+         form is cosmetic; the real check is in authenticate_local, since a
+         hidden form is still a URL anyone can post to. #}
       {% if local_enabled %}
         <form method="post" action="{{ base }}/auth/login">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -94,10 +90,9 @@
            class="btn {{ 'primary' if not local_enabled }}">Sign in with single sign on</a>
       {% endif %}
 
-      {# Both switched off.  Somebody has picked the provider only and either
-         not finished setting it up or it has stopped answering, and a login
-         page with no way in on it needs to say what to do rather than look
-         broken.  The script named here is the way back. #}
+      {# Both disabled: provider only, and the provider is not set up or not
+         answering. Say what to do instead of looking broken. The script
+         named here is the way back in. #}
       {% if not local_enabled and not oidc_enabled %}
         <div class="notice warn">
           <div>
@@ -114,8 +109,8 @@
 
   </div>
 
-  {# The sign in page is the one screen somebody sees before they have an
-     account, so the attribution goes here too rather than only inside. #}
+  {# The sign in page is seen before anyone has an account, so the
+     attribution goes here too. #}
   <footer class="legal">
     NGINX&reg; is a registered trademark of F5, Inc.  Failover LB is an
     independent project, not affiliated with, endorsed by, or sponsored by

@@ -1,30 +1,15 @@
 """
-Certificates.
+Certificate issuance and distribution across the cluster.
 
-This is the part that solves the problem that makes clustered nginx annoying.
+An http-01 challenge is answered by whatever address the domain points at,
+and in a cluster only one node sits behind that address at a time, which
+failover moves. Run certbot on the wrong node and the challenge fails with
+an error that looks like a DNS problem.
 
-Lets Encrypt proves you own a domain by connecting to whatever address that
-domain points at.  In a two node setup only one of those boxes is on the end of
-that address at any given moment.  Run certbot on the other one and the
-challenge fails, every single time, and the failure looks like a DNS problem
-even though DNS is fine.
-
-Worse, the node holding that address is not fixed.  Failover moves it.  A cert
-issued from lb-01 three months ago may need to renew from lb-02 today.  So we
-work out who owns the address at renewal time, every time, and never assume the
-node that got it last time can get it again.
-
-Two things make this reliable:
-
-  Pick the issuer fresh.  Look up the domain, ask each node what its public
-  address is, and give the job to whichever node matches.
-
-  Answer from everywhere.  When certbot asks for a token, we push it to every
-  node before telling Lets Encrypt to go look.  Round robin DNS, an address
-  that just moved, a stale cache, none of it matters if every box can answer.
-
-Once a cert is issued it gets copied to every node, because they all have to
-serve it.
+So the issuing node is picked fresh every time by matching DNS against each
+node's addresses, and the challenge token is pushed to every node before the
+CA is told to look, so it doesn't matter which one it reaches. Issued
+certificates are then copied to every node, since they all serve them.
 """
 
 import asyncio
@@ -45,26 +30,14 @@ from app.models import Certificate, Node, NodeState, utcnow
 
 log = logging.getLogger("nfm.acme")
 
-# Where to look a domain up, when nobody has said otherwise.
-#
-# Public resolvers on purpose, not the box's own.  An internal resolver very
-# often has a split horizon answer pointing at a private address, and that is
-# not what the certificate authority will see.  We want the public answer,
-# because that is the one that decides which node can answer the challenge.
-#
-# This is only the default.  Plenty of places cannot reach these at all, or run
-# their own resolvers they would rather use, so it is a setting.  See
-# dns_resolvers on the settings page.
+# Default resolvers when none are configured (see dns_resolvers in
+# settings). Public on purpose: an internal resolver often has a split
+# horizon answer, and what matters is what the CA will see.
 DEFAULT_RESOLVERS = ["1.1.1.1", "8.8.8.8", "9.9.9.9"]
 
 
 def configured_resolvers() -> list:
-    """
-    Which DNS servers to ask.
-
-    Falls back to the public ones when nothing is set, which is right for a box
-    on the internet and wrong for one that is not, hence the setting.
-    """
+    """DNS servers to ask; the public defaults if none are set."""
     from app.core import settings_store
 
     chosen = settings_store.get("dns_resolvers") or []
@@ -84,13 +57,9 @@ class AcmeError(Exception):
 
 async def resolve_domain(domain: str) -> dict:
     """
-    Look a domain up the way Lets Encrypt will.
-
-    We ask more than one public resolver and merge the answers.  DNS changes
-    take time to spread, so during a failover different resolvers legitimately
-    give different answers for a while.  Taking the union means we consider
-    every node that any resolver currently points at, which is the safe way
-    round.
+    Look a domain up the way the CA will. Several resolvers are queried and
+    the answers merged, since during a DNS change they legitimately disagree
+    and the union covers every node any of them points at.
     """
     found_v4 = set()
     found_v6 = set()
@@ -98,9 +67,8 @@ async def resolve_domain(domain: str) -> dict:
 
     resolvers = list(configured_resolvers())
 
-    # Optionally ask this box's own resolver too.  Useful on a split horizon
-    # network where the internal answer is the one that matters, and harmless
-    # elsewhere because we merge the answers rather than trusting one.
+    # Optionally include the system resolver, for split horizon networks.
+    # Harmless elsewhere since the answers are merged.
     from app.core import settings_store
 
     if settings_store.get("dns_use_system_resolver"):
@@ -141,17 +109,12 @@ async def resolve_domain(domain: str) -> dict:
 
 async def pick_issuing_node(domain: str) -> dict:
     """
-    Decide which node should ask for this cert.
+    Decide which node should request this certificate, in order:
 
-    In order of preference:
-
-      1. A node whose detected public address is one the domain resolves to.
-         This is the right answer and it is the one that will actually work.
-      2. A node that has that address on one of its own interfaces.  Covers a
-         floating VIP, where the address is on the box but its outbound path
-         goes somewhere else.
-      3. The active node, as a last resort, with a warning.  Better to try and
-         get a clear error than to refuse and do nothing.
+      1. A node whose public address is one the domain resolves to.
+      2. A node holding that address on an interface (a floating VIP whose
+         outbound traffic leaves some other way).
+      3. The active node, with a warning. A clear error beats doing nothing.
     """
     dns_result = await resolve_domain(domain)
 
@@ -174,7 +137,7 @@ async def pick_issuing_node(domain: str) -> dict:
 
         wanted = set(dns_result["all"])
 
-        # Best case, a node's public address is one the domain points at.
+        # Best case: a node's public address matches.
         for node in online:
             if node.public_ip and node.public_ip in wanted:
                 return {
@@ -185,10 +148,8 @@ async def pick_issuing_node(domain: str) -> dict:
                     "dns": dns_result,
                 }
 
-        # Next, the address is sitting on one of its interfaces.  This is the
-        # floating VIP case, where the box holds the address but its own traffic
-        # goes out through something else, so its detected public address does
-        # not match even though it is the right box.
+        # Floating VIP: the address is on an interface even though outbound
+        # traffic makes the public address look different.
         for node in online:
             local = {a.get("address") for a in node.local_address_list()}
             overlap = local & wanted
@@ -201,9 +162,8 @@ async def pick_issuing_node(domain: str) -> dict:
                     "dns": dns_result,
                 }
 
-        # Nothing matched.  Usually means the domain points at something in
-        # front, like a cloud load balancer or a CDN, and the challenge will
-        # never reach any of these boxes over http.
+        # No match. Usually a cloud load balancer or CDN in front, which an
+        # http-01 challenge can never get through.
         active = next((n for n in online if n.role.value == "active"), None)
         return {
             "node": active.name if active else (online[0].name if online else None),
@@ -225,16 +185,9 @@ async def pick_issuing_node(domain: str) -> dict:
 
 class ChallengeCoordinator:
     """
-    Puts the challenge token on every node, not just the one asking.
-
-    This is what makes issuance reliable rather than lucky.  Lets Encrypt picks
-    which address to connect to and does not tell us in advance.  With round
-    robin DNS, or an address that just moved, or a resolver holding a stale
-    answer, the request can easily land on a node that is not the one running
-    certbot.  If only that node had the file, the challenge fails and the error
-    tells you nothing useful.
-
-    Put the token everywhere and it does not matter which one they hit.
+    Puts the challenge token on every node, not just the one running
+    certbot. The CA picks the address it connects to, and round robin DNS,
+    a recently moved address or a stale cache can send it to any node.
     """
 
     def __init__(self):
@@ -270,8 +223,7 @@ class ChallengeCoordinator:
                 )
                 results["ok"].append(info["name"])
             except Exception as exc:
-                # One node failing is not fatal.  As long as the node the
-                # validation server actually hits has the file, it works.
+                # Not fatal; only the node the CA actually reaches needs it.
                 log.warning("could not put the token on %s: %s", info["name"], exc)
                 results["failed"].append({"node": info["name"], "error": str(exc)})
 
@@ -301,7 +253,7 @@ class ChallengeCoordinator:
                     client = PeerClient(node, self.cluster.ca)
                 await client.call("/peer/acme/token", {"action": "delete", "token": token})
             except Exception:
-                # A leftover token file is harmless.  It is a random name in a
+                # A leftover token file is harmless: a random name in a
                 # folder that only serves challenge files.
                 pass
 
@@ -320,10 +272,8 @@ class CertificateManager:
 
     async def issue(self, cert_id: int, force: bool = False, actor: str = "system") -> dict:
         """
-        Get or renew a certificate, from whichever node can actually do it.
-
-        Every time.  Not from whoever did it last time.  That is the whole
-        point, because the node that owns the public address moves.
+        Issue or renew a certificate from whichever node can do it right
+        now, never assuming the previous issuer still can.
         """
         with session_scope() as session:
             cert = session.query(Certificate).filter(Certificate.id == cert_id).first()
@@ -340,19 +290,13 @@ class CertificateManager:
             cert_name = cert.name
             propagation = cert.dns_propagation_seconds
 
-            # Which authority, read off the certificate rather than off a
-            # setting.
+            # Use the authority recorded on the certificate, so a renewal
+            # goes back to whoever issued it rather than silently switching
+            # issuers.
             #
-            # This is what makes a renewal go back to whoever issued it.  A
-            # certificate bought from one authority that quietly renews from
-            # another is a change nobody asked for, and the first sign of it is
-            # a browser complaining about an issuer somebody did not choose.
-            #
-            # Read here, inside the session, with everything else this function
-            # needs.  Reaching for cert.authority further down is a lazy load on
-            # a row whose session has closed, which is a DetachedInstanceError
-            # and a 500 on the page: every Lets Encrypt request on this fleet
-            # failed that way, including the ones that have no authority at all.
+            # Read it here, inside the session. Touching cert.authority after
+            # the session closes is a lazy load on a detached row and raises
+            # DetachedInstanceError.
             authority = cert.authority
             if authority is not None:
                 if not authority.enabled:
@@ -376,8 +320,8 @@ class CertificateManager:
         if not domains:
             raise AcmeError("that certificate has no domains on it")
 
-        # Whatever an admin put in Settings, falling back to the environment.
-        # Blank is fine, see settings_store.acme_email for why.
+        # From Settings, falling back to the environment. Blank is allowed;
+        # see settings_store.acme_email.
         from app.core import settings_store
 
         email = settings_store.acme_email()
@@ -385,8 +329,8 @@ class CertificateManager:
 
         # ---- pick the node ---------------------------------------------------
         if challenge_type == "dns-01":
-            # dns-01 does not need any inbound connection, so any node can do
-            # it.  Use the active one and keep it simple.
+            # dns-01 needs no inbound connection, so any node works. Use the
+            # active one.
             with session_scope() as session:
                 me = self.cluster.self_node(session)
                 issuer = self.settings.node_name if me and me.role.value == "active" else None
@@ -413,7 +357,7 @@ class CertificateManager:
             eab_hmac = issuer_settings["eab_hmac"]
             preferred_chain = issuer_settings["preferred_chain"]
         else:
-            # Lets Encrypt, which needs no credentials and is the default.
+            # Let's Encrypt: the default, and needs no credentials.
             directory = (settings_store.get("acme_directory_url") or "").strip()
             eab_kid = ""
             eab_hmac = ""
@@ -421,8 +365,7 @@ class CertificateManager:
 
         request = {
             "domains": domains,
-            # Send our own name for it, so certbot files it under the same name
-            # we will look it up by afterwards.
+            # Our own name, so certbot files it where we'll look for it.
             "cert_name": cert_name,
             "email": email,
             "staging": staging,
@@ -440,14 +383,9 @@ class CertificateManager:
             request["dns_credentials"] = dns_creds
             request["dns_propagation"] = propagation
         else:
-            # The hooks are what make the token land on every node.  certbot
-            # calls them, they call our local API, and that pushes the token out
-            # to the cluster before certbot tells Lets Encrypt to go and look.
-            #
-            # Write them first, every time.  A node that was rebuilt will not
-            # have them, and the failure without this is "hook ... is not a file
-            # on this box", which says what is wrong but nothing about why or
-            # what to do about it.
+            # The hooks push the token to every node before certbot tells the
+            # CA to look. Written every time, since a rebuilt node won't have
+            # them and the resulting certbot error is unhelpful.
             from app.core import acme_hooks
 
             written = await acme_hooks.ensure_hooks()
@@ -503,23 +441,18 @@ class CertificateManager:
                 raise AcmeError(f"{node_name} is not on the roster")
             client = PeerClient(node, self.cluster.ca)
 
-        # Long timeout.  Waiting on Lets Encrypt plus DNS propagation on a
-        # dns-01 challenge can genuinely take minutes.
+        # Long timeout: the CA plus dns-01 propagation can take minutes.
         return await client.call("/peer/acme/issue", request, timeout=600)
 
     # -------------------------------------------------------------------------
 
     async def replicate(self, cert_id: int) -> dict:
         """
-        Copy a cert to every other node.
+        Copy a certificate to every node, since only one could obtain it.
 
-        They all serve the same sites, so they all need the same cert.  Only one
-        of them could get it, so the rest have to be handed a copy.
-
-        The private key goes over the wire here.  That is unavoidable and it is
-        fine: the channel is mutual TLS between two nodes that already hold
-        certificates from the same private CA, and the key lands at 0600 owned
-        by root on the far side.
+        The private key crosses the wire here. That's acceptable: the channel
+        is mutual TLS between nodes with certificates from the cluster CA,
+        and the key lands 0600 root on the far side.
         """
         with session_scope() as session:
             cert = session.query(Certificate).filter(Certificate.id == cert_id).first()
@@ -532,7 +465,7 @@ class CertificateManager:
                 for p in self.cluster.peers(session)
             ]
 
-        # Get the files from whichever node holds them.
+        # Fetch the files from whichever node holds them.
         if source_node == self.settings.node_name or not source_node:
             try:
                 export = await get_agent().cert_export(name=name)
@@ -555,12 +488,9 @@ class CertificateManager:
 
         results = {"ok": [], "failed": []}
 
-        # Put a copy in this node's synced folder, even when this is the node
-        # certbot wrote the real files on.  Having the files somewhere is not
-        # enough, they have to be at the path the rendered config names, and
-        # that path is now the synced folder on every node.  Skipping this on
-        # the issuing node left it as the only node without a copy where the
-        # config looks, which is the one node everybody assumes is fine.
+        # Import into this node's synced folder too, even if certbot ran
+        # here. The rendered config points at the synced folder on every
+        # node, not at certbot's copy.
         try:
             await get_agent().cert_import(name=name, bundle=bundle)
             await _reload_for_new_cert(name)
@@ -568,10 +498,8 @@ class CertificateManager:
         except AgentError as exc:
             results["failed"].append({"node": self.settings.node_name, "error": str(exc)})
 
-        # Push to every peer, the node the files came from included.  It has the
-        # certbot copy, which is not the copy the config reads, and sending the
-        # same bytes back costs one write and removes a way for that node to sit
-        # there looking fine while nginx cannot find its certificate.
+        # Push to every peer, including the one the files came from; its
+        # certbot copy isn't the path the config reads.
         for info in peers:
             try:
                 with session_scope() as session:
@@ -601,7 +529,7 @@ class CertificateManager:
     # -------------------------------------------------------------------------
 
     async def refresh_metadata(self, cert_id: int, node_name: str = None) -> dict:
-        """Read the dates and names back off the real file."""
+        """Read the dates and names back from the actual certificate."""
         with session_scope() as session:
             cert = session.query(Certificate).filter(Certificate.id == cert_id).first()
             if not cert:
@@ -637,8 +565,8 @@ class CertificateManager:
                 cert.issuer = info["issuer"][:255]
                 cert.serial = info["serial"][:128]
                 cert.fingerprint = info["fingerprint"]
-                # Empty when the authority publishes no responder, which is
-                # now the normal case rather than the exception.
+                # Empty when the CA publishes no OCSP responder, which is
+                # now common.
                 cert.ocsp_url = (info.get("ocsp_url") or "")[:255] or None
                 if info.get("domains"):
                     cert.domains = json.dumps(info["domains"])
@@ -650,18 +578,12 @@ class CertificateManager:
 
     async def place_material(self, cert_id: int) -> dict:
         """
-        Write a certificate we hold ourselves to every node.
+        Write a certificate whose material we store (uploaded, self signed
+        or completed CSR) to every node.
 
-        Uploaded, self signed and completed signing requests all keep the
-        material in the database, so this needs no source node and no export
-        from anywhere: it reads the row and writes the files.
-
-        That is a real difference from a Lets Encrypt certificate, not an
-        implementation detail.  Those live in certbot's folder on whichever node
-        issued them, so a node that never had them has to be handed a copy by a
-        node that did, and if no such node is up there is nothing to be done.
-        These can be rebuilt on any node from the database, which the snapshot
-        already carries everywhere, so they come back on their own.
+        Unlike Let's Encrypt certificates, which live in certbot's folder on
+        the issuing node, these can be rebuilt on any node from the
+        database, so no source node is needed.
         """
         from app.core.crypto import decrypt
 
@@ -677,9 +599,8 @@ class CertificateManager:
             peers = [{"id": p.id, "name": p.name} for p in self.cluster.peers(session)]
 
         if not privkey:
-            # The key is sealed with this node's secret.  Failing to open it
-            # means NFM_SECRET_KEY changed, and writing the certificate without
-            # a key would leave nginx pointed at half a pair.
+            # The key is encrypted with this node's secret. Failure means
+            # NFM_SECRET_KEY changed; don't write a cert without its key.
             raise AcmeError(
                 f"the stored private key for {name} will not decrypt.  That "
                 f"happens when NFM_SECRET_KEY changed on this node.  Upload the "
@@ -710,13 +631,8 @@ class CertificateManager:
                 log.error("could not copy %s to %s: %s", name, info["name"], exc)
                 results["failed"].append({"node": info["name"], "error": str(exc)})
 
-        # Record which nodes got it, the same way issuing does.
-        #
-        # This is what the "copied to" count on the page reads.  Writing the
-        # files without writing this leaves a certificate that really is on
-        # every node reading as 0 of 2 forever, with a "copy to all" button that
-        # never stops being offered.  A column that is wrong is worse than no
-        # column, because somebody acts on it.
+        # Record which nodes got it, like issue() does. The page's "copied
+        # to" count reads this, and without it the cert shows 0 of N forever.
         import hashlib
         checksum = hashlib.sha256(fullchain.encode()).hexdigest()[:16]
 
@@ -734,21 +650,13 @@ class CertificateManager:
 
     async def verify_files(self):
         """
-        Check the certificates we think exist are really on disk.
+        Check that certificates we think exist are actually on disk.
 
-        The database and the filesystem drift apart more easily than you would
-        expect.  A node restored from a backup older than the certificate, a
-        rebuilt box, somebody clearing /etc/letsencrypt to free space.  The row
-        stays, the files do not.
-
-        It matters because the renderer points nginx at those paths.  A missing
-        file means nginx will not start, which means the config cannot be
-        applied anywhere, which means one stale certificate row blocks every
-        change you try to make until somebody works out why.
-
-        So we look, and mark the ones that are not there.  The renderer then
-        leaves their https block out and says so, which keeps the rest of the
-        fleet working while you sort the certificate out.
+        The database and filesystem drift: restores from older backups,
+        rebuilt boxes, someone clearing /etc/letsencrypt. A missing file
+        stops nginx from loading, which blocks every apply. Missing ones are
+        marked so the renderer drops their https block and the rest of the
+        config still applies.
         """
         from app.core.render import CERT_SYNC_DIR
 
@@ -764,32 +672,25 @@ class CertificateManager:
             if not was_issued:
                 continue
 
-            # Check the path the config actually names, which is the synced
-            # folder on every node now.  Checking certbot's folder on the
-            # issuing node made that node report the certificate present while
-            # the file nginx was told to open was somewhere else entirely.
+            # Check the path the config names: the synced folder on every
+            # node, not certbot's folder on the issuer.
             path = f"{CERT_SYNC_DIR}/{name}/fullchain.pem"
 
             present = True
             try:
                 await agent.read_file(path)
             except AgentError as exc:
-                # Only a missing file counts.  The agent being unreachable tells
-                # us nothing about whether the certificate is there, and marking
-                # it missing on that basis would drop https from every site the
-                # moment the agent restarted.
+                # Only a missing file counts. An unreachable agent says
+                # nothing about the file, and treating it as missing would
+                # drop https everywhere on an agent restart.
                 if getattr(exc, "code", "") in ("not_found", "denied"):
                     present = False
                 else:
                     continue
 
-            # Anything we hold the material for can put itself back.
-            #
-            # This is the case a promoted standby lands in: the snapshot brought
-            # the row, so the certificate is right there in the database, and
-            # the only thing missing is a file.  Waiting for a person to notice
-            # and press something would mean the site serves plain http until
-            # they do, when nothing was actually lost.
+            # If we hold the material, write it back. Typical for a promoted
+            # standby: the row came with the snapshot and only the file is
+            # missing, so there's no reason to serve plain http meanwhile.
             if not present:
                 with session_scope() as session:
                     cert = session.query(Certificate).filter(
@@ -825,18 +726,11 @@ class CertificateManager:
         """
         Check each certificate's domains still point at this fleet.
 
-        Renewal works by the certificate authority connecting to whatever the
-        domain resolves to.  Point it somewhere no node answers and the renewal
-        fails, but not today: today the certificate is still valid and every
-        page says so.  It fails in ninety days, on a schedule nobody is watching,
-        long after whoever moved the record has stopped thinking about it.
+        If a record is moved away, renewal will fail when it comes due, long
+        after anyone remembers the change. Warn while there's time.
 
-        So we compare what the domain resolves to against every address the
-        fleet knows it has, and say so while there is still time to fix it.
-
-        A resolver that will not answer is not a mismatch.  DNS being down tells
-        us nothing about where the record points, and marking every certificate
-        broken because a resolver timed out would be worse than saying nothing.
+        A resolver that doesn't answer is not a mismatch; we don't flag
+        certificates just because DNS timed out.
         """
         with session_scope() as session:
             certs = [
@@ -858,9 +752,8 @@ class CertificateManager:
         for cert_id, name, domains in certs:
             unowned, owned, failed = [], [], []
 
-            # Resolve once and keep both halves.  Looking it up twice invites
-            # two different answers, which is exactly the sort of thing that
-            # makes a warning appear and vanish for no visible reason.
+            # Resolve once and use both halves, so the warning can't flicker
+            # between two different answers.
             for domain in domains or [name]:
                 result = await resolve_domain(domain)
                 if not result["resolved"]:
@@ -870,7 +763,7 @@ class CertificateManager:
                     (owned if address in ours else unowned).append(address)
 
             if not owned and not unowned:
-                # Every lookup failed.  Say nothing rather than cry wolf.
+                # Every lookup failed. Don't cry wolf.
                 if failed:
                     log.warning("could not resolve %s to check its dns", ", ".join(failed))
                 continue
@@ -909,23 +802,17 @@ class CertificateManager:
 
     async def check_renewals(self):
         """
-        Renew anything that is getting close to expiry.
+        Renew anything close to expiry.
 
-        This is the manager's own scheduler, and it replaces the certbot timer
-        on purpose.  The stock timer runs on every box, and on a node that does
-        not own the public address the renewal fails every time it fires.  You
-        end up with a mailbox full of failures from two of your three nodes and
-        the real problem buried in there somewhere.
-
-        Doing it here means the decision about which node runs certbot gets made
-        fresh each time, with current DNS.
-
-        install.sh turns certbot.timer off for exactly this reason.
+        Replaces the stock certbot timer, which runs on every box and fails
+        on every node that doesn't own the public address. Here the issuing
+        node is chosen fresh each time. install.sh disables certbot.timer
+        for this reason.
         """
         with session_scope() as session:
             if not self.cluster.is_active(session):
-                # Only the active node drives renewals.  Otherwise every node
-                # tries at once and they race each other into the rate limits.
+                # Only the active node renews, or nodes race each other into
+                # the rate limits.
                 return
 
             due = [
@@ -942,9 +829,8 @@ class CertificateManager:
                 await self.issue(cert_id)
             except AcmeError as exc:
                 log.error("renewal of cert %s failed: %s", cert_id, exc)
-            # Space them out.  Lets Encrypt rate limits are real, and hammering
-            # them with ten renewals at once is a good way to get blocked for a
-            # week, which is much worse than these taking a couple of minutes.
+            # Space them out. Hitting rate limits can get you blocked for a
+            # week.
             await asyncio.sleep(5)
 
     def _record_failure(self, cert_id: int, error: str):
@@ -962,11 +848,8 @@ class CertificateManager:
 
 def _explain_certbot_error(output: str) -> str:
     """
-    Turn certbot's output into something you can act on.
-
-    certbot's errors are accurate and almost useless if you have not seen them
-    before.  These are the ones that actually come up, with what to do about
-    them.
+    Turn certbot's output into something actionable, covering the errors
+    that actually come up.
     """
     text = (output or "").lower()
 
@@ -997,9 +880,8 @@ def _explain_certbot_error(output: str) -> str:
         )
 
     if "unauthorized" in text and "challenge" in text:
-        # Dig the address the CA actually connected to out of the output.  It
-        # is the single most useful thing in there and it is buried in a wall
-        # of text, so pull it to the front.
+        # Pull out the address the CA actually connected to; it's the most
+        # useful detail and it's buried in the output.
         import re as _re
 
         hit_ip = None
@@ -1007,17 +889,12 @@ def _explain_certbot_error(output: str) -> str:
         if m:
             hit_ip = m.group(1)
 
-        # If the hook reported success, the token really was written.  That
-        # changes the diagnosis completely: this is not a distribution problem,
-        # it is a reachability one, and saying so saves somebody an hour of
-        # looking at the wrong half.
+        # If the hook reported success the token was written, so this is a
+        # reachability problem, not a distribution one.
         hook_worked = '"ok":true' in (output or "") or '"ok": true' in (output or "")
 
-        # The hook printing an error instead of ok means the token was never
-        # written anywhere, and every other explanation below is a red herring.
-        # The CA's 404 is then just the symptom.  Worth catching, because
-        # sending somebody to look at port 80 when their hook is broken wastes
-        # a lot of time.
+        # A hook error means the token was never written and the CA's 404 is
+        # just the symptom. Catch this first so nobody goes chasing port 80.
         hook_error = None
         m_hook = _re.search(
             r"Hook '--manual-auth-hook'[^\n]*ran with output:\s*(.+)", output or ""
@@ -1124,22 +1001,14 @@ def get_cert_manager() -> CertificateManager:
 
 async def _reload_for_new_cert(name: str):
     """
-    Make nginx pick up a certificate that just landed on this node.
+    Reload nginx so it picks up a certificate that just landed.
 
-    nginx reads certificate files once, when it loads, and holds them in memory.
-    New bytes on disk change nothing until it is told to look again.
+    nginx reads certificate files at load time. Without a reload a renewal
+    is invisible: the GUI shows the new certificate while nginx keeps
+    serving the old one until it expires.
 
-    Without this a renewal is invisible.  The files are replaced 30 days before
-    expiry, every page in the GUI says the certificate is current, and nginx
-    goes on serving the old one until something unrelated reloads it.  If
-    nothing does, it serves an expired certificate with a valid one sitting
-    right there on disk, which is a miserable thing to debug at the point it
-    starts costing you visitors.
-
-    A reload that fails is logged and swallowed.  The copy did work, the files
-    are correct, and throwing here would report a replication failure for
-    something that replicated fine.  The usual reason is that nginx is already
-    unhappy about unrelated config, and that is its own alarm.
+    Failures are logged, not raised. The files were copied correctly, and a
+    failing reload usually means nginx is unhappy about something else.
     """
     try:
         await get_agent().reload()
@@ -1153,17 +1022,11 @@ async def _reload_for_new_cert(name: str):
 
 async def test_authority_credentials(authority) -> dict:
     """
-    Prove an authority's credentials work, without issuing anything.
+    Check an authority's credentials by registering a throwaway account with
+    the given external account binding. No certificate is requested.
 
-    Registers an account against the directory with the external account
-    binding it was given, and throws the account away.  No certificate is asked
-    for, so nothing is spent and no rate limit is touched that matters.
-
-    This exists because these credentials fail in a particular way.  A key id
-    with a character missing is accepted by every box on the screen and refused
-    by the authority at registration, and registration happens at issue time.
-    For a renewal that is months later, unattended, at whatever hour the timer
-    runs.  Somebody finds out when a browser complains.
+    A mistyped EAB key id is otherwise only rejected at registration, which
+    for a renewal happens months later, unattended.
     """
     from app.core.agent_client import get_agent
     from app.core.crypto import decrypt

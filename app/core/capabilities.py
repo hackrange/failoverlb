@@ -1,17 +1,11 @@
 """
 Working out what this nginx can actually do.
 
-We read the configure line back out of nginx -V and turn it into a set of
-module names.  The GUI then only offers settings that will really load.
-
-This matters more than it sounds.  The installer script builds nginx with a
-specific list of modules, and people edit that list.  Somebody drops the image
-filter module to speed up their build, and now every image filter setting in
-the GUI writes config that makes nginx refuse to start.  Reading the real build
-means that cannot happen.
-
-It also means the GUI adapts on its own.  Add a module to the installer, rerun
-it, and the settings for it just show up.
+We parse the configure line from nginx -V into a set of module names, and
+the GUI only offers settings that will actually load.  The installer's module
+list gets edited; if someone drops a module, its settings would otherwise
+write config nginx refuses to start with.  Adding a module to the installer
+makes its settings appear automatically.
 """
 
 import logging
@@ -20,9 +14,8 @@ import re
 log = logging.getLogger("nfm.caps")
 
 
-# Built in modules that are always compiled unless somebody went out of their
-# way to turn them off.  These are the --without- ones, so we assume they are
-# there and only drop them if we see them being disabled.
+# Modules compiled in by default.  Assumed present unless we see a
+# matching --without- flag.
 ALWAYS_ON = {
     "http_charset_module", "http_gzip_module", "http_ssi_module",
     "http_userid_module", "http_access_module", "http_auth_basic_module",
@@ -41,10 +34,8 @@ ALWAYS_ON = {
 
 def parse_build_info(build_info: str) -> dict:
     """
-    Pull apart the output of nginx -V.
-
-    Gives back the version, the OpenSSL version, the module set, and the raw
-    configure arguments.
+    Parse nginx -V output into version, OpenSSL version, module set and the
+    raw configure arguments.
     """
     result = {
         "nginx_version": None,
@@ -64,9 +55,9 @@ def parse_build_info(build_info: str) -> dict:
     if m:
         result["nginx_version"] = m.group(1)
 
-    # Two shapes show up here.  A distro build says "built with OpenSSL 3.0.2",
-    # and a source build against its own OpenSSL says "running with".  Catch
-    # both, and prefer the running one since that is what is actually loaded.
+    # Distro builds say "built with OpenSSL x", source builds against their
+    # own OpenSSL say "running with".  Prefer "running with": that is what is
+    # actually loaded.
     m = re.search(r"running with OpenSSL\s+(\S+)", build_info)
     if not m:
         m = re.search(r"built with OpenSSL\s+(\S+)", build_info)
@@ -86,7 +77,7 @@ def parse_build_info(build_info: str) -> dict:
     for flag in re.findall(r"--with-([a-z0-9_]+_module)", args):
         modules.add(flag)
 
-    # --without-http_gzip_module means it is not there, so take it back out.
+    # --without-http_gzip_module and friends
     for flag in re.findall(r"--without-([a-z0-9_]+_module)", args):
         modules.discard(flag)
 
@@ -101,16 +92,15 @@ def parse_build_info(build_info: str) -> dict:
     if "http_v3_module" in modules:
         result["has_http3"] = True
 
-    # Third party modules come in as --add-module=/some/path/name.  The folder
-    # name is what we key on, which is why the installer clones each one into a
-    # folder named after the module.
+    # Third party modules appear as --add-module=/some/path/name.  We key on
+    # the folder name, so the installer clones each into a folder named after
+    # the module.
     for path in re.findall(r"--add-(?:dynamic-)?module=(\S+)", args):
         name = path.rstrip("/").split("/")[-1]
         result["third_party"].append(name)
         modules.add(name)
 
-        # Map the folder names the installer uses onto friendlier names, so a
-        # feature can ask for either one.
+        # Features can ask for either the folder name or the short alias.
         alias = THIRD_PARTY_ALIASES.get(name)
         if alias:
             modules.add(alias)
@@ -119,8 +109,7 @@ def parse_build_info(build_info: str) -> dict:
     return result
 
 
-# The installer clones these into folders with these exact names.  Some of them
-# are a mouthful, so features can ask for the short version instead.
+# Installer folder names mapped to short names features can ask for.
 THIRD_PARTY_ALIASES = {
     "headers-more-nginx-module": "headers_more",
     "lua-nginx-module": "lua",
@@ -138,9 +127,8 @@ THIRD_PARTY_ALIASES = {
     "geoip2": "geoip2",
     "modsecurity-nginx": "modsecurity",
     "ModSecurity-nginx": "modsecurity",
-    # nchan is no longer in the build, see the note in nginx-installer.sh.
-    # This mapping stays because a node that has not been rebuilt yet still has
-    # it compiled in, and its module list should still read properly.
+    # nchan was dropped from the build (see nginx-installer.sh), but nodes
+    # not yet rebuilt still have it compiled in.
     "nchan": "nchan",
     "nginx-upstream-fair": "upstream_fair",
     "upstream-fair": "upstream_fair",
@@ -150,9 +138,7 @@ THIRD_PARTY_ALIASES = {
 
 class Capabilities:
     """
-    What one node's nginx can do.
-
-    Held in memory and refreshed whenever we get a status back from the agent.
+    What one node's nginx can do.  Refreshed on each agent status reply.
     """
 
     def __init__(self, build_info: str = "", version: str = ""):
@@ -188,10 +174,8 @@ class Capabilities:
 
     def supports_post_quantum(self) -> bool:
         """
-        Does this build have the post quantum key exchange.
-
-        Needs OpenSSL 3.5 or newer.  The installer builds against 3.5, so a box
-        set up with it will say yes.  A distro nginx almost certainly will not.
+        Post quantum key exchange needs OpenSSL 3.5+.  The installer builds
+        against 3.5; distro nginx builds usually won't have it.
         """
         if not self.openssl_version:
             return False
@@ -215,35 +199,25 @@ class Capabilities:
         }
 
 
-# The capabilities of the node we are running on.  Filled in at startup and
-# refreshed on every agent status call.
+# This node's capabilities, set at startup and on every agent status call.
 _local_caps = Capabilities()
 
 
 def fleet_capabilities() -> Capabilities:
     """
-    What every node in the fleet can do, as a set.
+    What every node in the fleet can do: what the GUI offers and what the
+    renderer may emit.
 
-    This is what the GUI offers and what the renderer is allowed to emit, and
-    it is the intersection rather than this node's own list.  Two reasons, and
-    both have bitten:
+    It is the intersection across nodes, since the config is identical
+    everywhere and a setting missing on one box blocks the whole apply.
 
-      The config is identical on every node, because that is the whole point.
-      Offer a setting that only three of your four boxes were built with, and
-      the fourth refuses to start on the next apply.  The two phase apply
-      catches it before anything goes live, so nothing breaks, but you are left
-      with a change that will not go out and no obvious reason why.
+    Read from the per-node build info in the database, not a process global,
+    so every worker and background job renders the same config.  A global is
+    only set at startup, and a job in another context would render with no
+    modules at all.
 
-      The module list is read back out of nginx -V and kept in the database
-      against each node.  Reading it from there rather than a variable in this
-      process means every worker, and every background job, renders exactly the
-      same config.  A process global is only filled in by startup, so a job
-      running in a different context would quietly render with no modules at
-      all and drop every gated feature.
-
-    A node we have never heard from is not counted.  It has told us nothing, so
-    treating its silence as "supports nothing" would empty the set the moment a
-    box went down.
+    Nodes that have never reported are ignored, so one box going down does
+    not empty the set.
     """
     from app.db import session_scope
     from app.models import Node
@@ -255,23 +229,15 @@ def fleet_capabilities() -> Capabilities:
         ]
 
     if not infos:
-        # Nothing known yet, so fall back to whatever this node worked out for
-        # itself.  Better than claiming nothing is available.
+        # Nothing reported yet; fall back to this node's own view.
         return _local_caps
 
     common = common_capabilities(infos)
 
-    # Built is not loaded, and the gate has to ask for loaded.
-    #
-    # Everything above comes out of `nginx -V`, which reports what was compiled
-    # in.  It cannot say whether a `load_module` line was ever written, and a
-    # module nginx has not been told about is one that fails the config test
-    # the first time anything uses it.  Since an apply is all or nothing, that
-    # is not one broken site, it is a fleet that cannot apply anything.
-    #
-    # So modsecurity is dropped from what the fleet is offered unless every
-    # node says it is loaded.  A node that has not said yet is not counted
-    # against it, the same as everywhere else here: silence is not a no.
+    # `nginx -V` shows what was compiled, not whether `load_module` was
+    # written.  An unloaded module fails the config test, and since applies
+    # are all or nothing that blocks the whole fleet.  So modsecurity is only
+    # offered if every node that has reported says it is loaded.
     if "modsecurity" in common:
         with session_scope() as session:
             answered = [n.waf_module_loaded for n in session.query(Node).all()
@@ -279,20 +245,17 @@ def fleet_capabilities() -> Capabilities:
         if answered and not all(answered):
             common = {m for m in common if m not in ("modsecurity", "modsecurity-nginx")}
 
-    # Version and OpenSSL come from this node, since they are only used for
-    # display and for the post quantum check, which is per build anyway.
     merged = Capabilities()
     merged.modules = common
-    # Both of these come from what the nodes reported, not from a variable in
-    # this process.  A process global is only filled in by startup, so anything
-    # running in another context saw no OpenSSL version at all and decided the
-    # fleet could not do post quantum when it could.
+    # nginx and OpenSSL versions also come from node reports rather than the
+    # process global, which is empty outside the startup context and made the
+    # post quantum check wrongly fail.
     parsed = [parse_build_info(i) for i in infos]
     versions_seen = [p["nginx_version"] for p in parsed if p["nginx_version"]]
     openssl_seen = [p["openssl_version"] for p in parsed if p["openssl_version"]]
 
     merged.nginx_version = min(versions_seen) if versions_seen else _local_caps.nginx_version
-    # The oldest OpenSSL in the fleet, for the same reason as the nginx version.
+    # Oldest OpenSSL in the fleet.
     merged.openssl_version = (
         min(openssl_seen, key=_openssl_sort_key) if openssl_seen
         else _local_caps.openssl_version
@@ -303,9 +266,8 @@ def fleet_capabilities() -> Capabilities:
     merged.has_http3 = "http_v3_module" in common
     merged.configure_args = _local_caps.configure_args
 
-    # The oldest nginx in the fleet is what decides which directives can be
-    # used, for the same reason as the module set: the config is identical
-    # everywhere, so it has to work on the oldest box you have.
+    # The oldest nginx decides which directives can be used, since the same
+    # config must work on every box.
     versions = []
     with session_scope() as session:
         for n in session.query(Node).all():
@@ -324,7 +286,7 @@ def fleet_capabilities() -> Capabilities:
 
 
 def _openssl_sort_key(version: str):
-    """Sort OpenSSL versions numerically rather than as text, so 3.10 beats 3.9."""
+    """Numeric sort key for OpenSSL versions, so 3.10 sorts after 3.9."""
     parts = []
     for chunk in str(version).split("."):
         digits = "".join(c for c in chunk if c.isdigit())
@@ -334,11 +296,9 @@ def _openssl_sort_key(version: str):
 
 def module_differences() -> dict:
     """
-    Which nodes are missing which modules.
-
-    Shown on the cluster page.  A node built from a different module list is
-    the sort of thing that goes unnoticed until a setting mysteriously will not
-    apply, so it is worth saying out loud.
+    Which nodes are missing which modules, for the cluster page.  A node
+    built with a different module list otherwise goes unnoticed until a
+    setting mysteriously won't apply.
     """
     from app.db import session_scope
     from app.models import Node
@@ -389,12 +349,8 @@ def set_local_capabilities(build_info: str, version: str = "") -> Capabilities:
 
 def common_capabilities(node_build_infos: list) -> set:
     """
-    The modules every node in the fleet has.
-
-    This is what the GUI actually offers.  A setting that works on three of your
-    four boxes is worse than useless, because the config syncs everywhere and
-    the fourth one refuses to start.  So we only offer the common set, and the
-    cluster page points out any node that is the odd one out.
+    The modules every node in the fleet has.  Only these are offered, since
+    the config syncs everywhere and one node lacking a module rejects it.
     """
     if not node_build_infos:
         return set()

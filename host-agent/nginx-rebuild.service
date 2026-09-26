@@ -2,61 +2,40 @@
 Description=Rebuild nginx from source for the fleet manager
 Documentation=file:///opt/nginx-installer.sh
 
-# This exists because of what a source build actually does.  It apt installs
-# compilers and headers, clones and builds luajit into /usr/local, compiles
-# nginx under /usr/local/src, replaces /usr/sbin/nginx, and keeps a rollback
-# copy under /var/backups.  In other words it writes almost everywhere a
-# package manager would.
+# A source build installs compilers, builds luajit into /usr/local, compiles
+# nginx, replaces /usr/sbin/nginx and keeps a rollback copy in /var/backups.
+# The agent runs under ProtectSystem=strict with a short list of writable
+# paths, and widening that for one verb would weaken it for all the others.
 #
-# The agent cannot do that itself.  It runs with ProtectSystem=strict and a
-# short list of writable paths, and that hardening is worth keeping: it is what
-# stands behind the other twenty odd verbs, every one of which only ever needs
-# to touch nginx config, certificates and its own socket.  Widening the agent's
-# paths far enough to compile software would remove that protection from all of
-# them, to help the one verb that needs it.
-#
-# So the build runs here instead, as its own unit, with no sandboxing at all.
-# That is deliberate and it is the point of the file.  Keeping it as a unit you
-# can read, rather than something the agent assembles at run time, means the one
-# unconfined thing in this system is a dozen lines you can check before you
-# install it.
+# So the build runs here, deliberately unsandboxed, as a static unit you can
+# read before installing rather than something the agent builds at run time.
 
 [Service]
 Type=oneshot
 
-# Which version to build.  The agent writes this file, having first checked
-# every value against a version shaped pattern, and it is the only input this
-# unit takes.  On a tmpfs, so it does not outlive a reboot.
+# Versions to build, the only input.  The agent validates each value before
+# writing it.  Lives on tmpfs, so it does not survive a reboot.
 EnvironmentFile=/run/nginxmgr/rebuild.env
 
 ExecStart=/opt/nginx-installer.sh install
 
-# How the build went, written where the agent can read it.
-#
-# You would think the agent could just ask systemd afterwards.  It cannot: a
-# oneshot unit that has finished and is not referenced by anything gets unloaded,
-# and every timestamp and result property comes back as zero.  A build that
-# succeeded ten seconds ago is indistinguishable from one that never ran.
-#
-# So the unit records its own outcome as it stops.  systemd fills these two in
-# for ExecStopPost, and this file existing is what tells the agent the build is
-# over.  The agent deletes it before asking for a new one.
+# Record the outcome for the agent.  A finished oneshot unit that nothing
+# references gets unloaded and its result properties read as zero, so a
+# successful build looks like one that never ran.  This file existing means
+# the build is over; the agent deletes it before starting another.
 ExecStopPost=/bin/sh -c 'echo "${SERVICE_RESULT} ${EXIT_STATUS}" > /run/nginxmgr/rebuild.result'
 
-# Both streams to one file, because a build that fails does so in stderr and a
-# log missing half the story is worse than no log.  The agent reads the tail of
-# this back so the GUI can show progress without anybody sshing in.
+# Both streams to one file, since failures land on stderr.  The agent tails
+# this so the GUI can show progress.
 StandardOutput=append:/var/log/nginx-fleet-manager-upgrade.log
 StandardError=append:/var/log/nginx-fleet-manager-upgrade.log
 
-# A build is ten to twenty minutes.  An hour is generous enough that a slow box
-# is not cut off part way, and short enough that a wedged build does not sit
-# there forever holding the fleet walk open.
+# A build takes 10 to 20 minutes.  An hour covers a slow box without letting
+# a wedged build hold the fleet walk open forever.
 TimeoutStartSec=3600
 
-# Deliberately not RemainAfterExit.  The agent asks systemd whether this unit is
-# still going to decide if the build has finished, and a unit that stays active
-# after it exits would read as a build that never ends.
+# The agent polls whether this is still active, so it must not stay active
+# after exit.
 RemainAfterExit=no
 
 [Install]

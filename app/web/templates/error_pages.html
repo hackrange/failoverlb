@@ -144,11 +144,8 @@
 </style>
 
 <script nonce="{{ csp_nonce }}">
-// Waiting for DOMContentLoaded is not about the elements being there.  app.js
-// is the last thing in the layout, after this block, so an inline script that
-// runs straight away runs before window.NFM exists.  Everything here goes
-// through NFM, so without the wait the whole page does nothing and the only
-// sign of it is a table that never stops saying it is loading.
+// app.js loads after this block, so window.NFM does not exist yet when this
+// runs. Wait for DOMContentLoaded, or the page silently does nothing.
 document.addEventListener("DOMContentLoaded", function () {
   const BASE = document.querySelector('meta[name=nfm-base]').content;
   const MESSAGES = {{ messages | tojson }};
@@ -166,9 +163,8 @@ document.addEventListener("DOMContentLoaded", function () {
     try {
       data = await NFM.api("/error-pages");
     } catch (err) {
-      // Written without NFM on purpose.  If this handler needs the very thing
-      // that failed, a page that cannot load says nothing at all and looks
-      // like it is still working.
+      // No NFM here on purpose. If the error path needs what failed, a
+      // broken page says nothing and looks like it is still loading.
       const cell = document.createElement("td");
       cell.colSpan = 5;
       cell.className = "faint";
@@ -267,9 +263,9 @@ document.addEventListener("DOMContentLoaded", function () {
   function refreshPreview() {
     if (!current) { return; }
     const code = el("preview-code").value || 404;
-    // Loaded by URL rather than srcdoc so the page arrives with its own
-    // sandbox policy, which is what keeps somebody else's markup off this
-    // origin.  See sandboxed_html_headers on the server side.
+    // Loaded by URL rather than srcdoc so the page gets its own sandbox
+    // policy and foreign markup stays off this origin. See
+    // sandboxed_html_headers on the server.
     el("preview").src = BASE + "/api/error-pages/" + current.id +
                         "/preview?code=" + encodeURIComponent(code);
   }

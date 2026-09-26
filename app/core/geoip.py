@@ -1,24 +1,19 @@
 """
 The country database, and keeping it on every node.
 
-Blocking by country needs a MaxMind format database next to nginx, on every
-node, or the node without one refuses the whole config and the apply is turned
-away.  Telling somebody to go and install a file on each box by hand is how a
-feature ends up switched on in the GUI and broken in the fleet, so this puts it
-there and keeps it current.
+Blocking by country needs a MaxMind format database next to nginx on every
+node, or the node without one rejects the config and the apply fails.  This
+installs it everywhere and keeps it current.
 
-Two sources, and the only difference is whether you need an account:
+Two sources:
 
-  db-ip     free, monthly, nothing to sign up for.  Attribution is asked for,
-            which the settings page shows.
-  MaxMind   free, and wants an account id and a licence key.  Ask for one at
-            maxmind.com if you would rather have theirs.
+  db-ip     free, monthly, no account.  Asks for attribution, which the
+            settings page shows.
+  MaxMind   free, needs an account id and a license key from maxmind.com.
 
-Both are the same format once downloaded, so nothing past the agent cares which
-was used.  The manager never sends a URL or a path: it names a source, and the
-agent decides everything else.  A verb that took a URL and a destination would
-be a way to write any file anywhere as root, which is the one thing the agent
-exists not to be.
+Both download to the same format.  The manager only names a source; the agent
+picks the URL and path.  A verb that took a URL and a destination would let
+the caller write any file as root, which the agent exists to prevent.
 """
 import logging
 from datetime import datetime, timedelta, timezone
@@ -30,8 +25,8 @@ log = logging.getLogger("nfm.geoip")
 
 SOURCES = ("dbip", "maxmind")
 
-# How often to go and look, by name.  Never is a real answer: a fleet with no
-# egress to either source wants the file put there once by hand and left alone.
+# Refresh intervals.  "never" is for fleets with no egress to either source,
+# where the file is installed once by hand.
 SCHEDULES = {
     "never": None,
     "daily": timedelta(days=1),
@@ -59,18 +54,15 @@ def _payload() -> dict:
     return payload
 
 
-# Moved to fleet_verbs, since the rule set install needs exactly the same thing.
-# Kept as a name here so nothing that already calls it has to change.
+# Moved to fleet_verbs (the rule set install uses it too).  Alias kept for
+# existing callers.
 _ask_every_node = ask_every_node
 
 
 async def install_on_fleet() -> dict:
     """
-    Put the database on every node, and remember when.
-
-    Every node rather than the one somebody is looking at, because a pool is
-    served by whichever node is active and a config is only as appliable as the
-    least equipped box in the fleet.
+    Install the database on every node and record when.  Any node may end up
+    active, so all of them need it.
     """
     payload = _payload()
     results = await _ask_every_node("geoip_install", payload)
@@ -113,11 +105,9 @@ async def fleet_status() -> dict:
 
 async def refresh_if_due() -> dict:
     """
-    The scheduled half.  Cheap when there is nothing to do, which is most ticks.
+    Scheduled refresh.  Cheap when nothing is due, which is most ticks.
 
-    Runs from the active node only.  Two nodes downloading the same database at
-    the same moment is bandwidth for nothing, and the install covers the whole
-    fleet anyway.
+    Only the active node runs it; the install covers the whole fleet anyway.
     """
     from app.core.cluster import get_cluster
     from app.db import session_scope

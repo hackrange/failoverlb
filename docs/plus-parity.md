@@ -68,16 +68,14 @@ that.  The very first request is the exception: there is no cookie yet, so it
 goes wherever the client's address hashes to, and the cookie takes over from the
 second request onward.  Plus behaves the same way for the same reason.
 
-**Two things about the cookie that are not obvious**, both of which were wrong
-in the first version of this and produced a feature that looked configured and
-did the opposite of its name:
+**Two things about the cookie that are not obvious:**
 
 The value has to be *stable* and does not have to mean anything.  It is a
 request id.  What makes a client stick is the same string coming back every
 time, not what the string says.  Writing the backend's own address in there
 seems natural and is actively harmful: the hash of an address does not land on
 that address, it lands wherever it lands, so the next response writes a
-different backend into the cookie and the client walks round the pool one
+different backend into the cookie and the client walks around the pool one
 request at a time.
 
 And it must only be set when the client does not already have one.  Setting it
@@ -88,7 +86,7 @@ the whole thing.
 out of a pool of four reshuffles roughly everybody.  With it, only the users who
 were on that one backend move.  Everybody else stays put and never notices.
 
-**Worth saying anyway:** the real fix is to not need sticky sessions.  Put
+**Better still:** the real fix is to not need sticky sessions.  Put
 sessions in redis or your database and any backend can serve any user.  Then you
 can take servers out whenever you want.  Sticky sessions are a workaround for
 apps that keep session state in local memory, and they come with a real cost:
@@ -149,7 +147,7 @@ distribution can make a bad situation worse:
   problem is downstream of the pool, and shifting weights around would just
   concentrate the load somewhere.
 
-**Honest comparison:** Plus reacts per request.  Ours reacts on a cycle, so it
+**Comparison:** Plus reacts per request.  Ours reacts on a cycle, so it
 is minutes not milliseconds.  For backends that are consistently different
 speeds, like a mixed hardware pool, it works well.  For traffic that spikes in
 seconds, `least_conn` on its own reacts faster and you should just use that.
@@ -158,16 +156,13 @@ seconds, `least_conn` on its own reacts faster and you should just use that.
 
 ---
 
-### The live activity dashboard  — NOT BUILT
+### The live activity dashboard (not built)
 
-**This section describes something that does not exist.**  It is kept because
-the design is right and it is what should be built, but nothing below this line
-is in the product today.  Read it as a plan, not as instructions.
+**This section describes something that does not exist yet.**  It is the
+planned design; nothing below is in the product today.
 
-There is a `log_parsing_enabled` setting in the database and nothing reads it.
-There is no log tailer, no `stub_status` scraper and no dashboard page.  The
-Setup line at the end of this section used to say "on by default", which was the
-worst kind of wrong: documentation promising a feature nobody had written.
+There is a `log_parsing_enabled` setting in the database, but nothing reads it.
+There is no log tailer, no `stub_status` scraper and no dashboard page.
 
 **Plus does:** `ngx_http_api_module` and the status dashboard.  Live numbers per
 server zone and per upstream, request rates, response codes, latency.
@@ -254,8 +249,6 @@ require specific claims.
 ---
 
 ## What we did not rebuild
-
-Being straight about the gaps matters more than a tidy table.
 
 **HLS, DASH and f4f streaming.** These are `ngx_http_hls_module` and friends,
 compiled into the nginx binary, and there is no way to add them from out here.

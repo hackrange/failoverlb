@@ -14,13 +14,10 @@ What happens, in order:
   4. We save all that, then ask the sponsor for the rest of the roster so we
      know about every other node, not just the one we joined through.
 
-The token is the only thing standing between somebody and a cluster
-certificate, which is why it is single use and short lived.
-
-This talks to the sponsor over TLS but cannot check its certificate yet, since
-we do not have the CA at that point.  That is unavoidable in any join flow and
-it is why the token matters.  We pin what we got afterwards, so this one moment
-is the only window.
+The token is the only thing between somebody and a cluster certificate, so
+it is single use and short lived. The first request to the sponsor cannot
+verify its certificate because we do not have the CA yet; after that we pin
+what we received.
 """
 
 import asyncio
@@ -54,14 +51,9 @@ async def join_cluster(sponsor: str, token: str) -> dict:
 
     ca = ClusterCA()
 
-    # A node makes itself a CA the first time it starts, before anybody has had
-    # a chance to join it anywhere.  So "do you have a CA" is the wrong question
-    # to ask here, and asking it would mean you could never join a node that had
-    # ever been switched on.
-    #
-    # The real question is whether this node is already somebody's cluster: does
-    # it have peers, or config anybody is relying on.  If not, the CA it made
-    # for itself is worth nothing and we can throw it away.
+    # Every node makes itself a CA on first start, so having one means
+    # nothing. Refuse only if this node already has peers or config;
+    # otherwise its self-made CA is unused and can be discarded.
     if ca.exists() and ca.ca_key_path.is_file():
         init_db()
         with session_scope() as session:
@@ -99,10 +91,8 @@ async def join_cluster(sponsor: str, token: str) -> dict:
         "gui_port": settings.gui_port,
     }
 
-    # We cannot verify the sponsor yet, because the whole point of this call is
-    # to get the CA that would let us.  Every join protocol has this moment.
-    # The token is what makes it safe enough: it is single use, it expires in a
-    # couple of hours, and it only ever goes to an address you typed yourself.
+    # No CA yet, so the sponsor cannot be verified. The token is single use,
+    # expires in two hours, and only goes to an address the operator typed.
     context = ssl.create_default_context()
     context.check_hostname = False
     context.verify_mode = ssl.CERT_NONE
@@ -184,9 +174,8 @@ async def join_cluster(sponsor: str, token: str) -> dict:
         me.priority = settings.cluster_priority
         me.is_self = True
         me.state = NodeState.ONLINE
-        # A node that just joined is a standby.  It has no config yet, so making
-        # it active would mean the cluster's newest and emptiest member is the
-        # one taking changes.
+        # Start as standby: a fresh node has no config yet and should not be
+        # the one taking changes.
         me.role = NodeRole.STANDBY
         me.cert_fingerprint = ca.node_fingerprint()
         me.joined_at = utcnow()

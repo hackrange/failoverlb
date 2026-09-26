@@ -1,42 +1,39 @@
 /* =============================================================================
    Failover LB, front end.
 
-   Plain JavaScript.  No framework, no build step, no packages.  For a tool that
-   has to work on an isolated network while something is on fire, a page that
-   renders from the HTML the server sent beats one that needs a bundle to load
-   first.
+   Plain JavaScript. No framework, no build step, no packages. It has to work
+   on an isolated network during an outage, so pages render from the server's
+   HTML without a bundle.
 
    Three jobs in here:
      1. Talk to the API and always send the CSRF token
      2. Show the help popups
-     3. Small bits of page behaviour
+     3. Small bits of page behavior
    ============================================================================= */
 
 (function () {
     "use strict";
 
     // ------------------------------------------------------------- path prefix
-    // Empty in the normal case, something like /test when a proxy in front puts
-    // us on a sub path.  Everything the page fetches goes through this, so both
-    // cases work with no other change.
+    // Empty normally, something like /test when a proxy puts us on a sub path.
+    // Everything the page fetches goes through this.
     function basePath() {
         const meta = document.querySelector('meta[name="nfm-base"]');
         return meta ? meta.getAttribute("content") || "" : "";
     }
 
     // ------------------------------------------------------------------ CSRF
-    // The token is in a cookie our own script can read.  We copy it into a
-    // header on every write.  A form posted from another site carries the
-    // cookie, because browsers do that, but it cannot read that cookie to set
-    // the header, so it fails.  That is the double submit pattern.
+    // The token is in a cookie our script can read, copied into a header on
+    // every write. A cross site form carries the cookie but cannot read it to
+    // set the header, so it fails. Double submit pattern.
     function csrfToken() {
         const match = document.cookie.match(/(?:^|;\s*)nfm_csrf=([^;]+)/);
         return match ? decodeURIComponent(match[1]) : "";
     }
 
     // ------------------------------------------------------------------- API
-    // Set once the pending banner is wired up.  Kept at this level so api()
-    // can nudge it after a write without knowing anything about the banner.
+    // Set once the pending banner is wired up, so api() can nudge it after a
+    // write without knowing about the banner.
     let pendingRefresh = null;
 
     async function api(path, options) {
@@ -63,8 +60,8 @@
             throw new Error("Could not reach the manager.  Is it still running?");
         }
 
-        // A 401 means the session went away, usually because it timed out.
-        // Send them to the login page rather than showing a confusing error.
+        // A 401 means the session ended, usually a timeout. Go to the login
+        // page rather than showing a confusing error.
         if (response.status === 401) {
             window.location.href = basePath() + "/login";
             throw new Error("signed out");
@@ -81,24 +78,20 @@
             throw new Error(formatError(detail) || ("request failed with " + response.status));
         }
 
-        // Is this page still the page the server is serving.
+        // Is this page still the one the server is serving?
         //
-        // A tab already open is never re-fetched, however good the cache
-        // headers are, and most of this GUI's JavaScript is inline in the
-        // template.  So a tab left open across an upgrade keeps running the
-        // old script, and the failures look like bugs in the feature rather
-        // than an old page: a form missing a field that shipped, a button
-        // calling an endpoint that moved.  Both of those were reported as
-        // faults before this existed.
+        // Open tabs are never refetched, and most of the JavaScript is inline
+        // in templates. So a tab left open across an upgrade runs old script,
+        // and the failures look like feature bugs: a missing form field, a
+        // button calling an endpoint that moved.
         //
-        // Checked here because every page talks to the API, so it costs one
-        // header comparison and needs no timer, no extra request, and nothing
-        // to remember to wire up on a new page.
+        // Checked here because every page uses the API, so it is one header
+        // comparison with no timer or extra request.
         checkBuild(response.headers.get("X-NFM-Build"));
 
-        // Anything that changed something may have made the saved config differ
-        // from the running one, so ask again rather than waiting for the timer.
-        // Skipped for the status call itself, which would loop forever.
+        // A write may have made saved config differ from running, so recheck
+        // now instead of waiting for the timer. Skipped for the status call
+        // itself to avoid a loop.
         if (method !== "GET" && method !== "HEAD" && pendingRefresh) {
             pendingRefresh();
         }
@@ -106,9 +99,8 @@
         return data;
     }
 
-    // The apply endpoint hands back a structured object when a node refuses,
-    // because knowing which node said no and what nginx told it is the whole
-    // point.  Flatten it into something readable.
+    // When a node refuses, apply returns a structured object saying which node
+    // and what nginx said. Flatten it into something readable.
     function formatError(detail) {
         if (!detail) return null;
         if (typeof detail === "string") return detail;
@@ -129,11 +121,8 @@
     // ---------------------------------------------------------------- toasts
     // ------------------------------------------------------- the page is old
     //
-    // Said once, and left up.  A toast disappears, and the whole problem here
-    // is that somebody carries on for another ten minutes wondering why a
-    // feature is missing.  It does not reload on its own either: the page may
-    // have half filled a form, and taking that away to fix a problem they have
-    // not noticed yet is a worse trade than a line at the top of the screen.
+    // Shown once and left up, not as a toast, so it is not missed. It does not
+    // reload on its own, since that could throw away a half filled form.
     let buildWarned = false;
 
     function checkBuild(serverBuild) {
@@ -170,15 +159,14 @@
         box.textContent = message;
         holder.appendChild(box);
 
-        // Errors stay long enough to actually read, since they often contain
-        // several lines of nginx output.
+        // Errors stay long enough to read, since they often contain several
+        // lines of nginx output.
         setTimeout(function () { box.remove(); }, kind === "bad" ? 12000 : 4500);
     }
 
     // ----------------------------------------------------------- help popups
-    // The content comes from the same catalog the forms and the config renderer
-    // read, so the help can never end up describing something the tool does not
-    // actually do.
+    // Content comes from the same catalog as the forms and config renderer, so
+    // help cannot describe something the tool does not do.
     let catalogCache = null;
 
     async function loadCatalog(context) {
@@ -257,13 +245,10 @@
 
         document.body.appendChild(backdrop);
 
-        // A modal holding a form does not close when you click the backdrop.
+        // A modal holding a form does not close on a backdrop click.
         //
-        // For a help popup, click anywhere to dismiss is what everybody expects
-        // and there is nothing to lose.  For a form it is the opposite: you
-        // have typed a hostname, a port and three settings, your mouse clips
-        // the edge of the box, and it is all gone with no undo.  That is a
-        // horrible thing to do to somebody and it is entirely avoidable.
+        // Click anywhere to dismiss suits help popups, where nothing is lost.
+        // On a form one stray click would throw away everything typed.
         //
         // So forms close on the X, the Close button, or Escape, and Escape asks
         // first if anything has been filled in.
@@ -282,10 +267,9 @@
                 return;
             }
 
-            // The backdrop itself.  Only dismisses when there is nothing to
-            // lose.  The target check also stops a click that begins inside the
-            // box and drifts out from closing it, which otherwise ruins
-            // selecting text.
+            // The backdrop itself. Only dismisses when there is nothing to
+            // lose. The target check also stops a click that starts inside
+            // the box and drifts out, which would break text selection.
             if (e.target === backdrop && !hasForm) {
                 closeModal();
             }
@@ -306,9 +290,7 @@
         closeModal();
     }
 
-    // Has anybody actually put anything in this form?  Nothing typed means
-    // nothing to warn about, and a confirm box on an untouched form is just
-    // noise.
+    // Has anything been entered in this form? If not, skip the confirm.
     function modalHasContent(backdrop) {
         const fields = backdrop.querySelectorAll("input, select, textarea");
         for (const field of fields) {
@@ -330,9 +312,8 @@
     }
 
     // ------------------------------------------------------------------ icons
-    // Drawn by hand as inline SVG.  No image files, no icon font, nothing
-    // fetched from anywhere.  Keeps the content security policy tight and means
-    // the whole GUI works with no outside network at all.
+    // Inline SVG, drawn by hand. Nothing fetched, which keeps the CSP tight and
+    // works with no outside network.
     const ICONS = {
         warn: '<svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.5 15 14H1L8 1.5zm0 4a.7.7 0 0 0-.7.8l.25 3.2a.45.45 0 0 0 .9 0l.25-3.2A.7.7 0 0 0 8 5.5zm0 5.4a.8.8 0 1 0 0 1.6.8.8 0 0 0 0-1.6z"/></svg>',
         info: '<svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 3a.9.9 0 1 1 0 1.8A.9.9 0 0 1 8 4zm1.2 8H6.8v-.9h.7V7.9h-.7V7h2.1v4.1h.3V12z"/></svg>',
@@ -388,9 +369,8 @@
             }
         });
 
-        // Static help, where the text is written into the page rather than
-        // coming from the catalog.  Used for things that are not nginx
-        // directives, like the cluster and certificate pages.
+        // Static help written into the page rather than from the catalog, for
+        // things that are not nginx directives (cluster, certificates).
         document.body.addEventListener("click", function (e) {
             const trigger = e.target.closest("[data-help-static]");
             if (!trigger) return;
@@ -407,10 +387,9 @@
             );
         });
 
-        // Applying, shared by the page button and the one in the pending
-        // banner.  Both get the real handler rather than one forwarding clicks
-        // to the other, because forwarding put every bit of feedback on the
-        // wrong button and the banner looked dead when it was working fine.
+        // Apply, shared by the page button and the pending banner. Both get
+        // the real handler; forwarding clicks put the feedback on the wrong
+        // button and made the banner look dead.
         async function doApply(btn) {
             btn.disabled = true;
             const original = btn.textContent;
@@ -449,8 +428,7 @@
             }
         });
 
-        // Show what applying would actually change.  "Something is pending" is
-        // half an answer, and the other half should not require applying it to
+        // Show what applying would change, without having to apply it to
         // find out.
         const showBtn = document.getElementById("pending-config-show");
         if (showBtn) {
@@ -488,9 +466,8 @@
             });
         }
 
-        // Saved is not live.  Check on load, then keep an eye on it, because
-        // the editors save over the API without reloading the page and the
-        // banner would otherwise stay wrong until you navigated.
+        // Saved is not live. Check on load, then poll, because the editors
+        // save over the API without a reload and the banner would go stale.
         const banner = document.getElementById("pending-config");
         if (banner) {
             async function refreshPending() {
@@ -512,8 +489,8 @@
                         }
                     }
                 } catch (err) {
-                    // Losing the session or the network is its own alarm
-                    // elsewhere.  Do not flash a banner about it.
+                    // Lost session or network is reported elsewhere. No
+                    // banner for it here.
                 }
             }
             pendingRefresh = refreshPending;
@@ -523,15 +500,13 @@
 
         // Filter boxes.
         //
-        // Anything with data-filter="<selector>" filters the things that
-        // selector matches, on the text in their data-search attribute.  Built
-        // once here rather than per page, so sites, pools and certificates
-        // behave the same and there is one place to fix.
+        // data-filter="<selector>" filters the matching elements on their
+        // data-search text. Built once here so every list page behaves the
+        // same.
         //
-        // Client side on purpose.  These lists are tens to hundreds of rows and
-        // filtering them in the browser is instant, where a round trip per
-        // keystroke is not.  If somebody turns up with thousands, this becomes
-        // a query and the markup does not have to change.
+        // Client side on purpose: these lists are tens to hundreds of rows,
+        // and filtering locally is instant. At thousands this would become a
+        // query without changing the markup.
         document.querySelectorAll("[data-filter]").forEach(function (box) {
             const targets = Array.from(document.querySelectorAll(box.getAttribute("data-filter")));
             const empty = document.getElementById(box.getAttribute("data-filter-empty"));
@@ -542,9 +517,8 @@
                 let shown = 0;
 
                 targets.forEach(function (el) {
-                    // Fall back to the row's own text, so a page that forgets
-                    // data-search still filters on something sensible rather
-                    // than hiding everything.
+                    // Fall back to the row's own text, so a page missing
+                    // data-search still filters sensibly.
                     const hay = (el.getAttribute("data-search") || el.textContent || "").toLowerCase();
                     const match = !needle || hay.indexOf(needle) !== -1;
                     el.hidden = !match;

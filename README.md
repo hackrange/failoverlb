@@ -18,7 +18,7 @@ is no separate controller to lose.
 **Never lets a bad config out.**  Every change is staged and run through
 `nginx -t` on every node *before* any node applies it.  If one node says no,
 nothing changes anywhere.  If a node fails during the apply, the whole fleet
-rolls back together.  A pooched config cannot stop nginx from starting.
+rolls back together.  A bad config cannot stop nginx from starting.
 
 **Does not forget a node that was down.**  A box that was offline during a
 change gets the change written into its queue and is caught up when it comes
@@ -43,7 +43,7 @@ where there is a free way to get the same result, the help text says what it is.
 
 ## What is here right now
 
-This is a work in progress.  Being straight about where it is:
+This is a work in progress.
 
 ### Built
 
@@ -63,7 +63,7 @@ This is a work in progress.  Being straight about where it is:
 | Auth | `app/auth/` | Local break glass accounts with mandatory TOTP, plus OIDC with PKCE. |
 | Web GUI and API | `app/web/` | Server rendered pages, JSON API, help modals, no build step. |
 | nginx from source | `nginx-installer.sh` | Builds nginx with the modules, sets up certbot, keeps a rollback. |
-| Docker setup | `docker_setup.sh` | Docker CE on Ubuntu 22.04+, done properly. |
+| Docker setup | `docker_setup.sh` | Docker CE on Ubuntu 22.04+. |
 | Per node install | `install.sh` | Agent, group, systemd unit, `.env`, container, cluster join. |
 | One shot setup | `failoverlb_setup.sh` | Clone from git into `/data/docker/failoverlb` and hand off. |
 | Plus parity notes | `docs/plus-parity.md` | Every paid feature, and what we built instead. |
@@ -90,20 +90,9 @@ Audit Log, My Account, Users, Settings.
 
 ## Testing
 
-The check suites and the applying test pass are internal testing rather than
-part of the product, so they are not in this repository.  They live on the
-machines that run them, under `checks/` and `tools/qa/`, and what they produce
-is what ships: the user guide in `docs/`, the bill of materials in `sbom/`, and
-the feature test plan handed over as a document.
-
-Two things worth knowing if you are running this rather than reading it:
-
-- The checks are meant to be run against a real installed fleet rather than a
-  mock of one, on a node and inside the container, so they reach the agent and
-  the same database the manager uses.
-- The test pass applies configuration for real and then puts traffic through
-  it.  That is the point of it, and it is why it must never be aimed at a fleet
-  carrying real traffic.
+The test suites are not part of this repository.  They run against a real
+installed fleet, apply configuration for real and put traffic through it, so
+they should never be pointed at a fleet carrying production traffic.
 
 ## How the security works
 
@@ -162,9 +151,9 @@ Set `NFM_ADMIN_ALLOWLIST` in `.env` to your management networks before you put
 this anywhere interesting.  Without it, anybody who can reach 7443 gets the
 login page.
 
-Certificates start pointed at the Lets Encrypt staging service on purpose.  The
-real one locks you out for a week after five failures, and everybody gets it
-wrong at least once.  Switch it in Settings once you have one working.
+Certificates come from the real Lets Encrypt service by default.  If you are
+testing an issuance you expect to fail, turn on staging in Settings first.  The
+real service locks you out for a week after five failures.
 
 If you would rather do it by hand, `install.sh` is the per node half and takes
 the same options.  Run `./install.sh --help`.
@@ -437,4 +426,4 @@ the binary, the config file or the command, not the mark: `nginx -t` is a
 command you type, NGINX is the product it belongs to.
 
 The software was called NGINX Management until August 2026 and was renamed for
-this reason.  Nothing in the product name refers to NGINX any more.
+this reason.  Nothing in the product name refers to NGINX anymore.

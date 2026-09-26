@@ -1,28 +1,16 @@
-# Failover LB, the python packages we need.
+# Failover LB Python dependencies.
 #
-# Every version is pinned on purpose.  This runs on production load balancers,
-# so a surprise version bump from a rebuild six months from now is not a thing
-# we want to chase down at 3am.  Bump these when you mean to, then rebuild and
-# run the smoke tests.
+# Every version is pinned so a rebuild never pulls in a surprise upgrade.
+# Bump deliberately, then rebuild and run the smoke tests.
 #
-# Pinning without a review date is how a fleet ends up years behind on the
-# libraries that parse untrusted input, so the date is here and it is part of
-# the deal:
-#
-#     Last reviewed: 16 August 2026, with trivy against a live CVE feed
-#                    rather than by eye.  It found twelve HIGH advisories in
-#                    what was pinned here, which a reading of the file could
-#                    never have found, and two were on the authentication
-#                    path: a PyJWT token forgery bypass and a path traversal
-#                    in python-multipart, which parses every form this GUI
-#                    posts.  Those two were bumped immediately; the rest
-#                    (starlette, fastapi, cryptography, SQLAlchemy) are a
-#                    major version move and are being done as their own piece
-#                    of work with its own testing.
-#     Review again:  quarterly, and immediately for an advisory in any of the
-#                    six below that touch untrusted input
-#
-# Those six, and why they are the ones to watch rather than the whole list:
+#     Last reviewed: August 16, 2026, with trivy against a live CVE feed.
+#                    It found twelve HIGH advisories.  The two on the auth
+#                    path (a PyJWT token forgery bypass and a path traversal
+#                    in python-multipart) were bumped right away.  The rest
+#                    (starlette, fastapi, cryptography, SQLAlchemy) need a
+#                    major version move and are being done separately.
+#     Review again:  quarterly, and immediately for an advisory in any of
+#                    the six below that handle untrusted input:
 #
 #     starlette      every request goes through it
 #     fastapi        the same, one layer up
@@ -31,8 +19,7 @@
 #     cryptography   the cluster CA and every peer certificate
 #     SQLAlchemy     every query
 #
-# The bill of materials work in the plan will list these versions anyway, so
-# that is the natural place to hang the check.
+# The SBOM in sbom/ lists these versions too.
 
 # Web framework and the server that runs it
 fastapi==0.115.6
@@ -74,9 +61,8 @@ prometheus-client==0.21.1
 
 # Backups.  A zip that any tool can open, encrypted with AES-256.
 #
-# Not the zip format's own encryption, which is ZipCrypto and is broken by a
-# known plaintext attack.  A backup here is full of PEM files, which is more
-# known plaintext than anybody needs.  The standard library can read an
-# encrypted zip and cannot write one, hence a package.
+# Not ZipCrypto, which falls to a known-plaintext attack, and a backup full
+# of PEM files is plenty of known plaintext.  The stdlib can read encrypted
+# zips but not write them, hence a package.
 pyzipper==0.3.6
 pycryptodomex==3.21.0        # the AES underneath pyzipper, pinned with it

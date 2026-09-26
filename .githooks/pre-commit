@@ -2,17 +2,12 @@
 #
 # Refuse to commit things that must never leave this machine.
 #
-# A content check alone is not enough.  Grepping a diff catches a secret typed
-# into a file.  It does not catch a whole folder that should never have been
-# tracked, because once it is tracked it looks like part of the repository and
-# every add-all carries it along.  So this checks paths as well as content, and
-# it checks what is staged rather than what is on disk.
+# Checks staged paths as well as content: a folder that should never have
+# been tracked looks like part of the repo once it is, so a diff grep alone
+# won't catch it.
 #
-# The names that must not ship are read from .githooks/forbidden.txt, which is
-# itself never committed.  That file holds customer names and any other private
-# identifier.  Putting them in this script instead would mean writing them into
-# the repository in the course of trying to keep them out of it, which is a
-# mistake this hook exists to prevent and which was made once already.
+# Private names are read from .githooks/forbidden.txt, which is itself never
+# committed, so they don't end up in the repo via this script.
 set -euo pipefail
 
 fail=0
@@ -21,7 +16,7 @@ staged="$(git diff --cached --name-only --diff-filter=ACMR)"
 
 # ---------------------------------------------------------------- paths
 FORBIDDEN_PATHS='^(\.githooks/forbidden\.txt$|tools/|checks/|\.env$|.*/\.env$)'
-# Working notes for any assistant that helps here.
+# Local working notes and editor settings.
 FORBIDDEN_PATHS+='|^\.[a-z]+/(PLAN|PROJECT|settings\.local)\.'
 
 while IFS= read -r path; do

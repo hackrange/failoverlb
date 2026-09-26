@@ -14,9 +14,8 @@
   <div class="page-actions">
     {% if can('edit_certs') %}
       <button class="btn" id="new-cert">Get one from Lets Encrypt</button>
-      {# Only rendered when an authority is set up, because a button that
-         always exists and always says "set one up first" is a button that
-         teaches people to ignore buttons. #}
+      {# Only rendered when an authority is configured. A button that always
+         says "set one up first" teaches people to ignore it. #}
       <button class="btn" id="paid-cert" hidden>Get one from a paid authority</button>
       <button class="btn" id="upload-cert">Upload one</button>
       <button class="btn" id="self-signed-cert">Make a self signed one</button>
@@ -56,9 +55,9 @@
         </thead>
         <tbody>
           {% for c in certs %}
-            {#- Domains are the useful one.  A certificate is usually looked for
-                by a name somebody saw in a browser, not by what it is called
-                here, and a wildcard covers names that appear nowhere else. -#}
+            {#- Domains matter most. People look for a certificate by the name
+                they saw in a browser, and a wildcard covers names listed
+                nowhere else. -#}
             {%- set searchable = [
                   c.name, c.issuer or '', c.issued_by_node or '',
                   c.source or '', c.challenge_type or '', c.status or ''
@@ -66,8 +65,8 @@
             <tr data-search="{{ searchable|join(' ')|lower }}">
               <td>
                 <strong>{{ c.name }}</strong>
-                {# What kind it is, because how it gets renewed depends entirely
-                   on that and there is no other clue on the row. #}
+                {# The kind decides how it renews, and nothing else on the row
+                   says so. #}
                 <div class="small faint">
                   {% if c.source == 'self_signed' %}self signed
                   {% elif c.csr_pem and not c.not_after %}waiting on an authority
@@ -75,9 +74,8 @@
                   {% else %}{{ c.challenge_type }}{% endif %}
                 </div>
                 {% if c.dns_warning %}
-                  {# Said here rather than only in a log, because the failure it
-                     warns about is ninety days away and nobody reads a log for
-                     something that has not happened yet. #}
+                  {# Shown here, not just logged, because the failure is ninety
+                     days away and nobody reads logs for that. #}
                   <div class="small" style="margin-top:4px; color:var(--{{ 'bad' if not c.dns_ok else 'warn' }})">
                     {{ 'DNS does not point here' if not c.dns_ok else 'DNS partly points elsewhere' }}
                   </div>
@@ -85,16 +83,13 @@
               </td>
               <td class="mono small">
                 {{ c.domain_list()|join(', ') }}
-                {# Which sites use it, because that is the one thing that decides
-                   whether it can be deleted, and hunting for it across the sites
-                   page is a silly way to find out. #}
+                {# Sites using it. That decides whether it can be deleted. #}
                 <div class="small faint" style="margin-top:4px">
                   {% if c.hosts %}used by {{ c.hosts|map(attribute='name')|join(', ') }}
                   {% else %}not used by any site{% endif %}
                 </div>
-                {# Names the sites using this certificate serve and it does not
-                   carry.  Said here as well as on the site, because this is the
-                   page somebody is on when they decide what to reissue. #}
+                {# Names the sites using this certificate serve but it does not
+                   cover. Shown here because this is where reissues get decided. #}
                 {% set short = short_of.get(c.id, []) %}
                 {% if short %}
                   <div class="small" style="margin-top:4px; color:var(--warn)">
@@ -117,9 +112,7 @@
                   <span class="badge neutral">not issued yet</span>
                 {% endif %}
                 {% if c.not_after and not c.auto_renew and c.source != 'letsencrypt' %}
-                  {# Nothing renews these, so the page has to be the thing that
-                     says so.  A row that looks like every other row is how
-                     somebody finds out from a browser instead. #}
+                  {# Nothing renews these, so the page has to say so. #}
                   <div class="small faint" style="margin-top:4px">nothing renews this</div>
                 {% endif %}
               </td>
@@ -151,12 +144,9 @@
                       </button>
                     {% endif %}
                   {% endif %}
-                  {# Deleting has always worked through the API and there was
-                     never a button for it, so the only way to get rid of one
-                     was a request by hand.  Offered only when nothing points at
-                     it, because nginx will not start with an ssl listener and
-                     no certificate, and a button whose only outcome is a
-                     refusal is worse than no button. #}
+                  {# Delete used to be API only. Offered only when nothing uses
+                     the certificate, since nginx will not start with an ssl
+                     listener and no certificate. #}
                   {% if c.hosts %}
                     <button class="btn sm" disabled
                             title="Point {{ c.hosts|map(attribute='name')|join(', ') }} somewhere else first">
@@ -262,11 +252,10 @@ today.</p>
 
 {% block scripts %}
 <script nonce="{{ csp_nonce }}">
-// The paid authority button, and the little wizard behind it.
+// The paid authority button and its wizard.
 //
-// Kept beside the Lets Encrypt button rather than replacing it.  Most people
-// want both: something free for the internal names and a bought one for the
-// name that matters.
+// Sits beside the Lets Encrypt button rather than replacing it. Most people
+// want both: free for internal names, a bought one for the name that matters.
 document.addEventListener("DOMContentLoaded", function () {
   const button = document.getElementById("paid-cert");
   if (!button) { return; }
@@ -379,8 +368,8 @@ document.addEventListener("DOMContentLoaded", function () {
         const ok = (r.ok || []).length;
         const bad = r.failed || [];
         if (bad.length) {
-          // Say which node and why.  "copied to 1 of 2" with no reason is
-          // exactly the dead end this button exists to get out of.
+          // Say which node and why. "copied to 1 of 2" with no reason is a
+          // dead end.
           NFM.toast("Copied to " + ok + ", failed on " +
                     bad.map(f => f.node + " (" + f.error + ")").join(", "), "bad");
         } else {
@@ -472,9 +461,8 @@ document.addEventListener("DOMContentLoaded", function () {
           Space or comma separated.  One certificate can cover several names.
           A wildcard like *.example.com needs a DNS challenge.
         </div>
-        {# Prefilling from a site is the difference between remembering the www
-           and finding out from a visitor.  A certificate is nearly always being
-           made for a site that already exists and already knows its names. #}
+        {# Prefill from a site. The certificate is nearly always for an existing
+           site, and this is how the www name does not get forgotten. #}
         {% if sites_with_names %}
           <div class="hint mt">
             Take the names from a site:
@@ -541,9 +529,8 @@ document.addEventListener("DOMContentLoaded", function () {
   // Certificates that did not come from Lets Encrypt
   // ==========================================================================
 
-  // Files come through as data URLs so the same field takes a paste or a file.
-  // A PKCS12 can only ever be a file, and a PEM is nearly always a paste, and
-  // making somebody pick the right box first is a way to get it wrong.
+  // Files come through as data URLs so one field takes a paste or a file.
+  // PKCS12 is always a file and PEM is usually a paste.
   function readFile(input) {
     return new Promise(function (resolve) {
       const f = input && input.files && input.files[0];
@@ -820,8 +807,7 @@ document.addEventListener("DOMContentLoaded", function () {
           const box = document.getElementById("r-csr");
           box.select();
           // execCommand rather than the clipboard API, which needs a secure
-          // context the browser agrees about.  Behind a reverse proxy on a name
-          // somebody has not set up yet, it silently does nothing.
+          // context. Behind a proxy on a name without TLS it silently fails.
           try { document.execCommand("copy"); NFM.toast("Copied", "ok"); }
           catch (e) { NFM.toast("Select it and copy by hand", "bad"); }
         });

@@ -38,9 +38,9 @@ NODE_CERT_DAYS = 825
 CA_CERT_DAYS = 3650
 
 
-# ==============================================================================
+# =============================================================================
 # Encrypting things we store
-# ==============================================================================
+# =============================================================================
 
 def _aead():
     """
@@ -74,12 +74,10 @@ def encrypt(plaintext: str) -> str:
 
 def decrypt(ciphertext: str) -> str:
     """
-    Turn it back.  Returns None if it will not decrypt.
+    Decrypt a stored value, or return None if it won't decrypt.
 
-    Most likely reason for a failure is the secret key changed, which happens
-    when somebody rebuilds a node and generates a new one.  We log it and hand
-    back None so the caller can prompt for the value again, instead of throwing
-    and taking the whole page down.
+    Usually that means the node secret key changed (node rebuilt).  Returning
+    None lets the caller ask for the value again instead of erroring.
     """
     if not ciphertext:
         return None
@@ -94,23 +92,14 @@ def decrypt(ciphertext: str) -> str:
 
 def hash_token(token: str) -> str:
     """
-    sha256 of a token, for storing in the database.
-
-    Used for session tokens and join tokens.  These are long random strings, so
-    a plain hash is fine.  Passwords are different and go through argon2, since
-    people pick guessable ones and a fast hash lets you try billions of them.
+    sha256 of a session or join token, for storage.  These are long random
+    strings so a fast hash is fine.  Passwords go through argon2 instead.
     """
     return hashlib.sha256(token.encode()).hexdigest()
 
 
 def constant_time_equals(a: str, b: str) -> bool:
-    """
-    Compare without leaking how much matched through timing.
-
-    A normal == bails at the first different byte, so how long it takes tells
-    an attacker how much of their guess was right.  Do that in a loop and they
-    can walk a token out one character at a time.
-    """
+    """Compare without leaking how much matched through timing."""
     return hmac.compare_digest(a.encode(), b.encode())
 
 
@@ -119,9 +108,9 @@ def new_token(length: int = 32) -> str:
     return secrets.token_urlsafe(length)
 
 
-# ==============================================================================
+# =============================================================================
 # Signing messages between nodes
-# ==============================================================================
+# =============================================================================
 
 def sign_payload(hmac_key: str, node_name: str, timestamp: str,
                  nonce: str, body: bytes) -> str:
@@ -150,9 +139,9 @@ def verify_payload(hmac_key: str, node_name: str, timestamp: str,
     return hmac.compare_digest(expected, signature)
 
 
-# ==============================================================================
+# =============================================================================
 # The cluster CA
-# ==============================================================================
+# =============================================================================
 
 class ClusterCA:
     """
@@ -162,8 +151,8 @@ class ClusterCA:
     Peer connections require a cert from this CA and nothing else, so being a
     member of the cluster is the same thing as holding one of these.
 
-    The CA key never leaves the node that made it.  Joining nodes send a signing
-    request in and get a cert back, they never get the key itself.
+    The CA key never leaves the node that made it.  Joining nodes send a
+    signing request and get a cert back, never the key.
     """
 
     def __init__(self, pki_dir: Path = None):
@@ -177,44 +166,29 @@ class ClusterCA:
         self.node_key_path = self.dir / "node.key"
         self.node_cert_path = self.dir / "node.crt"
 
-        # Where a key waits while we are asking somebody to sign it.
-        #
-        # Joining makes a new key and then asks the sponsor for a certificate.
-        # That request can fail, and often does: a spent token, a firewall, a
-        # sponsor that is not up yet.  If the new key has already replaced the
-        # live one by then, this node is left with a key and a certificate that
-        # do not match, the peer listener will not start, and it crash loops
-        # with no way back.  A failed join has to leave the node exactly as it
-        # was, so the new key sits here until a certificate for it turns up.
+        # A new key waits here until the sponsor signs it.  Joins fail often
+        # (spent token, firewall, sponsor down), and if the new key had
+        # already replaced the live one we'd be left with a mismatched pair
+        # and a peer listener that crash loops.  A failed join must leave the
+        # node exactly as it was.
         self.node_key_pending_path = self.dir / "node.key.pending"
 
     # ---- the CA itself ------------------------------------------------------
 
     def exists(self) -> bool:
         """
-        Can this node sign for the cluster: it holds the CA key as well as the
-        certificate.
+        Can this node sign for the cluster (holds the CA key and cert).
 
-        True only on the node that founded the cluster.  A node that joined is
-        given the CA **certificate**, so it can verify its peers, and never the
-        CA key, because only one machine should be able to mint new members.
-
-        That is why this is not the question "is this node part of a cluster".
-        Asking this one and reporting the answer as cluster membership told
-        every joined node in every fleet that it needed to rejoin, at every
-        startup, while it was working perfectly.  Use has_identity for
-        membership.
+        Only true on the founding node.  Joined nodes get the CA cert but
+        never the key.  This is not a membership check; using it as one made
+        every joined node think it needed to rejoin.  Use has_identity.
         """
         return self.ca_cert_path.is_file() and self.ca_key_path.is_file()
 
     def has_identity(self) -> bool:
         """
-        Is this node a member of a cluster: it can prove who it is and check
-        who its peers are.
-
-        The CA certificate to verify peers, and its own certificate and key to
-        answer them with.  A joined node has exactly these three and no CA key,
-        which is the normal and correct state for every node but one.
+        Is this node a cluster member: CA cert to verify peers, plus its own
+        cert and key.  Joined nodes normally have these and no CA key.
         """
         return (self.ca_cert_path.is_file()
                 and self.node_cert_path.is_file()
@@ -222,18 +196,10 @@ class ClusterCA:
 
     def ca_pair_ok(self) -> bool:
         """
-        Does the CA certificate actually go with the CA key.
+        Does the CA cert go with the CA key.
 
-        Deliberately separate from exists(), and deliberately not something that
-        regenerates on its own.  A GUI certificate that does not match its key
-        can be thrown away and remade, because nobody has ever relied on it.  A
-        CA is the opposite: every node certificate in the cluster was signed by
-        it, so making a new one silently would invalidate all of them and every
-        node would have to rejoin.
-
-        So this reports, and the caller says something useful.  Losing a cluster
-        because a check quietly did the tidy looking thing is not a trade worth
-        making.
+        Report only, never regenerate.  Every node cert was signed by this
+        CA, so silently replacing it would force every node to rejoin.
         """
         if not self.exists():
             return False
@@ -273,9 +239,8 @@ class ClusterCA:
             .not_valid_before(now - datetime.timedelta(minutes=5))
             .not_valid_after(now + datetime.timedelta(days=CA_CERT_DAYS))
             .add_extension(
-                # path_length 0 means this CA signs end certs only.  A node cert
-                # cannot turn around and sign more certs, so one stolen node key
-                # cannot mint new cluster members.
+                # path_length 0: this CA signs end certs only, so a stolen
+                # node key cannot mint new cluster members.
                 x509.BasicConstraints(ca=True, path_length=0),
                 critical=True,
             )
@@ -295,9 +260,8 @@ class ClusterCA:
             .sign(key, hashes.SHA256())
         )
 
-        # Both to one side, then move them in.  Written straight over the top,
-        # dying between the two leaves a CA whose certificate and key do not
-        # match, and that takes the whole cluster's trust with it.
+        # Write both to temp files, then move them in, so a crash can't
+        # leave a CA cert and key that don't match.
         key_tmp = self.ca_key_path.with_suffix(".key.tmp")
         cert_tmp = self.ca_cert_path.with_suffix(".crt.tmp")
 
@@ -414,9 +378,8 @@ class ClusterCA:
                 critical=True,
             )
             .add_extension(
-                # Both, because every node is a server to its peers and a client
-                # when it calls them.  Leave out client auth and mTLS fails in a
-                # way that takes an hour to work out.
+                # Every node is both server and client to its peers.  Leave
+                # out client auth and mTLS fails in a confusing way.
                 x509.ExtendedKeyUsage([
                     ExtendedKeyUsageOID.SERVER_AUTH,
                     ExtendedKeyUsageOID.CLIENT_AUTH,
@@ -434,12 +397,10 @@ class ClusterCA:
 
     def save_node_cert(self, cert_pem: str) -> None:
         """
-        Take delivery of a signed certificate, and promote the key that goes
-        with it.
+        Save a signed cert and promote the pending key that goes with it.
 
-        This is the only place the live node key changes, and it only changes
-        once we are holding the certificate that matches it.  Up to this point a
-        failure leaves the node running on whatever it had before.
+        The only place the live node key changes, and only once we hold the
+        matching cert.
         """
         x509.load_pem_x509_certificate(cert_pem.encode())
 
@@ -447,21 +408,16 @@ class ClusterCA:
         tmp.write_text(cert_pem)
         os.chmod(tmp, 0o644)
 
-        # Key first.  A key with no certificate is caught and regenerated on the
-        # next start.  A certificate with the wrong key is what we are trying to
-        # avoid.
+        # Key first.  A key with no cert is regenerated on the next start;
+        # a cert with the wrong key is what we're trying to avoid.
         if self.node_key_pending_path.is_file():
             os.replace(str(self.node_key_pending_path), str(self.node_key_path))
         os.replace(str(tmp), str(self.node_cert_path))
 
     def has_node_cert(self) -> bool:
         """
-        Do we have a usable certificate for this node.
-
-        Both files being present is not enough.  They have to be a pair.  This
-        used to check only that they existed, so a mismatched pair counted as
-        having a certificate, nothing regenerated it, and the peer listener
-        failed to start for good.
+        Do we have a usable node cert.  Both files must exist and match;
+        a mismatched pair would never get regenerated otherwise.
         """
         if not (self.node_cert_path.is_file() and self.node_key_path.is_file()):
             return False
@@ -496,17 +452,16 @@ class ClusterCA:
             format=serialization.PrivateFormat.PKCS8,
             encryption_algorithm=serialization.NoEncryption(),
         )
-        # Open with the right mode from the start.  Writing then chmod leaves a
-        # window where the key is on disk world readable, and something
-        # watching the folder can grab it in that window.
+        # Create with 0600 up front.  Write-then-chmod leaves a window where
+        # the key is world readable.
         fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "wb") as fh:
             fh.write(pem)
 
 
-# ==============================================================================
+# =============================================================================
 # Reading certificates
-# ==============================================================================
+# =============================================================================
 
 def parse_certificate(pem: str) -> dict:
     """Pull the useful bits out of a cert so the GUI can show them."""

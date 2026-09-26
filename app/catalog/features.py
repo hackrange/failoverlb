@@ -1,15 +1,12 @@
 """
 Every setting the GUI offers, described once.
 
-If you want to add a setting, add it here and you are done.  The form control,
-the ? popup, the input checking and the generated config all come from what you
-write in this file.
+To add a setting, add it here.  The form control, help popup, validation
+and generated config all come from these definitions.
 
-A note on what is missing on purpose.  nginx has a paid version with some
-genuinely nice features in it: real active health checks inside nginx, sticky
-sessions, slow start, request queueing.  These boxes are not licensed, so none
-of that is offered.  Where there is a free way to get most of the way there,
-PLUS_ONLY at the bottom of this file says what it is.
+NGINX Plus features (active health checks, sticky sessions, slow start,
+request queueing) are not offered.  PLUS_ONLY at the bottom lists them with
+open source alternatives where they exist.
 """
 
 from app.catalog.registry import Feature, HelpText, register
@@ -2847,8 +2844,7 @@ register(
                 "Moving an old URL scheme to a new one after a redesign",
                 "Stripping a path prefix before it reaches the backend",
             ],
-            # What to type, exactly: everything nginx wants after the word
-            # rewrite.  One rule per line.
+            # Everything after the word "rewrite", one rule per line.
             example="^/old/(.*)$ /new/$1 permanent",
             example_config="rewrite ^/old/(.*)$ /new/$1 permanent;",
             docs_url=f"{D}/http/ngx_http_rewrite_module.html#rewrite",
@@ -2880,10 +2876,8 @@ register(
                 "Fixing absolute http:// links from a legacy app that does not know it is behind TLS",
                 "Swapping an internal hostname for the public one in returned HTML",
             ],
-            # A rule is everything nginx wants after the word sub_filter: the
-            # text to find and the text to put there, both quoted.  The example
-            # used to be a sentence describing that, which reads well and is
-            # not something anybody can type into the box.
+            # Everything after "sub_filter": the search and replacement
+            # strings, both quoted.  The example must be literally typeable.
             example="'http://internal.example.com' 'https://www.example.com'",
             example_config=(
                 "sub_filter 'http://internal.example.com' 'https://www.example.com';\n"
@@ -2904,10 +2898,9 @@ register(
         default="",
         multi_arg=True,
         placeholder="1.1.1.1 8.8.8.8 valid=300s",
-        # Not filed under advanced.  It looks like an obscure setting and it is
-        # not: without it nginx resolves a backend hostname once at startup and
-        # then never again, so a backend whose address moves silently stops
-        # working until somebody reloads.  People should be able to find this.
+        # Deliberately not advanced.  Without it nginx resolves backend
+        # hostnames only at startup, so a backend whose address changes
+        # silently breaks until the next reload.
         advanced=False,
         help=HelpText(
             summary="Which DNS servers nginx uses when it has to look something up at runtime.",
@@ -3102,7 +3095,7 @@ register(
         own_screen=True,
         label="WAF",
         category="security",
-        directive="",            # one setting, several lines, so the renderer does it
+        directive="",            # renderer writes several lines
         contexts=("server",),
         type="select",
         default="off",
@@ -3296,19 +3289,10 @@ register(
         ),
     ),
 
-# Signed URLs are deliberately not here.
-#
-# nginx only *verifies* a signed link: something else has to generate it, with
-# the same secret and the same formula, and that something is the customer's
-# application.  A tick box that turns verification on for links nobody is
-# signing does not protect a folder, it 403s it for everybody, so as a setting
-# on this page it could only ever mislead.
-#
-# It was on the page for a long time and rendered nothing at all, which is how
-# it came up.  Doing it properly means a secret, the exact formula on screen,
-# and a worked example of building a link; taking it off is the honest version
-# of what it was.  The Custom config box takes the six lines for anybody who
-# wants it, and nginx is still built with the module.
+# Signed URLs (secure_link) are deliberately not offered.  nginx only
+# verifies the links; the backend application has to generate them with the
+# same secret and formula.  A checkbox alone would just 403 everything.  Use
+# the Custom config box instead, for example:
 #
 #     location /downloads/ {
 #         secure_link $arg_md5,$arg_expires;
@@ -3323,13 +3307,9 @@ register(
 # The paid only list
 # ==============================================================================
 #
-# None of these render a control.  They show up on their own page, grayed out,
-# with the free workaround next to them.
-#
-# Being upfront about this saves people real time.  Every one of these is
-# something an admin will go looking for, find in the nginx docs, and then spend
-# an hour figuring out why it does not work on their box.  The docs do say which
-# ones are commercial, but it is one small line and it is easy to miss.
+# None of these render a control.  They are listed on the comparison page,
+# grayed out, with the open source workaround, because the nginx docs make it
+# easy to miss that they need a subscription.
 
 register(
     Feature(

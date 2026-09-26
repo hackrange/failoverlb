@@ -4,28 +4,23 @@
 #
 # Author: Tim Rice
 #
-# Takes a bare Ubuntu box with nginx already built on it and gets the manager
-# running.  Pulls the code from git into /data/docker/failoverlb, sets up
-# docker if it is missing, then hands off to install.sh.
+# Takes a bare Ubuntu box with nginx already built and gets the manager
+# running: clones the code into /data/docker/failoverlb, installs docker if
+# needed, then hands off to install.sh.
 #
 #   sudo ./failoverlb_setup.sh
 #   sudo ./failoverlb_setup.sh --join lb-01:7444 --token <token>
 #
-# Run it again any time to pull the latest code and rebuild.  Your .env and
-# your database are left alone.
-#
-# If nginx is not on the box yet, build it first:
+# Safe to rerun to pull the latest code and rebuild. .env and the database
+# are left alone. If nginx is not built yet, run this first:
 #
 #   sudo ./nginx-installer.sh install
-#
-# That script ships in this folder next to this one.
 # =============================================================================
 {
 set -euo pipefail
 
-# The public repository on GitHub.  A wrong URL here does not 404: GitHub
-# answers a missing or private repository with a request to log in, so the
-# failure presents as the repository being private rather than as a bad URL.
+# A wrong URL here does not 404. GitHub answers a missing repo with a login
+# prompt, so it looks like a private repo rather than a bad URL.
 REPO_URL="${NFM_REPO_URL:-https://github.com/hackrange/failoverlb.git}"
 INSTALL_DIR="${NFM_INSTALL_DIR:-/data/docker/failoverlb}"
 BRANCH="${NFM_BRANCH:-master}"
@@ -38,15 +33,13 @@ GIT_TOKEN="${NFM_GIT_TOKEN:-}"
 PASSTHROUGH=()
 SKIP_DOCKER=false
 
-# The files that say "yes, this really is the project and not some other folder
-# that happens to exist".
+# Files that mark a directory as the project.
 looks_like_project() {
     [[ -f "$1/docker-compose.yml" && -f "$1/install.sh" && -d "$1/app" ]]
 }
 
-# Build a clone URL with credentials in it, if we were given any.  Kept in a
-# function so the token never ends up in a log line or in the process list of
-# anything except git itself.
+# Clone URL with credentials, if given. Built here so the token only ever
+# reaches git, never a log line.
 clone_url() {
     if [[ -n "$GIT_TOKEN" ]]; then
         local user="${GIT_USER:-oauth2}"
@@ -141,8 +134,7 @@ else
     header "Docker"
     log "docker is missing or has no compose plugin, setting it up"
 
-    # docker_setup.sh lives beside this script if we are running from a copy of
-    # the project, otherwise we grab it from the repo we are about to pull.
+    # Use the copy beside this script if there is one, else fetch it.
     if [[ -f "$SELF_DIR/docker_setup.sh" ]]; then
         bash "$SELF_DIR/docker_setup.sh"
     else
@@ -161,23 +153,17 @@ fi
 # ============================================================== the code
 header "Code"
 
-# Four ways to end up with the project in place, tried in this order.  The point
-# is that you should not need git access just to install this, because plenty of
-# boxes cannot reach the git server and plenty of people just copy a folder over.
+# Four ways to get the code in place, tried in order. Git access is not
+# required; many boxes cannot reach the git server and a copied folder works.
 
 if [[ -d "$INSTALL_DIR/.git" ]]; then
     # 1. Already a clone.  Update it.
     log "already installed at ${INSTALL_DIR}, pulling the latest"
     cd "$INSTALL_DIR"
 
-    # Refuse to clobber local edits.  Somebody hand patching a live box and
-    # losing it to a git pull is a bad afternoon.
-    #
-    # core.fileMode=false on purpose.  This script chmods the scripts executable
-    # further down, and git counts a changed permission bit as a modified file.
-    # So without this, running the script once was enough to make every later
-    # run refuse, complaining about a change it had made itself.  We care about
-    # content here, not permissions.
+    # Refuse to clobber local edits. core.fileMode=false because we chmod
+    # the scripts below, and git would otherwise count that as a change and
+    # make every later run refuse.
     if [[ -n "$(git -c core.fileMode=false status --porcelain --untracked-files=no)" ]]; then
         warn "There are local changes here:"
         git status --short --untracked-files=no | sed 's/^/        /'
@@ -206,9 +192,8 @@ elif looks_like_project "$INSTALL_DIR"; then
     cd "$INSTALL_DIR"
 
 elif looks_like_project "$SELF_DIR"; then
-    # 3. We are being run from inside a copy of the project.  This is the case
-    #    when somebody copied the folder onto the box, which is the easiest way
-    #    to do this on a server with no route to the git server.
+    # 3. Run from inside a copy of the project, e.g. a folder copied onto a
+    #    box with no route to the git server.
     if [[ "$SELF_DIR" == "$INSTALL_DIR" ]]; then
         log "running from ${INSTALL_DIR} already"
         cd "$INSTALL_DIR"

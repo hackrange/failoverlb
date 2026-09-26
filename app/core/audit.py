@@ -1,19 +1,17 @@
 """
 The audit log.
 
-Append only.  Nothing in this app updates or deletes a row here, and that is on
-purpose.  When somebody asks why the site went down at 2am, this is the answer,
-and an audit log you can quietly edit is not worth having.
+Append only.  Nothing in this app updates or deletes a row here, on purpose:
+an audit log you can quietly edit is not worth having.
 
-Two rules that matter:
+Two rules:
 
   Never log a secret.  Passwords, TOTP seeds, DNS API tokens and private keys
-  get replaced with a marker before anything is written.  An audit log is
-  exactly the kind of thing that gets exported and mailed around, so a password
-  in here has a long life.
+  are replaced with a marker before anything is written.  Audit logs get
+  exported and mailed around.
 
-  Log the attempt, not just the success.  A failed login and a refused change
-  are more interesting than the ones that worked.
+  Log the attempt, not just the success.  A failed login or a refused change
+  is often the more interesting line.
 """
 
 import json
@@ -24,9 +22,8 @@ from app.models import AuditLog
 
 log = logging.getLogger("nfm.audit")
 
-# Any field whose name contains one of these gets its value hidden.  Matching on
-# the name rather than the value means a new secret field is covered the moment
-# somebody adds it, without anybody having to remember to come here.
+# Any field whose name contains one of these gets its value hidden.  Matching
+# on the name means a new secret field is covered without editing this list.
 SECRET_HINTS = (
     "password", "secret", "token", "key", "credential", "totp",
     "privkey", "private", "hmac", "passphrase", "seed",
@@ -65,10 +62,8 @@ def record(action: str, user=None, source_ip: str = None, object_type: str = Non
     """
     Write one line to the audit log.
 
-    Never raises.  An audit write that fails must not take down the thing it was
-    auditing, so a broken log is a warning and the change still goes through.
-    Losing an audit line is bad.  Refusing to fix nginx because we could not
-    write the audit line is worse.
+    Never raises.  A failed audit write must not take down the change it was
+    recording, so it is logged as a warning and the change still goes through.
     """
     try:
         with session_scope() as session:
@@ -91,11 +86,8 @@ def record(action: str, user=None, source_ip: str = None, object_type: str = Non
 
 def diff_fields(before: dict, after: dict) -> dict:
     """
-    Work out what actually changed between two versions of an object.
-
-    Only the fields that moved go in the log.  Storing the whole object twice on
-    every save makes the log enormous and makes the one line you care about
-    hard to find.
+    Return only the fields that changed between two versions of an object,
+    so the log stays small and readable.
     """
     changed = {}
     for key in set(before) | set(after):

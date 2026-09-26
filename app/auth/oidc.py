@@ -4,25 +4,16 @@ Single sign on.
 Standard OpenID Connect authorization code flow with PKCE.  Works with Okta,
 Entra, Keycloak, Google, anything that publishes a discovery document.
 
-Local accounts keep working alongside this by default, and that default is
-deliberate.  It is the thing most SSO integrations get wrong: if the identity
-provider is down, and it is behind the load balancer you need to fix, you have
-locked yourself out of the tool you need to fix it.
+Local accounts keep working alongside SSO by default, so a provider outage
+(possibly behind this very load balancer) does not lock admins out.
 
-A fleet can now be set to this only, from Settings, which switches local
-passwords off.  There is a real reason to want that, because leaving passwords
-on means the provider's lockout, second factor and leaver process all have a
-way round them.  It is guarded on the way in and on the way out.  On the way
-in, the mode cannot be chosen until an admin has completed a login this way, so
-intention is never enough.  On the way out, `auth-recovery.sh` in the install
-directory turns local passwords back on from a shell, without the browser and
-without the provider, which is the door that does not depend on the thing that
-broke.
+Settings can switch a fleet to SSO only, disabling local passwords.  That mode
+can only be chosen after an admin has completed an SSO login, and
+`auth-recovery.sh` in the install directory turns local passwords back on from
+a shell if the provider breaks.
 
-Where the settings come from: the database, through `settings_store`, with the
-`NFM_OIDC_*` environment variables behind them as a fallback.  Read through
-`config()` and never straight from the environment, or half the flow ends up
-talking to one provider and half to another.
+Settings live in the database via `settings_store`, with `NFM_OIDC_*`
+environment variables as a fallback.  Always read them through `config()`.
 """
 
 import base64
@@ -42,13 +33,12 @@ from app.models import AuthSource, User, UserRole, utcnow
 
 log = logging.getLogger("nfm.oidc")
 
-# Discovery documents barely ever change, and fetching one on every login adds a
-# round trip to somebody else's server before anybody can get in.
+# Discovery documents rarely change; cache them to save a round trip per
+# login.
 _discovery_cache = {}
 _DISCOVERY_TTL = 3600
 
-# Login attempts in flight.  Holds the PKCE verifier and the state value between
-# sending somebody off to the provider and them coming back.
+# Logins in flight: PKCE verifier keyed by state.
 _pending = {}
 _PENDING_TTL = 600
 
@@ -95,17 +85,10 @@ def _redirect_uri() -> str:
 
 async def begin_login(source_ip: str = None) -> str:
     """
-    Start a login and give back the URL to send the browser to.
+    Start a login and return the provider URL to redirect to.
 
-    Two things get generated here and both matter.
-
-    state is random and gets checked when they come back.  Without it, somebody
-    can hand a victim a crafted callback URL and log them into an account the
-    attacker controls, which is login CSRF.
-
-    PKCE is the code_verifier and its hash.  It stops a stolen authorization
-    code being useful to anybody who does not also hold the verifier.  It was
-    designed for mobile apps but there is no reason not to use it here.
+    `state` is checked on the callback to prevent login CSRF.  PKCE makes a
+    stolen authorization code useless without the verifier.
     """
     doc = await get_discovery()
 
@@ -136,9 +119,7 @@ async def begin_login(source_ip: str = None) -> str:
 
 
 async def complete_login(code: str, state: str, source_ip: str = None) -> dict:
-    """
-    Finish the login.  Swaps the code for tokens and checks the id_token.
-    """
+    """Exchange the code for tokens and verify the id_token."""
 
     pending = _pending.pop(state, None)
     if not pending:
@@ -182,8 +163,7 @@ async def complete_login(code: str, state: str, source_ip: str = None) -> dict:
 
     claims = await _verify_id_token(id_token, doc)
 
-    # Groups sometimes are not in the id_token, usually because the provider
-    # keeps it small.  If we did not get any, ask the userinfo endpoint.
+    # Some providers leave groups out of the id_token; fall back to userinfo.
     groups = claims.get(config()["groups_claim"]) or []
     if not groups and doc.get("userinfo_endpoint") and tokens.get("access_token"):
         groups = await _fetch_groups(doc["userinfo_endpoint"], tokens["access_token"])
@@ -200,15 +180,9 @@ async def complete_login(code: str, state: str, source_ip: str = None) -> dict:
 
 async def _verify_id_token(id_token: str, doc: dict) -> dict:
     """
-    Check the id_token properly.
-
-    This is the part that must not be skipped or loosened.  An id_token is only
-    worth anything if the signature is checked against the provider's published
-    keys, and the issuer and audience are checked too.
-
-    Decoding it without verifying, which is a very common shortcut because it is
-    one line shorter, means anybody can hand us a token they wrote themselves
-    claiming to be an admin.
+    Verify the id_token signature against the provider's JWKS, plus issuer,
+    audience and expiry.  Do not loosen this: an unverified token can claim
+    to be anyone.
     """
 
     try:
@@ -263,14 +237,9 @@ def sync_user(session, profile: dict) -> User:
     """
     Find or make the local record for an SSO user.
 
-    The role comes from their groups and gets refreshed on every login.  That
-    matters: somebody removed from the admin group in your directory should stop
-    being an admin here the next time they log in, without anybody having to
-    remember to come and change it.
-
-    We match on the subject claim, not the username.  Usernames and email
-    addresses change when people get married or change departments.  The subject
-    does not.
+    The role is recomputed from groups on every login, so directory changes
+    take effect at next login.  Users are matched on the stable `sub` claim,
+    not the username or email.
     """
     subject = profile.get("subject")
     if not subject:
@@ -289,9 +258,8 @@ def sync_user(session, profile: dict) -> User:
     ).first()
 
     if not user:
-        # Do not let an SSO login take over an existing local account with the
-        # same name.  That would be a way to get in as the break glass admin by
-        # making an account with a matching name in the directory.
+        # Never take over an existing local account with the same name, or a
+        # directory user named "admin" would become the break glass admin.
         username = profile.get("username") or subject
         clash = session.query(User).filter(User.username == username).first()
         if clash:
@@ -325,13 +293,10 @@ def _cleanup_pending():
 
 def config() -> dict:
     """
-    Where every value in this module comes from.
+    OIDC settings: database first, `NFM_OIDC_*` environment as fallback.
 
-    The settings page writes these to the database and the environment is the
-    fallback, so an install that set `NFM_OIDC_*` before the page existed keeps
-    working untouched.  Read through one function rather than nine scattered
-    lookups, because the bug that prevents is a login that starts against the
-    provider in the database and finishes against the one in the environment.
+    Single source so a login cannot start against one provider and finish
+    against another.
     """
     from app.core import settings_store
     return settings_store.oidc_config()
@@ -339,11 +304,10 @@ def config() -> dict:
 
 def has_details() -> bool:
     """
-    Whether enough has been filled in for a login to have a chance.
+    Whether the required provider details are filled in.
 
-    Deliberately separate from `is_configured`.  The settings page needs to
-    show "the details are here but the mode has it switched off", and a single
-    boolean cannot say that.
+    Separate from `is_configured` so Settings can show "configured but
+    switched off".
     """
     values = config()
     return bool(values["discovery_url"] and values["client_id"]
@@ -352,12 +316,8 @@ def has_details() -> bool:
 
 def is_configured() -> bool:
     """
-    Whether the provider should be offered on the login page right now.
-
-    Two questions, both of which have to be yes: the mode allows it, and enough
-    details exist to try.  The mode is checked first because "local only" has
-    to win even when a provider is fully configured, which is the state
-    somebody is in while they are still setting one up.
+    Whether SSO should be offered right now: the auth mode allows it and the
+    details are present.  "Local only" wins even with a full configuration.
     """
     from app.core import settings_store
     return settings_store.oidc_offered() and has_details()

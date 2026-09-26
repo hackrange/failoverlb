@@ -1,47 +1,23 @@
 """
-Answering DNS for names that should follow the healthy nodes.
+Authoritative DNS for names that should follow the healthy nodes.
 
-This is the half of high availability everything else here was missing.  The
-cluster can already move which node is in charge, and none of that moves a
-single connection, because where the traffic goes was decided by whatever the
-client resolved before it connected.  This decides that.
+Moving the active role around doesn't move a single connection; where traffic
+goes is decided by what the client resolved. This decides that.
 
-The trade nobody should be sold past
-------------------------------------
+DNS failover is bounded by things outside this box. The TTL is a request:
+resolvers clamp low values, browsers cache, some runtimes cache for the life
+of the process. A 30 second TTL moves most clients within a minute or two,
+with a longer tail. It's the right tool when nodes are in different places
+with different addresses, where a floating IP can't work.
 
-DNS failover is bounded by things outside this box.  The TTL is a request, not
-a rule.  Resolvers clamp very low values, browsers keep their own cache, and
-some runtimes cache a lookup for the life of the process.  Thirty seconds gets
-most clients moving inside a minute or two and leaves a tail that is much
-worse.  Anybody promised instant failover has been promised something DNS
-cannot do.
+Answers are built per query from live health rather than written to a zone
+file and reloaded, so there is nothing to reload and nothing to fall behind.
 
-Where it is the right tool is when the nodes are in different places with
-different addresses, which is exactly when nothing else works: two boxes on one
-network can share a floating address and fail over in a second, and two boxes
-in different buildings cannot.
-
-Why the answers are computed rather than written to a file
-----------------------------------------------------------
-
-The obvious build is to generate a zone file and reload a real DNS server.
-That falls apart at the first requirement: the answer has to change the moment
-health changes, and reloading bind every few seconds to publish a health change
-is not a system anybody wants to run.  So the reply is assembled per query out
-of live health, and there is nothing to reload and nothing to fall behind.
-
-What this deliberately does not do
-----------------------------------
-
-No recursion, ever.  This answers only for zones it is authoritative for and
-refuses everything else.  An open resolver on the internet is a gift to
-somebody running an amplification attack, and the difference between an
-authoritative server and an open resolver is exactly this refusal.
-
-No DNSSEC.  Signing wants key management, key rollover and a chain to the
-parent, and doing it badly is worse than not doing it: a broken signature makes
-a name fail to resolve everywhere, which is a harder outage than the one this
-feature exists to prevent.
+Deliberately not supported:
+- Recursion. Anything outside our zones gets REFUSED; an open resolver is an
+  amplification attack waiting to happen.
+- DNSSEC. Doing it badly makes names fail to resolve everywhere, which is a
+  worse outage than the one this feature exists to prevent.
 """
 import json
 import logging
@@ -60,24 +36,20 @@ import dns.rrset
 
 log = logging.getLogger("nfm.gslb")
 
-# A DNS message over UDP is capped unless the client says otherwise with EDNS.
-# 512 is what a client with no EDNS is required to cope with, and going over it
-# without setting the truncated bit is how you get answers that vanish for some
-# people and work for everybody you tested with.
+# Without EDNS a client only has to accept 512 bytes. Going over that without
+# setting TC gives answers that silently vanish for some clients.
 UDP_SAFE_BYTES = 512
 UDP_MAX_BYTES = 4096
 
-# A query nobody could reasonably send.  Anything longer is somebody probing.
+# Anything longer than this is someone probing.
 MAX_QUERY_BYTES = 4096
 
 
 class ZoneData:
     """
-    A snapshot of everything needed to answer, with no database in the path.
-
-    Built on a timer and swapped in whole.  A query is not the place to open a
-    session: an answer has to be quick, and a database that is briefly busy
-    would turn into timeouts for every visitor rather than a slow page for one.
+    Everything needed to answer, with no database in the query path. Built
+    on a timer and swapped in whole, so a busy database can't turn into
+    timeouts for every visitor.
     """
 
     def __init__(self):
@@ -86,10 +58,8 @@ class ZoneData:
 
     def zone_for(self, qname: str):
         """
-        The most specific zone we hold that covers this name.
-
-        Walked from the full name upward so a delegation inside a zone we also
-        hold answers from the child, which is what a resolver expects.
+        The most specific zone covering this name. Walks upward from the
+        full name so a child zone wins over its parent.
         """
         parts = qname.strip(".").lower().split(".")
         for i in range(len(parts)):
@@ -99,55 +69,33 @@ class ZoneData:
         return None
 
 
-# How long a serving loop waits for a packet before looking up to see whether
-# it has been asked to stop.
-#
-# The loops used to block forever waiting for a query.  Closing the socket from
-# another thread does not reliably wake a thread that is already inside
-# recvfrom or accept on Linux, so those threads stayed alive holding the port
-# open, and the next start could never bind: "Address already in use", with the
-# operating system's own socket list showing the port free, and no way back
-# except restarting the manager.  Waking twice a second costs nothing and means
-# the threads end when they are told to.
+# How long the serving loops block before rechecking the stop flag. Closing a
+# socket from another thread doesn't reliably wake a thread blocked in
+# recvfrom/accept on Linux, so without a timeout the old threads kept the
+# port and the next start failed with "Address already in use".
 POLL_SECONDS = 0.5
 
-# How long stop() waits for those threads before giving up on them.  Generous
-# next to the poll interval, because a thread that is mid answer should be
-# allowed to finish.
+# How long stop() waits for those threads. Generous, so a thread mid answer
+# can finish.
 STOP_TIMEOUT_SECONDS = 5.0
 
 
 class GslbServer:
     """
-    Listens on UDP and TCP and answers out of the snapshot.
-
-    Both, because TCP is not optional.  A reply too big for UDP gets the
-    truncated bit and the resolver asks again over TCP, and a server that only
-    speaks UDP simply fails for those names.
+    Listens on UDP and TCP and answers from the snapshot. TCP is required:
+    replies too big for UDP get TC set and the resolver retries over TCP.
     """
 
     def __init__(self, address=None, port=None):
         self.address = address or _own_address()
-        # The node's own address rather than everything, and that is not a
-        # detail.  Ubuntu and most others run a stub resolver on 127.0.0.53,
-        # so binding 0.0.0.0 collides with it and the listener never starts.
-        # Binding the address the world reaches this box on sidesteps that
-        # entirely, and is what an authoritative server should be answering on
-        # anyway: nothing should be asking it over loopback.
-        # A port anybody may bind, and the agent puts a redirect in front of it.
+        # Bind the node's own address, not 0.0.0.0, which collides with the
+        # stub resolver on 127.0.0.53 on most distros. An authoritative
+        # server has no business answering on loopback anyway.
         #
-        # Port 53 cannot be bound from in here and that is by design, not an
-        # oversight to work around.  The container runs unprivileged with
-        # no-new-privileges set, which makes the kernel ignore file
-        # capabilities outright, so the usual setcap trick is inert.  Turning
-        # that hardening off for a chart of a feature would be trading the
-        # thing that protects the most exposed component in the system.
-        #
-        # So this listens high and asks the agent, which is the root part and
-        # exists for exactly this, to redirect 53 to it.  A destination NAT
-        # rewrites where the packet is going and leaves who it came from alone,
-        # so the client address survives, which the capability route also gave
-        # us and the alternative of proxying through nginx did not.
+        # High port on purpose. The container runs unprivileged with
+        # no-new-privileges, so file capabilities are ignored and 53 can't be
+        # bound here. The agent installs a DNAT from 53 to this port, which
+        # also preserves the client address.
         self.port = int(port or 5353)
         self.data = ZoneData()
         self._udp = None
@@ -164,10 +112,8 @@ class GslbServer:
             return
         self._running = True
 
-        # Nothing should be left from a previous life, but say so rather than
-        # assume it: a thread still running here is the fault this timeout and
-        # the join in stop() exist to prevent, and it would otherwise show up
-        # as an unexplainable bind failure.
+        # Threads left over from a previous run would hold the port and make
+        # the bind below fail. Log it so that failure is explainable.
         alive = [t for t in self._threads if t.is_alive()]
         if alive:
             log.error("%s serving thread(s) from the last run are still going, "
@@ -200,14 +146,9 @@ class GslbServer:
 
     def stop(self):
         """
-        Stop serving, and do not come back until the threads have really gone.
-
-        The order matters.  The flag goes down first, then we wait for the
-        loops to notice and end, and only then are the sockets closed.  Closing
-        them first is what the old version did, and it left threads blocked
-        inside a call on a socket that had been taken away, still holding the
-        port, so the next start could never bind and only a restart of the
-        manager cleared it.
+        Stop serving and wait for the threads to exit. Order matters: drop
+        the flag, join the threads, then close the sockets. Closing first
+        can leave threads blocked on a dead socket still holding the port.
         """
         self._running = False
 
@@ -219,9 +160,8 @@ class GslbServer:
         stuck = [t for t in self._threads
                  if t.is_alive() and t is not threading.current_thread()]
         if stuck:
-            # Worth shouting about.  Carrying on and closing underneath them is
-            # exactly the state that used to wedge the port, so if this ever
-            # appears it is the thing to look at.
+            # This is the state that used to wedge the port. If it shows up,
+            # start here.
             log.error("%s serving thread(s) would not stop within %.0f seconds, "
                       "so the port may not come free", len(stuck),
                       STOP_TIMEOUT_SECONDS)
@@ -245,17 +185,12 @@ class GslbServer:
             try:
                 raw, peer = self._udp.recvfrom(UDP_MAX_BYTES)
             except socket.timeout:
-                # Nothing arrived in the poll interval.  Go round again and
-                # look at the flag, which is the whole point of the timeout.
-                #
-                # This has to be caught before OSError, because a timeout is a
-                # kind of OSError, and the branch below reads one as the socket
-                # having been closed and ends the thread.  Getting that order
-                # wrong stops the server answering anything at all.
+                # Poll timeout: loop and recheck the flag. Must be caught
+                # before OSError, since socket.timeout is an OSError and the
+                # branch below would end the thread.
                 continue
             except (OSError, AttributeError):
-                # Closed under us, or gone entirely.  Either way there is
-                # nothing left to serve on.
+                # Socket closed or gone; nothing left to serve on.
                 if self._running:
                     log.debug("udp socket closed")
                 return
@@ -272,25 +207,22 @@ class GslbServer:
             try:
                 conn, peer = self._tcp.accept()
             except socket.timeout:
-                # Same as the udp side: a timeout is how this loop gets to look
-                # at the flag, and it must be caught before OSError.
+                # Same as UDP: must be caught before OSError.
                 continue
             except (OSError, AttributeError):
                 if self._running:
                     log.debug("tcp socket closed")
                 return
 
-            # accept() on a socket with a timeout hands back a connection that
-            # has one too.  The handler sets its own, but say so here rather
-            # than leaving it to be inherited by accident.
+            # accept() on a socket with a timeout returns a connection that
+            # inherits it. Clear it explicitly; the handler sets its own.
             conn.settimeout(None)
             threading.Thread(target=self._handle_tcp, args=(conn, peer),
                              daemon=True).start()
 
     def _handle_tcp(self, conn, peer):
-        # DNS over TCP puts a two byte length in front of every message, both
-        # ways.  Forgetting it on the reply looks like the server answering
-        # garbage.
+        # DNS over TCP prefixes every message with a two byte length, in
+        # both directions.
         try:
             conn.settimeout(5)
             header = self._read_exactly(conn, 2)
@@ -329,18 +261,15 @@ class GslbServer:
     # -------------------------------------------------------------- answering
     def handle(self, raw: bytes, client: str, over_tcp=False):
         """
-        Turn one query into one reply.
-
-        Never raises out.  A malformed query is somebody scanning, not an
-        emergency, and a server that falls over on a bad packet is a server
-        anybody can turn off from the internet.
+        Turn one query into one reply. Never raises: a malformed packet is
+        someone scanning, and a server that crashes on one can be turned off
+        by anyone.
         """
         self.stats["queries"] += 1
         try:
             query = dns.message.from_wire(raw)
         except Exception:
-            # Not a DNS message we can read.  There is no useful reply to a
-            # packet we cannot even find the id in.
+            # Can't even find the message id, so there is nothing to reply.
             return None
 
         try:
@@ -358,9 +287,8 @@ class GslbServer:
 
             zone = self.data.zone_for(qname)
             if zone is None:
-                # Not ours.  REFUSED rather than an attempt to look it up, and
-                # that refusal is the line between an authoritative server and
-                # an open resolver somebody else can point at a victim.
+                # Not ours. REFUSED, never a lookup: this is what keeps us
+                # from being an open resolver.
                 self.stats["refused"] += 1
                 reply.set_rcode(dns.rcode.REFUSED)
                 reply.flags &= ~dns.flags.AA
@@ -381,11 +309,8 @@ class GslbServer:
 
     def _finish(self, reply, query, over_tcp):
         """
-        Serialise, and set the truncated bit if it will not fit over UDP.
-
-        The size a client can take comes from its own EDNS record when it sends
-        one, and is 512 when it does not.  Guessing high and hoping is how you
-        get a name that works for most people and silently fails for the rest.
+        Serialize, setting TC if it won't fit over UDP. The client's limit
+        comes from its EDNS record, or 512 without one.
         """
         if over_tcp:
             return reply.to_wire()
@@ -399,8 +324,7 @@ class GslbServer:
         if len(wire) <= limit:
             return wire
 
-        # Too big.  Answer with the header and the truncated bit, which tells
-        # the resolver to ask again over TCP.
+        # Too big: send the header with TC so the resolver retries over TCP.
         reply.answer = []
         reply.additional = []
         reply.flags |= dns.flags.TC
@@ -410,9 +334,8 @@ class GslbServer:
         apex = zone["name"]
         wanted = dns.rdatatype.to_text(qtype)
 
-        # SOA and NS for the zone itself are answered from the zone, not from
-        # a record somebody had to remember to add.  A zone that cannot answer
-        # its own SOA is one every checking tool will complain about.
+        # SOA and NS at the apex come from the zone settings, so they always
+        # exist without anyone having to add them.
         if qname == apex and wanted == "SOA":
             reply.answer.append(self._soa_rrset(zone))
             self.stats["answered"] += 1
@@ -429,15 +352,14 @@ class GslbServer:
             found = self._wildcard_for(zone, qname)
 
         if found is None:
-            # The name does not exist here.  NXDOMAIN with the SOA in the
-            # authority section, because that is where a resolver reads how
-            # long it may remember that it does not exist.
+            # NXDOMAIN with the SOA in authority; resolvers read the negative
+            # cache time from it.
             self.stats["nxdomain"] += 1
             reply.set_rcode(dns.rcode.NXDOMAIN)
             reply.authority.append(self._soa_rrset(zone))
             return
 
-        # A CNAME answers every type, which is the rule that surprises people.
+        # A CNAME answers every query type.
         cname = found.get("CNAME")
         if cname and wanted != "CNAME":
             reply.answer.append(dns.rrset.from_text(
@@ -448,9 +370,8 @@ class GslbServer:
 
         entry = found.get(wanted)
         if entry is None or not entry["values"]:
-            # The name exists, this type does not.  NOERROR with nothing in the
-            # answer, which is not the same as NXDOMAIN and resolvers treat the
-            # two differently.
+            # Name exists but not this type: NOERROR/NODATA, which resolvers
+            # treat differently from NXDOMAIN.
             reply.authority.append(self._soa_rrset(zone))
             return
 
@@ -461,11 +382,9 @@ class GslbServer:
     @staticmethod
     def _wildcard_for(zone, qname):
         """
-        A wildcard covers one level and only where nothing more specific is.
-
-        `*.example.com` answers for `a.example.com` and not for `a.b.example.com`
-        and not for `example.com` itself, which is the same one label rule a
-        wildcard certificate follows.
+        A wildcard covers exactly one label and only where nothing more
+        specific exists. `*.example.com` matches `a.example.com`, not
+        `a.b.example.com` or `example.com`.
         """
         apex = zone["name"]
         if not qname.endswith("." + apex):
@@ -480,8 +399,7 @@ class GslbServer:
                                           if zone["nameservers"] else zone["name"])
         contact = zone["soa_contact"] or "hostmaster"
         if "@" in contact:
-            # The contact is written as a name, with the at sign replaced by a
-            # dot, which is one of the odder corners of the format.
+            # The SOA contact is a name with the @ replaced by a dot.
             local, _, domain = contact.partition("@")
             contact = f"{local.replace('.', '\\\\.')}.{domain}"
         return dns.rrset.from_text(
@@ -499,11 +417,9 @@ class GslbServer:
 
 def build_zone_data(session, healthy_nodes) -> ZoneData:
     """
-    Turn the database into the flat thing a query can be answered from.
-
-    `healthy_nodes` is a set of node names decided by the caller rather than
-    worked out here, so the rule about what counts as healthy lives in one
-    place and this stays a lookup.
+    Flatten the database into what queries are answered from.
+    `healthy_nodes` comes from the caller so the health rule lives in one
+    place.
     """
     from app.models import GslbZone
 
@@ -550,12 +466,11 @@ def build_zone_data(session, healthy_nodes) -> ZoneData:
 
 def _answer_node(answer):
     """
-    The node an answer belongs to, as a name, or None if it is not tied to one.
+    The node name an answer is tied to, or None.
 
-    By name because an id on a replicated row means whatever the receiving
-    database happens to have under that number, which is a different machine.
-    node_id is still read as a fallback for rows written before names were
-    stored, and on the node that authored those rows it is correct.
+    By name, since ids on replicated rows differ between databases. node_id
+    is a fallback for rows written before names were stored; it is correct
+    on the node that wrote them.
     """
     name = (getattr(answer, "node_name", None) or "").strip()
     if name:
@@ -566,18 +481,16 @@ def _answer_node(answer):
 
 def _live_values(record, healthy_nodes):
     """
-    Which of a record's answers should be handed out right now.
-
-    The whole feature is in here.  An answer tied to a node is only given when
-    that node is healthy, and what happens when none of them are is a choice
-    the person made when they set the record up.
+    Which of a record's answers to hand out right now. Node-tied answers
+    are only given while the node is healthy; what happens when none are is
+    the record's when_all_down setting.
     """
     enabled = [a for a in record.answers if a.enabled]
     if not enabled:
         return []
 
     if record.record_type == "CNAME":
-        # Nothing to health check about a name, and only one is legal.
+        # Nothing to health check, and only one CNAME is legal.
         return [_as_target(enabled[0].value)]
 
     healthy = [a for a in enabled
@@ -585,9 +498,9 @@ def _live_values(record, healthy_nodes):
 
     if not healthy:
         if record.when_all_down == "serve_all":
-            # A name that resolves to a broken box gives the visitor an error
-            # they can describe.  A name that resolves to nothing looks to them
-            # like the company has gone, and to us like DNS is broken.
+            # A name pointing at a broken box gives the visitor an error
+            # they can report. A name resolving to nothing looks like DNS
+            # itself is broken.
             healthy = enabled
         else:
             return []
@@ -613,10 +526,8 @@ def _as_target(value: str) -> str:
 
 def _own_address() -> str:
     """
-    This node's address, as the cluster knows it.
-
-    Falls back to everything only when there is nothing configured, which is a
-    fresh install that has no zones to serve either.
+    This node's configured address. Falls back to 0.0.0.0 only when nothing
+    is configured, i.e. a fresh install with no zones to serve.
     """
     try:
         from app.config import get_settings
@@ -630,12 +541,9 @@ def _own_address() -> str:
 
 def node_addresses(session) -> dict:
     """
-    Every address each node is known by, keyed by node name.
-
-    Three places hold one: the address the cluster talks to it on, the public
-    address it discovered by asking the internet what it goes out as, and the
-    list of addresses its own interfaces hold.  A node behind NAT has a
-    different answer in the first two, which is exactly why all three count.
+    Every address each node is known by, keyed by node name: the cluster
+    address, the discovered public IP and its interface addresses. Behind
+    NAT the first two differ, so all of them count.
     """
     from app.models import Node
 
@@ -645,10 +553,8 @@ def node_addresses(session) -> dict:
         for value in (node.address, node.public_ip):
             if value and str(value).strip():
                 known.add(str(value).strip())
-        # local_addresses is a list of objects, one per interface, not a list
-        # of strings.  Storing str(entry) put a whole json object into the set
-        # and into the message a person reads.  Older rows may still be plain
-        # strings, so both shapes are handled.
+        # Entries are dicts (one per interface); older rows may be plain
+        # strings, so handle both.
         try:
             for entry in json.loads(node.local_addresses or "[]"):
                 value = entry.get("address") if isinstance(entry, dict) else entry
@@ -662,13 +568,8 @@ def node_addresses(session) -> dict:
 
 def _worth_naming(addresses) -> list:
     """
-    The addresses worth showing somebody, in a sentence.
-
-    Every address counts when deciding whether an answer matches, including
-    loopback and link local: an answer pointing at one of those is held by the
-    node and is still almost certainly a mistake, and that is a different
-    conversation.  Printing them all makes the message unreadable, so the list
-    a person sees leaves out the ones nobody would ever mean to publish.
+    Addresses worth showing in a message. Matching still uses all of them;
+    this just leaves out loopback and link local so the text stays readable.
     """
     out = []
     for value in sorted(addresses):
@@ -681,25 +582,15 @@ def _worth_naming(addresses) -> list:
 
 def answer_address_warnings(session) -> list:
     """
-    Answers that hand out an address their own node does not hold.
+    Answers that hand out an address their own node doesn't hold.
 
-    Reported from the field, and it cost a real outage to find.  An answer was
-    tied to the second node and pointed at an address one digit away from that
-    node's real one.  Everything looked right: both nodes answered, the record
-    resolved, the page showed two healthy answers.
+    Catches typos that are otherwise invisible: an answer one digit off from
+    its node's real address looks fine while the other node carries the
+    traffic, and only fails once that node is gone.
 
-    It only showed when the other node was taken away, because until then the
-    other node's answer was the one being used.  Then the name resolved solely
-    to an address that belonged to nobody, and it read as DNS having failed.
-
-    A warning and never a refusal.  Pointing an answer at something other than
-    the node itself is a real thing people do: a floating address that moves
-    between machines, or a service in front of the node.  The product cannot
-    tell that apart from a typo, but it can say "this does not look like that
-    node" and let somebody who knows decide.
-
-    Answers not tied to a node are left alone entirely.  There is nothing to
-    compare them against, which is the whole meaning of not tying them.
+    A warning, never a refusal. Floating addresses and services in front of a
+    node are legitimate. Answers not tied to a node are skipped since there
+    is nothing to compare them to.
     """
     from app.models import GslbAnswer, GslbRecord, GslbZone
 
@@ -750,29 +641,18 @@ def answer_address_warnings(session) -> list:
 
 def healthy_node_names(session) -> set:
     """
-    Which nodes are well enough to be handed out in a DNS answer, by name.
+    Nodes healthy enough to hand out in a DNS answer, by name.
 
-    Stricter than the cluster page's idea of online, and deliberately so.  A
-    node whose manager is answering but whose nginx is stopped will accept a
-    connection on port 80 from nobody, so sending traffic there is worse than
-    leaving it out.  What matters for an answer is whether the thing that
-    serves the site is running, not whether the thing that manages it is.
+    Stricter than "online" on the cluster page. What matters is whether
+    nginx is actually serving, not whether the manager is up. Three gates:
+    node online, nginx active, and nginx_serving not False. The third exists
+    because on August 24, 2026 a wedged nginx passed the first two for 73
+    minutes while serving nobody. nginx_serving comes from a real request
+    through the node's own listener; see app/core/frontend_probe.py.
 
-    Three gates, and the third one is here because the first two were not
-    enough.  On 24 August 2026 a node passed both for 73 minutes while serving
-    nobody: its manager was online and answering, and `systemctl is-active
-    nginx` said `active`, because a wedged nginx is still a running one.  Half
-    of every DNS answer pointed at it the whole time.
-
-    So `nginx_serving` is the answer to a different question, asked by putting
-    a real request through that node's own listener.  See
-    app/core/frontend_probe.py.
-
-    Only an explicit False withdraws a node.  None means nothing has reported
-    yet, and a node is not taken off the internet for having been quiet: during
-    a rolling upgrade the node running the older manager never sets this, and
-    treating that as a failure would withdraw each node in turn as it was
-    upgraded.
+    Only an explicit False withdraws a node. None means nothing has reported
+    yet, e.g. an older manager during a rolling upgrade, and treating that as
+    a failure would withdraw each node in turn.
     """
     from app.models import Node, NodeState
 
@@ -788,18 +668,15 @@ def healthy_node_names(session) -> set:
     return out
 
 
-# The old name, kept so nothing calling it breaks quietly.  It returns names
-# now, which is the whole point of the change, so the name would be a lie.
+# Old name kept for existing callers. It returns names now, not ids.
 healthy_node_ids = healthy_node_names
 
 
 async def ensure_redirect(server=None):
     """
-    Ask the agent to point port 53 at wherever we are listening.
-
-    Called after the listener is up rather than before, so a rule never exists
-    with nothing behind it.  A box with a redirect and no listener answers
-    nothing at all, which looks exactly like the machine being down.
+    Point port 53 at our listener via the agent. Only called once the
+    listener is up: a redirect with nothing behind it answers nothing, which
+    looks like the box being down.
     """
     from app.core.agent_client import get_agent
 
@@ -816,11 +693,8 @@ async def ensure_redirect(server=None):
 
 async def clear_redirect(server=None):
     """
-    Give port 53 back, for when there is nothing left to answer for.
-
-    A redirect pointing at a listener that has stopped is worse than no
-    redirect: the box takes port 53 and then answers nothing on it, so anything
-    still asking gets silence rather than moving on to another nameserver.
+    Remove the port 53 redirect. A redirect to a stopped listener is worse
+    than none: clients get silence instead of moving to another nameserver.
     """
     from app.core.agent_client import get_agent
 
@@ -833,22 +707,13 @@ async def clear_redirect(server=None):
 
 async def reconcile(server=None):
     """
-    Make the listener match the zones, whenever either one changes.
+    Make the listener match the zones.
 
-    Starting the listener used to happen once, at boot, and only if a zone was
-    already in the database.  That is the wrong moment for the case that
-    matters most.  A node joining an existing cluster comes up empty and gets
-    its config a few seconds later, so it always lost that race and then never
-    looked again: it would sit there, part of the cluster, healthy in every
-    view, and never answer a single DNS query until somebody restarted it.
-
-    The node that stays quiet is the standby, which is the one whose whole job
-    is to keep answering after the other one dies.  So the fleet looks like it
-    has two nameservers and has one, and finds out which at the worst moment.
-
-    Running it on the same timer as the refresh means a zone added on any node
-    brings that node's listener up within a few seconds, and the last zone
-    being deleted hands port 53 back.
+    Starting only at boot missed the important case: a joining node is empty
+    at boot and gets its zones seconds later, so the standby, whose whole job
+    is to keep answering after the active node dies, never answered at all.
+    Running on the refresh timer brings the listener up within seconds of a
+    zone appearing and gives port 53 back when the last one is removed.
     """
     server = server or get_server()
     data = refresh(server)
@@ -871,22 +736,16 @@ async def reconcile(server=None):
         return
 
     if wanted and server._running:
-        # Re-assert the firewall rule if something else cleared it, which a
-        # reboot or anybody flushing nftables will do.  Asked about first
-        # rather than just rewritten, because writing it means dropping the
-        # table and rebuilding it, and doing that every few seconds would put a
-        # small hole in the one thing this is here to keep up.
+        # Re-assert the redirect if something cleared it (a reboot, an
+        # nftables flush). Check status first: rewriting drops and rebuilds
+        # the table, and doing that every few seconds leaves brief gaps.
         from app.core.agent_client import get_agent
         try:
             status = await get_agent().call("dns_redirect_status", timeout=15)
-            # Ask about the rule, and about whether it is the rule we want.
-            #
-            # This read `installed`, which the agent never sent: it answered
-            # `present`.  So the check was false every time and this rebuilt
-            # the nftables table every ten seconds for the life of the node,
-            # each rebuild being a delete followed by a write with a gap in
-            # between.  The comment above says why that is the one thing not
-            # to do here, and it was being done on a timer.
+            # Check both that the rule exists and that it points where we
+            # want. A mismatched status key once made this rebuild the table
+            # every ten seconds, exactly what the check above is meant to
+            # avoid.
             want = f"{server.address}:{server.port}"
             wrong_target = status.get("target") not in (None, want)
             if not status.get("installed"):
@@ -897,9 +756,8 @@ async def reconcile(server=None):
                          "rewriting it", status.get("target"), want)
                 await ensure_redirect(server)
             elif not status.get("matches_all_local", True):
-                # An older agent's rule, left behind by an upgrade.  It matches
-                # one address, so every other address this node answers on has
-                # no redirect at all.
+                # A rule from an older agent that only matched one address,
+                # leaving the node's other addresses without a redirect.
                 log.info("the dns redirect only matches one address, rewriting "
                          "it to cover every address this node holds")
                 await ensure_redirect(server)
@@ -909,12 +767,9 @@ async def reconcile(server=None):
 
 def refresh(server=None):
     """
-    Rebuild the snapshot the server answers from.
-
-    Runs on a timer rather than on a change, because health changes on its own
-    all day and there is no single place a change lands.  A few seconds of
-    staleness is well inside the TTL anybody would set, so nothing is gained by
-    being cleverer.
+    Rebuild the snapshot the server answers from. On a timer because health
+    changes constantly with no single place to hook; a few seconds of lag is
+    well inside any sensible TTL.
     """
     from app.db import session_scope
 
@@ -925,9 +780,8 @@ def refresh(server=None):
         server.data = data
         return data
     except Exception as exc:
-        # Keep serving the last good snapshot.  A database hiccup should not
-        # take a name off the internet, and the old answers are still broadly
-        # right: health does not change that fast.
+        # Keep the last good snapshot. A database hiccup shouldn't take a
+        # name off the internet, and health rarely changes that fast.
         log.error("could not rebuild the gslb zones, keeping the last set: %s", exc)
         return server.data
 

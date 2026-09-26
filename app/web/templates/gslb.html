@@ -68,8 +68,7 @@
 </style>
 
 <script nonce="{{ csp_nonce }}">
-// Waits for app.js, which the layout loads after this block, so window.NFM
-// exists by the time anything here runs.
+// Waits for app.js, which the layout loads after this block.
 document.addEventListener("DOMContentLoaded", function () {
   const CAN_EDIT = {{ 'true' if can('edit_sites') else 'false' }};
   let NODES = [];
@@ -96,10 +95,9 @@ document.addEventListener("DOMContentLoaded", function () {
     drawZones(data.zones || []);
   }
 
-  // The listener and the database are two different things, and the whole of
-  // what goes wrong here lives in the gap between them.  A zone can be saved,
-  // look right on this page, and still resolve nowhere, so this panel reports
-  // what the listener is doing rather than what was typed in.
+  // The listener and the database are separate, and the problems live in
+  // between. A zone can be saved and look right here yet resolve nowhere, so
+  // this panel reports what the listener is actually doing.
   function drawStatus(server, zones) {
     const up = !!server.listening;
     const loaded = server.zones_loaded || 0;
@@ -120,9 +118,9 @@ document.addEventListener("DOMContentLoaded", function () {
         (stats.queries != null ? " &middot; " + esc(stats.queries) + " queries answered" : "") +
         "</div>";
 
-      // Port 53 is what the world asks on, and the listener is deliberately not
-      // on it.  Saying so here saves somebody testing the high port, getting an
-      // answer, and assuming the public path works.
+      // Port 53 is what the world queries, and the listener is deliberately
+      // not on it. Getting an answer on the high port does not prove the
+      // public path works.
       if (String(server.port) !== "53") {
         html += '<div class="small faint" style="margin-top:.5rem">' +
           "The world asks on port 53.  This node listens on " + esc(server.port) +
@@ -152,8 +150,8 @@ document.addEventListener("DOMContentLoaded", function () {
   }
 
   function answerLine(a) {
-    // A node an answer is tied to that is not healthy is the interesting case,
-    // because that is the answer being held back on purpose.
+    // An unhealthy tied node is the interesting case: that answer is being
+    // held back on purpose.
     let state = "unknown", why = "always handed out, not tied to a node";
     if (a.node_name) {
       const up = HEALTHY.indexOf(a.node_name) !== -1;
@@ -163,14 +161,12 @@ document.addEventListener("DOMContentLoaded", function () {
     }
     if (!a.enabled) { state = "unknown"; why = "turned off here"; }
 
-    // An address that does not belong to the node it is tied to.  Said here,
-    // beside the answer, because that is where somebody can act on it.  It is
-    // a warning and never a refusal: a floating address that moves between
-    // machines looks exactly the same from here and is perfectly valid.
+    // An address that does not belong to the node it is tied to. A warning,
+    // never a refusal, since a floating address looks the same and is valid.
     //
-    // It matters because it is invisible in normal running.  The other node's
-    // answer covers for it, and the day that node goes away the name resolves
-    // only to an address belonging to nobody.
+    // It stays invisible in normal running because the other node's answer
+    // covers for it. When that node goes away, the name resolves only to an
+    // address nobody owns.
     let warn = "";
     if (a.address_warning) {
       warn = '<div class="faint small" style="margin-left:1.2rem;color:#b45309">' +
@@ -213,10 +209,9 @@ document.addEventListener("DOMContentLoaded", function () {
       }).join("") + "</tbody></table>";
   }
 
-  // The delegation is the step people miss, and missing it looks exactly like
-  // the feature being broken: everything on this page reads fine and the name
-  // still does not resolve.  So the records are spelled out per zone, with this
-  // cluster's real addresses already filled in rather than described.
+  // Delegation is the step people miss, and it looks like the feature is
+  // broken: this page reads fine and the name still does not resolve. So the
+  // records are spelled out per zone with this cluster's real addresses.
   function delegation(zone) {
     const ns = zone.nameservers || [];
     if (!ns.length) {
@@ -227,8 +222,8 @@ document.addEventListener("DOMContentLoaded", function () {
     let lines = ns.map(function (n) {
       return zone.name + ".   300   IN   NS   " + n + ".";
     });
-    // Glue.  A nameserver named inside the zone it serves cannot be looked up
-    // without it, which is a loop, and it is the second thing people miss.
+    // Glue. A nameserver named inside its own zone cannot be resolved
+    // without it. The second thing people miss.
     ns.forEach(function (n, i) {
       const node = NODES[i];
       if (!node) { return; }
@@ -421,13 +416,11 @@ document.addEventListener("DOMContentLoaded", function () {
       const drop = ev.target.closest("[data-drop]");
       if (drop) { drop.closest("[data-answer]").remove(); }
     });
-    // Picking a node fills in its address, because that is what the answer is
-    // nearly always meant to be and retyping it is just a chance to get it
-    // wrong.  Only when the box is empty, so a deliberate value is never eaten.
+    // Picking a node fills in its address, since that is nearly always the
+    // answer. Only when the box is empty, so a typed value is never lost.
     //
-    // Which address depends on the record type, and it has to: these nodes have
-    // a public IPv6 as well as an IPv4, and putting the v6 one in an A record
-    // gives you a field that looks filled in and will not save.
+    // The address depends on the record type. Nodes have both IPv4 and a
+    // public IPv6, and a v6 address in an A record will not save.
     el("r-answers").addEventListener("change", function (ev) {
       const pick = ev.target.closest("[data-node]");
       if (!pick) { return; }
@@ -489,10 +482,9 @@ document.addEventListener("DOMContentLoaded", function () {
         if (existing) {
           rec = await NFM.api("/gslb/records/" + existing.id,
                               { method: "PUT", body: body });
-          // The answer endpoints add and remove one at a time, so an edit
-          // replaces the set: drop what was there, then put back what the form
-          // holds.  Doing it in this order means a changed address is not
-          // briefly present twice, which the record would hand out.
+          // Answers are added and removed one at a time, so an edit replaces
+          // the set: remove the old ones first, then add the form's. In that
+          // order a changed address is never briefly served twice.
           for (const old of existing.answers || []) {
             await NFM.api("/gslb/answers/" + old.id, { method: "DELETE" });
           }
@@ -543,10 +535,9 @@ document.addEventListener("DOMContentLoaded", function () {
         const data = await NFM.api("/gslb/zones");
         for (const z of data.zones || []) {
           const found = (z.records || []).find(function (r) {
-            // Both sides through String, because one of them always is.  An
-            // id read off an attribute is text and an id out of json is a
-            // number, so a strict compare between them is never true.  It
-            // found nothing, threw nothing, and the button just did nothing.
+            // Compare as strings: an id from an attribute is text and one
+            // from json is a number, so strict equality never matched and
+            // the button silently did nothing.
             return String(r.id) === String(recEdit.dataset.rec);
           });
           if (found) { openRecord(z.id, z.name, found); return; }
@@ -569,8 +560,8 @@ document.addEventListener("DOMContentLoaded", function () {
   if (add) { add.addEventListener("click", function () { openZone(null); }); }
 
   load();
-  // Health moves on its own, so the dots go stale sitting here.  Slow enough
-  // that it is not a load on the box, quick enough to watch a failover happen.
+  // Health changes on its own, so refresh the dots. Slow enough not to load
+  // the box, quick enough to watch a failover.
   setInterval(load, 15000);
 });
 </script>

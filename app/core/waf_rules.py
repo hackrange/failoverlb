@@ -1,24 +1,21 @@
 """
 The OWASP Core Rule Set, and keeping it on every node.
 
-The engine is only half a WAF.  The rules are the half people mean when they
-say ModSecurity, and they have the same problem the country database has: they
-must be on every node or the node without them refuses the whole config and the
-apply is turned away.  So this is deliberately the same shape as
-`app/core/geoip.py`, down to the schedule names, rather than a second way of
-doing the same job.
+Like the country database, the rules must be on every node or the node
+without them rejects the config.  This mirrors `app/core/geoip.py`, down to
+the schedule names.
 
-Two tracks, and the difference is what you are optimising for:
+Two tracks:
 
-  lts       the 4.25 series, which is the first long term support line for CRS
-            4.  Fewer new detections, far fewer new false positives.  Right for
-            a box somebody installs and leaves alone.
-  latest    whatever the newest release is.  Newest detections, and the newest
-            false positives with them, which land on sites in blocking mode.
+  lts       the 4.25 series, the first long term support line for CRS 4.
+            Fewer new detections and far fewer new false positives.  Right
+            for a box that is installed and left alone.
+  latest    the newest release.  Newest detections, and newest false
+            positives, which hit sites in blocking mode.
 
-The manager names a track and nothing else.  The agent works out which release
-that is, where to get it and where to put it, because a verb that took a URL
-would be a way to unpack any tarball anywhere as root.
+The manager only names a track.  The agent picks the release, source and
+destination, since a verb that took a URL could unpack any tarball anywhere
+as root.
 """
 import logging
 from datetime import datetime, timedelta, timezone
@@ -30,8 +27,8 @@ log = logging.getLogger("nfm.waf.rules")
 
 TRACKS = ("lts", "latest")
 
-# Same names and meanings as the country database, on purpose.  Never is a real
-# answer: a fleet with no egress wants the rules put there once and left alone.
+# Same names and meanings as the country database.  "never" is for fleets
+# with no egress, where the rules are installed once by hand.
 SCHEDULES = {
     "never": None,
     "daily": timedelta(days=1),
@@ -48,11 +45,8 @@ def configured_track() -> str:
 
 async def install_on_fleet() -> dict:
     """
-    Put the rule set on every node, and remember when.
-
-    Every node rather than the one somebody is looking at, for the same reason
-    the country database goes everywhere: a site is served by whichever node is
-    active, and a config is only as appliable as the least equipped box.
+    Install the rule set on every node and record when.  Any node may end
+    up active, so all of them need it.
     """
     track = configured_track()
     results = await ask_every_node("crs_install", {"track": track})
@@ -66,10 +60,9 @@ async def install_on_fleet() -> dict:
                            datetime.now(timezone.utc).isoformat(timespec="seconds"),
                            actor="waf")
 
-    # What each node ended up on, which is the thing worth knowing when they
-    # disagree.  Two nodes on different rule set versions is not an outage, but
-    # it is a site that behaves differently depending on which box answered,
-    # and that is very hard to work out from the outside.
+    # Nodes on different rule set versions aren't an outage, but the site then
+    # behaves differently depending on which box answers.  Hard to spot from
+    # outside, so warn.
     versions = {name: r.get("version") for name, r in results.items() if r.get("ok")}
     if len(set(versions.values())) > 1:
         log.warning("the fleet is not on one rule set version: %s", versions)
@@ -104,18 +97,15 @@ async def fleet_status() -> dict:
         "last_install": settings_store.get("waf_crs_last_install"),
         "nodes": nodes,
         "everywhere": bool(nodes) and all(n["present"] for n in nodes.values()),
-        # Said plainly rather than left for somebody to spot by comparing rows.
         "agreed": len(versions) <= 1,
     }
 
 
 async def refresh_if_due() -> dict:
     """
-    The scheduled half.  Cheap when there is nothing to do, which is most ticks.
+    Scheduled refresh.  Cheap when nothing is due, which is most ticks.
 
-    Runs from the active node only.  Two nodes fetching the same release at the
-    same moment is bandwidth for nothing, and the install covers the whole fleet
-    anyway.
+    Only the active node runs it; the install covers the whole fleet anyway.
     """
     from app.core.cluster import get_cluster
     from app.db import session_scope

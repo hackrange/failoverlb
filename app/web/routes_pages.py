@@ -1,10 +1,9 @@
 """
-The pages people actually look at.
+HTML page routes.
 
-Server rendered HTML with a small amount of JavaScript on top.  No build step,
-no framework, no node_modules.  For a management tool that has to work on an
-isolated network at 3am, plain HTML that renders without JavaScript beats a
-single page app that needs a bundle to load first.
+Server rendered templates with a little JavaScript on top.  No build step and
+no frontend framework, so the GUI works on an isolated network without a
+bundle to fetch.
 """
 
 import json
@@ -59,39 +58,15 @@ templates = Jinja2Templates(directory=str(TEMPLATE_DIR))
 
 def _asset_version() -> str:
     """
-    A short stamp that changes whenever anything the browser runs changes.
+    Short hash of everything the browser runs: app.js, app.css and templates.
 
-    Two jobs, and it grew a second one the hard way.
+    Used to bust the static asset cache after an upgrade, and compared against
+    the stamp on every API response so an open tab can tell it is running
+    stale inline JavaScript.  Templates are included for that second reason.
 
-    **Busting the cache.**  Without it a browser keeps the css and js it
-    already has.  Both are served with an ETag, which lets a browser
-    revalidate, but nothing makes it ask, so after an upgrade people carry on
-    with the old page logic and hit bugs that were fixed hours ago.
-
-    **Telling an open tab it is out of date.**  A page already loaded is not
-    re-fetched however good the cache headers are, and most of this GUI's
-    JavaScript lives inline in the templates, so a tab left open across an
-    upgrade keeps running the old script forever.  That produced two confusing
-    bug reports in one afternoon: a form missing a field that had shipped, and
-    a page whose buttons called an endpoint that had moved.
-
-    **So the templates are in the stamp too**, which they were not before.
-    That is the whole reason a tab can now notice: the stamp it was rendered
-    with is compared against the one every API response carries, and the two
-    differ the moment anything the browser runs has changed underneath it.
-
-    Built from what is on disk rather than a release number, so a fix that
-    ships without a version bump still counts.
-
-    **From the contents, not the modification times**, and on a fleet that is
-    the difference between working and crying wolf.  Timestamps are set by
-    whenever each node happened to check the code out, so two nodes running the
-    identical commit produced different stamps.  A page loaded from one node
-    and an answer from the other would then insist the page was out of date
-    when nothing had changed, which is exactly the warning nobody believes the
-    second time they see it.  Hashing the bytes gives every node the same
-    answer for the same code, which is the only thing that makes this claim
-    trustworthy.
+    Hashed from file contents, not mtimes.  Mtimes differ between nodes
+    running the same commit, which made pages falsely report themselves as
+    out of date when served by one node and answered by another.
     """
     digest = hashlib.sha256()
     static = Path(__file__).parent / "static"
@@ -138,14 +113,11 @@ def require_page_user(request: Request, db: DBSession):
 
 def _own_role() -> str:
     """
-    This node's role, as a plain string.
+    This node's role as a plain string.
 
-    Read fresh rather than cached, because it changes on failover and a chip
-    that is right at login and wrong an hour later is the same lie told slower.
-
-    Pulled out as a string on purpose.  Handing the template an ORM object from
-    a session that has already closed means the first attribute it touches
-    raises, and it would raise inside the layout, on every page.
+    Read fresh on every render because it changes on failover.  Returned as a
+    string, not an ORM object, since the session is closed by the time the
+    layout touches it.
     """
     from app.models import Node
 
@@ -158,9 +130,7 @@ def _own_role() -> str:
                 return "unknown"
             return node.role.value
     except Exception:
-        # The layout must render even when the database is unhappy.  Saying
-        # unknown is honest, and it is better than a stack trace where the
-        # navigation should be.
+        # The layout must still render if the database is unavailable.
         return "unknown"
 
 
@@ -178,24 +148,17 @@ def render(request: Request, template: str, user, csrf_token: str = None, **cont
         template,
         {
             "user": user,
-            # What this node actually is, on every page.
-            #
-            # The chip used to read this from a "me" that only two pages passed,
-            # so everywhere else it fell through to standby and said so with a
-            # straight face.  On a tool whose whole job is failover, telling
-            # somebody they are on the standby when they are on the active one
-            # is worse than saying nothing, because they will act on it.
+            # Passed on every page.  The role chip used to fall back to
+            # "standby" on pages that did not supply it, which was wrong.
             "node_role": _own_role(),
             "can": lambda perm: can(user, perm),
             "node_name": settings.node_name,
             "csp_nonce": getattr(request.state, "csp_nonce", ""),
             "active_page": template.replace(".html", "").replace("site_detail", "sites").replace("pool_detail", "pools"),
-            # Everything in the templates is built from this, so the whole GUI
-            # works the same whether it is at the root or behind a prefix.
+            # URL prefix for every link, so the GUI works behind a sub-path.
             "base": settings.root_path.rstrip("/"),
-            # Forms that post normally cannot set a header, so they carry the
-            # token in a hidden field instead.  It has to be rendered into the
-            # page, which means we need the value before the cookie is set.
+            # Plain form posts cannot set a header, so they carry the CSRF
+            # token in a hidden field rendered from this value.
             "csrf_token": csrf_token or "",
             **context,
         },
@@ -233,12 +196,10 @@ async def login_page(request: Request, db: DBSession = Depends(get_db),
 
 def _totp_page(request: Request, half: str, error: str = None):
     """
-    The second stage of signing in.
+    Second login stage (TOTP code).
 
-    Carries a ticket rather than the password.  Same CSRF treatment as the
-    first stage: rendered into the page and set as the cookie, both the same
-    value.  Missing it here only affects people who already have an
-    authenticator, which is everybody from their second login onwards.
+    Carries a ticket instead of the password.  Needs the same CSRF handling as
+    the first stage: the token rendered into the page and set as the cookie.
     """
     csrf = ensure_csrf_token(request)
     response = templates.TemplateResponse(
@@ -267,13 +228,9 @@ async def do_login(request: Request, db: DBSession = Depends(get_db),
     await check_csrf(request)
     ip = client_ip(request)
 
-    # Two ways in here, and which one it is depends on whether the password has
-    # already been accepted.
-    #
-    # The second stage used to post the password again out of a hidden field.
-    # It now posts a ticket that stands for "this address got the password
-    # right a moment ago", so the credential leaves the browser after one
-    # request instead of living in the page for the length of the login.
+    # First stage posts username and password.  The TOTP stage posts a ticket
+    # ("half") meaning the password was already accepted, so the password is
+    # not kept in the page between the two steps.
     if half:
         result = resume_totp(db, half, totp, ip)
         username = (result.user.username if result.user else username) or ""
@@ -287,9 +244,8 @@ async def do_login(request: Request, db: DBSession = Depends(get_db),
         audit.record("auth.login", user=username, source_ip=ip,
                      result="failed", detail=result.reason)
         if result.needs_totp and half:
-            # Still on the second stage, so keep the ticket on the form.  The
-            # alternative is retyping the password after every mistyped digit,
-            # and the lockout already bounds how many guesses anybody gets.
+            # Keep the ticket so a mistyped code does not mean retyping the
+            # password.  The lockout still limits guesses.
             return _totp_page(request, half, error=result.reason)
         return await login_page(
             request, db,
@@ -298,13 +254,8 @@ async def do_login(request: Request, db: DBSession = Depends(get_db),
         )
 
     if result.needs_enrollment:
-        # A local account without a second factor does not get in.  They set one
-        # up first.  This is the weakest way into the tool otherwise.
-        #
-        # Still log it as a login.  The password was right and a session now
-        # exists, so as far as the audit trail is concerned somebody got in.
-        # Only logging the ones that made it all the way through would leave a
-        # first login missing from the record entirely.
+        # Local accounts must enroll a second factor before going further.
+        # Audited as a login anyway, since a session now exists.
         token = create_session(db, result.user, ip, request.headers.get("user-agent"))
         db.commit()
         audit.record("auth.login", user=result.user, source_ip=ip,
@@ -315,12 +266,6 @@ async def do_login(request: Request, db: DBSession = Depends(get_db),
         return response
 
     if result.needs_totp:
-        # The second stage of signing in, where they type the code from their
-        # authenticator.  This form needs the same token treatment as the first
-        # stage: rendered into the page and set as the cookie, both the same
-        # value.  Miss it here and only people who already have an authenticator
-        # set up are affected, which is everybody from their second login
-        # onwards.
         return _totp_page(request, begin_totp(result.user, ip))
 
     token = create_session(db, result.user, ip, request.headers.get("user-agent"))
@@ -330,11 +275,8 @@ async def do_login(request: Request, db: DBSession = Depends(get_db),
     log.info("%s signed in from %s", result.user.username, ip)
 
     target = "/change-password" if result.user.must_change_password else "/"
-    # _p, not the bare path.  This one held a variable rather than a literal, so
-    # an earlier sweep that prefixed every redirect walked straight past it.
-    # The result was that signing in sent you to / on whatever hostname this is
-    # served under, which when something else owns that root means you land on
-    # a completely different application and think the login failed.
+    # Must go through _p like every other redirect, or a GUI served under a
+    # prefix sends the user to whatever owns the bare root after login.
     response = RedirectResponse(_p(target), status_code=303)
     _set_session_cookie(response, token)
     issue_csrf_token(response, token)
@@ -347,9 +289,8 @@ def _set_session_cookie(response, token):
         SESSION_COOKIE,
         token,
         max_age=settings.session_timeout_minutes * 60,
-        # HttpOnly so a cross site scripting bug cannot read the session and
-        # walk off with it.  Strict so the cookie is not attached to requests
-        # started from anywhere else, which is half the CSRF protection.
+        # HttpOnly keeps the session out of reach of XSS.  SameSite=Strict
+        # is part of the CSRF defense.
         httponly=True,
         secure=True,
         samesite="strict",
@@ -393,10 +334,8 @@ async def oidc_callback(request: Request, db: DBSession = Depends(get_db),
                         code: str = None, state: str = None, error: str = None):
     ip = client_ip(request)
 
-    # Checked here as well as at the start of the flow.  Somebody can be part
-    # way through a login when the mode is switched to local only, and a reply
-    # that still creates a session because the request was already in flight is
-    # a switch that did not take.
+    # Checked again here: SSO may have been switched off while this login was
+    # in flight, and the reply must not create a session.
     if not oidc.is_configured():
         return RedirectResponse(
             _p("/login?error=single sign on is switched off on this fleet"),
@@ -437,9 +376,8 @@ async def enroll_page(request: Request, db: DBSession = Depends(get_db)):
     setup = enroll_totp(user)
     request.session_setup = setup
 
-    # Stash the parts we need to finish enrollment.  Held in the session row
-    # rather than a hidden form field so the secret never travels back through
-    # the browser a second time.
+    # Keep the pending secret server side (encrypted) rather than in a hidden
+    # field, so it does not round-trip through the browser.
     from app.models import SystemSetting
 
     row = db.query(SystemSetting).filter(
@@ -600,8 +538,7 @@ async def sites_page(request: Request, db: DBSession = Depends(get_db)):
 async def site_detail(host_id: str, request: Request, db: DBSession = Depends(get_db)):
     user = require_page_user(request, db)
 
-    # Through the same guard the API uses, so a site you are not allowed to see
-    # answers the same way whether you ask for the page or the JSON.
+    # Same object guard as the API, so access rules match.
     from app.web.security import ObjectGuard
 
     guard = ObjectGuard(db, user)
@@ -618,9 +555,8 @@ async def site_detail(host_id: str, request: Request, db: DBSession = Depends(ge
         acl_summary=[_acl_summary(a) for a in acls],
         error_templates=db.query(ErrorPageTemplate)
                           .order_by(ErrorPageTemplate.name).all(),
-        # Worked out here rather than in the page, because the wildcard rule is
-        # the whole point and it does not belong in JavaScript where the next
-        # person will reimplement it slightly differently.
+        # Computed server side so the wildcard matching rule lives in one
+        # place (app/core/hostnames.py), not in JavaScript too.
         uncovered_names=(hostnames.uncovered(host.cert.domain_list(),
                                              host.name_list())
                          if host.cert else []),
@@ -629,26 +565,14 @@ async def site_detail(host_id: str, request: Request, db: DBSession = Depends(ge
              if p and p not in host.name_list()), None),
         cert_wildcards=[d for d in (host.cert.domain_list() if host.cert else [])
                         if d.startswith("*.")],
-        # Where traffic for this site's names actually goes while it is not
-        # being served, which is the question somebody is really asking when
-        # they land on a page they did not expect.
+        # Which site nginx serves over https for a name it does not
+        # recognize, e.g. this site's names while it is switched off.
         #
-        # nginx sends a request whose name matches no server block to whichever
-        # block is the default server, so a site that is switched off, or whose
-        # https half cannot be written, quietly shows somebody a different
-        # site.  Looking at another site's page is the single most confusing
-        # answer a load balancer can give, and it is the one nothing said.
-        # Which site answers for a name nginx does not recognise, over https.
-        #
-        # Not simply the one flagged default_server, and working that out is
-        # the whole point of computing it here.  The installer's own
-        # placeholder is the default server on port 80, so unknown names over
-        # http land on the Coming Soon page.  It carries no https listener at
-        # all, so for https nginx falls back to the first server block it
-        # parsed, and our config is pulled in with a glob, which is
-        # alphabetical.  The alphabetically first site with https on is
-        # therefore what somebody actually sees, which is why a switched off
-        # site shows a completely unrelated one.
+        # An explicit default_server wins.  Otherwise: the installer's
+        # placeholder is the port 80 default but has no https listener, so
+        # nginx falls back to the first server block parsed.  Our config is
+        # included by glob, so that is the alphabetically first site with
+        # https enabled.
         default_site=next(
             (h.name for h in db.query(VirtualHost)
              .filter(VirtualHost.default_server.is_(True)).all()),
@@ -658,16 +582,12 @@ async def site_detail(host_id: str, request: Request, db: DBSession = Depends(ge
                         VirtualHost.listen_https.is_(True)).all(),
                     key=lambda x: x.name)
                   if h.name != host.name), None)),
-        # Whether the certificate this site points at can actually be written.
-        #
-        # A row exists the moment somebody asks for a certificate; the files
-        # arrive later, when it is issued.  Between those two the https block
-        # is deliberately left out, because nginx will not start with an ssl
-        # listener pointing at files that are not there.
+        # A certificate row exists before it is issued.  Until the files
+        # exist the https block is left out, since nginx will not start
+        # with an ssl listener pointing at missing files.
         cert_ready=bool(host.cert and (host.cert.status or "") == "valid"
                         and host.cert.not_after),
-        # What address this request came from, so the page can tell somebody
-        # they are about to shut themselves out.  See the note in the template.
+        # Lets the page warn before an access list locks the viewer out.
         viewer_ip=client_ip(request),
         node_addresses=_management_addresses(db),
     )
@@ -676,12 +596,7 @@ async def site_detail(host_id: str, request: Request, db: DBSession = Depends(ge
 
 
 def _acl_summary(acl) -> dict:
-    """
-    An access list as the site page needs it.
-
-    Only what is needed to say, on that page, what picking this list will do and
-    whether the person picking it is about to shut themselves out.
-    """
+    """Access list fields the site page uses to preview its effect."""
     return {
         "id": acl.id,
         "name": acl.name,
@@ -691,21 +606,14 @@ def _acl_summary(acl) -> dict:
         "include_management": bool(acl.include_management),
         "use_real_ip": bool(acl.use_real_ip),
         "basic_auth": bool(acl.basic_auth_enabled),
-        # How many logins it actually holds.  Turned on with nobody in it is a
-        # list the renderer deliberately writes no auth_basic for, because
-        # nginx would then refuse every request for want of a valid user, and
-        # the site page should say that rather than claim it is protected.
+        # Basic auth with no users is not rendered (nginx would reject every
+        # request), so the page needs the count to say so.
         "auth_users": len(acl.auth_users()),
     }
 
 
 def _management_addresses(db) -> list:
-    """
-    Every address a rule marked "always allow the management network" covers.
-
-    The page needs these to answer the only question that matters when somebody
-    picks an access list: will I still be able to reach this.
-    """
+    """Addresses covered by "always allow the management network"."""
     from app.core.settings_store import get as setting
 
     out = []
@@ -754,9 +662,8 @@ async def pool_detail(pool_id: str, request: Request, db: DBSession = Depends(ge
     response = render(
         request, "pool_detail.html", user, csrf_token=token,
         pool=pool, settings=pool.setting_map(),
-        # The trust state, but never the secret.  The page asks for the value
-        # separately when somebody presses Show, so it is not sitting in the
-        # HTML of every pool page waiting to end up in a cache or a screenshot.
+        # Token state only, never the secret.  The page fetches the value
+        # on demand when the user clicks Show.
         trust_json=json.dumps({
             "enabled": bool(pool.token_enabled),
             "active": pool.token_active,
@@ -841,13 +748,11 @@ async def streams_page(request: Request, db: DBSession = Depends(get_db)):
 @router.get("/waf-profiles", response_class=HTMLResponse)
 async def waf_profiles_page(request: Request, db: DBSession = Depends(get_db)):
     """
-    The tuned rule sets, across the fleet.
+    Fleet-wide list of WAF profiles.
 
-    They are created from a site's own tab, in the middle of a learning
-    session, which is the right place to make one and the wrong place to live.
-    A profile is applied to any number of sites, so the questions that follow are
-    fleet questions and need a page of their own: which sites use this, is it
-    still valid against the rules installed now, and can I delete it.
+    Profiles are created from a site's learning session but can be shared by
+    many sites, so this page shows usage, validity against the installed
+    rules, and deletion.
     """
     from app.models import WafProfile
 
@@ -886,16 +791,14 @@ async def certs_page(request: Request, db: DBSession = Depends(get_db)):
         request, "certificates.html", user, csrf_token=token,
         certs=db.query(Certificate).order_by(Certificate.name).all(),
         nodes=db.query(Node).all(),
-        # Which names each certificate is short of, worked out here so the
-        # wildcard rule lives in one place.  See app/core/hostnames.py.
-        # Every site's full list of names, so a new certificate can be filled
-        # in from one rather than typed and half remembered.
+        # Site names, so a new certificate can be prefilled from a site.
         sites_with_names=[
             {"name": h.name, "names": [n for n in h.name_list()
                                        if hostnames.is_real_name(n)]}
             for h in db.query(VirtualHost).order_by(VirtualHost.name).all()
             if any(hostnames.is_real_name(n) for n in h.name_list())
         ],
+        # Names each certificate fails to cover; see app/core/hostnames.py.
         short_of={
             c.id: sorted({
                 name
@@ -943,21 +846,11 @@ async def upgrade_page(request: Request, db: DBSession = Depends(get_db)):
 @router.get("/parity", response_class=HTMLResponse)
 async def parity_page(request: Request, db: DBSession = Depends(get_db)):
     """
-    How this compares with the products people shortlist against it.
+    Feature comparison against NGINX Plus, Kemp LoadMaster and HAProxy ALOHA.
 
-    Worth a page of its own.  Half of it is what an admin will go looking for
-    in the nginx docs, where finding out an hour later that it needs a
-    subscription is a bad afternoon.  The other half is the reverse, and it is
-    the half nobody else will write: what this does that the paid products do
-    not.
-
-    Four columns now, not two.  NGINX Plus is the closest comparison because it
-    is the same engine, but nobody choosing a load balancer is only weighing
-    those two, so Kemp LoadMaster and HAProxy ALOHA are scored beside it.  That
-    made the table less flattering in several places, which is the point.
-
-    The url stays /parity so links people already have keep working.  The page
-    is called Feature comparison, because parity was only ever half the story.
+    Covers both directions: Plus-only features an admin may look for, and
+    what this project does that the commercial products do not.  The URL is
+    still /parity so existing links keep working.
     """
     from app.catalog import plus_only_features
     from app.catalog.comparison import (by_category, only_here, pricing,
@@ -976,13 +869,7 @@ async def parity_page(request: Request, db: DBSession = Depends(get_db)):
 
 @router.get("/changes", response_class=HTMLResponse)
 async def changes_page(request: Request, db: DBSession = Depends(get_db)):
-    """
-    What is waiting to go out, and what already has.
-
-    Two questions people ask in the same breath, so they belong on one page:
-    what will change if I press the button, and what changed last time somebody
-    did.
-    """
+    """Pending changes and recent config versions on one page."""
     from app.models import ConfigVersion
 
     user = require_page_user(request, db)

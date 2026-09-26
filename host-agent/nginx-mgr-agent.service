@@ -1,31 +1,19 @@
 # The host agent for Failover LB.
 #
-# This is the only piece running as root.  The container talks to it over a
-# unix socket and it will only do the handful of things on its verb list.
-#
-# It has to be root, since the job is writing /etc/nginx and reloading the
-# service.  Everything below is about giving it root and nothing else.  It
-# cannot see other users' processes, it cannot touch most of the filesystem,
-# and it cannot open a network socket at all.
+# The only piece running as root.  The container talks to it over a unix
+# socket and it only runs the verbs on its list.  It needs root to write
+# /etc/nginx and reload nginx; the settings below limit what else root can do.
 
 [Unit]
 Description=Failover LB host agent
 Documentation=file:///opt/nginx-fleet-manager/README.md
 After=network.target
-# Not Requires=nginx.service on purpose.  If nginx is down because somebody
-# pushed a bad config, the agent is exactly what you need running so you can
-# roll it back.  An agent that refuses to start when nginx is down would be
-# useless at the only moment you really need it.
+# Not Requires=: if a bad config took nginx down, the agent is what you need
+# running to roll it back.
 Wants=nginx.service
 
-# Do not let a crash loop hammer the box.  If it dies 5 times in a minute, stop
-# and leave it stopped so somebody looks at it.
-#
-# These live in [Unit], not [Service].  They used to be in [Service] and systemd
-# ignored them with one line in the journal that nobody reads, so the limit was
-# never in force and a broken agent restarted every five seconds forever.  A
-# setting that is quietly doing nothing is worse than one that is missing,
-# because the unit file still reads as though the box is protected.
+# Five crashes in a minute and it stays stopped.  These belong in [Unit];
+# systemd silently ignores them in [Service].
 StartLimitBurst=5
 StartLimitIntervalSec=60
 
@@ -46,51 +34,29 @@ Environment=PYTHONUNBUFFERED=1
 RuntimeDirectory=nginxmgr
 RuntimeDirectoryMode=0750
 
-# Keep the folder when we stop, and this one is not tidiness.  The manager runs
-# in a container with /run/nginxmgr bind mounted, and a bind mount follows the
-# folder it was given, not the name.  Letting systemd delete and remake the
-# folder on every restart hands the container a folder that no longer exists, so
-# the GUI says "no agent socket at /run/nginxmgr/agent.sock" forever, even
-# though the agent is up and the socket is right there on the host.  Recreating
-# the container is the only way out, which is not something the GUI can tell you
-# to do.  Keeping the folder keeps both sides looking at the same one.
+# Required.  The container bind mounts /run/nginxmgr, and a bind mount
+# follows the directory, not the name.  If systemd recreated it on restart,
+# the container would be left holding a deleted directory and would never see
+# the new socket until it was recreated.
 RuntimeDirectoryPreserve=yes
 
 # ---- locking it down --------------------------------------------------------
 #
-# The agent is root, so the interesting question is what root can still reach.
-# Everything below cuts that down.
+# Everything below narrows what root can reach.
 
-# No network.  The agent only ever listens on a unix socket, so it has no use
-# for a network stack.  This alone kills a whole class of "root process gets
-# popped and calls home" problems.
-#
-# One catch: two verbs do reach the network.  public_ip runs curl and dig, and
-# certbot has to talk to Lets Encrypt.  Those are child processes, and this
-# setting covers children too.  So it stays commented out and we lean on the
-# filesystem limits below instead.  Turn it on if you only use dns-01 certs
-# handled somewhere else and you never call public_ip.
+# Off because children inherit it, and public_ip (curl, dig) and certbot
+# need the network.  Turn it on if you never call public_ip and handle
+# certificates elsewhere.
 # PrivateNetwork=yes
 
-# Cannot get more privileges than it starts with, ever.
 NoNewPrivileges=yes
 
-# Its own /tmp.  Nothing else on the box can drop a file in our temp space and
-# nothing we write there leaks out.
 PrivateTmp=yes
 
-# Read only view of the whole filesystem, then we punch holes for exactly the
-# folders the agent has to write.  Anything not listed here is read only even
-# though the process is root.
-# A leading dash means "skip this one if it is not there".  Without it, systemd
-# refuses to start the unit at all when a path is missing, and it fails with
-# 226/NAMESPACE, which tells you nothing about which path was the problem.
-#
-# The letsencrypt folders do not exist until certbot has run once, and
-# /var/cache/nginx depends on how nginx was built.  So on a box that has not
-# issued a certificate yet, the agent would not start.  Anything the agent
-# genuinely cannot work without is left undashed on purpose, so a real missing
-# folder still fails loudly instead of quietly.
+# Read only filesystem except the paths listed.  A leading dash skips a
+# missing path; without it systemd fails the unit with 226/NAMESPACE and no
+# hint which path.  The letsencrypt dirs only exist after certbot's first run.
+# Paths the agent cannot work without are left undashed so they fail loudly.
 ProtectSystem=strict
 ReadWritePaths=/etc/nginx
 ReadWritePaths=-/etc/letsencrypt
@@ -102,36 +68,24 @@ ReadWritePaths=/usr/local/lib/nginx-fleet-manager
 ReadWritePaths=/run/nginxmgr
 ReadWritePaths=/run
 
-# nginx runs as a child of the agent whenever we test or reload a config, so it
-# inherits this sandbox and needs everywhere it writes listed here too.  Miss
-# one and "nginx -t" fails with a read only filesystem, which reads like a
-# broken config rather than a missing path.
-#
-# This list comes from the build flags in nginx-installer.sh:
-#   --error-log-path=/var/log/nginx/error.log
-#   --http-log-path=/var/log/nginx/access.log
-#   --http-*-temp-path=/var/cache/nginx/*
-#   --pid-path=/run/nginx.pid, --lock-path=/run/nginx.lock  (covered by /run)
-#
-# If you build nginx with different paths, add them here.
-# The tunnel's own config and key.  Dashed, so a box without wireguard
-# installed still starts the agent: the tunnel verbs already report that it is
-# unavailable rather than failing at start.
+# Tunnel config and key.  Dashed so a box without wireguard still starts;
+# the tunnel verbs report it as unavailable.
 ReadWritePaths=-/etc/wireguard
 
+# nginx runs as our child for tests and reloads, so it inherits this sandbox.
+# A missing path makes "nginx -t" fail with a read only filesystem error that
+# looks like a bad config.  These match the build flags in nginx-installer.sh
+# (pid and lock files are covered by /run).  Add yours if you build with
+# different paths.
 ReadWritePaths=-/var/log/nginx
 ReadWritePaths=-/var/cache/nginx
 
-# Where the country database goes, the conventional place for one, and the only
-# folder outside /etc and /var this agent may write.  Dashed, so a box that has
-# never installed one starts as before: the install verb says the folder is not
-# writable, which is a better answer than an agent that will not come up.
+# GeoIP country database.  Dashed so a box without it still starts; the
+# install verb reports the folder as not writable instead.
 ReadWritePaths=-/usr/share/GeoIP
 
-# No reading anybody's home folder.
 ProtectHome=yes
 
-# Cannot mess with the kernel or the boot setup.
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectKernelLogs=yes
@@ -141,75 +95,47 @@ ProtectHostname=yes
 ProtectProc=invisible
 ProcSubset=pid
 
-# No raw sockets, no weird address families.  Unix sockets and normal IP is all
-# curl and certbot need.
-# AF_NETLINK is here for one reason: nftables talks to the kernel over it, and
-# the agent installs one rule, the redirect that puts port 53 in front of the
-# manager's dns listener.  Without it nft fails with "Unable to initialize
-# Netlink socket", which reads like a missing package rather than a sandbox.
+# AF_NETLINK is for nft, which installs the port 53 redirect to the
+# manager's DNS listener.  Without it nft fails with "Unable to initialize
+# Netlink socket".
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 RestrictNamespaces=yes
 RestrictRealtime=yes
 RestrictSUIDSGID=yes
 LockPersonality=yes
 
-# Blocking write-then-execute memory stops most injected shellcode, and it is a
-# nice thing to have.  It is off because CPython will not reliably start under
-# it: the interpreter and some of the modules it loads map memory writable and
-# then execute it, which is normal for them and indistinguishable from the thing
-# we are trying to block.  Under systemd that shows up as the service dying with
-# signal=SYS and no explanation of which syscall was refused.
-#
-# Turn it back on if you are confident about the exact Python build on your
-# boxes, and test a restart before you rely on it.
+# Off because CPython and some extension modules map writable memory as
+# executable, and the service dies with signal=SYS.  Enable only after testing
+# a restart with your exact Python build.
 # MemoryDenyWriteExecute=yes
 
-# Syscall filtering is off, and that is a deliberate retreat rather than an
-# oversight.
+# Syscall filtering is off on purpose.  On a fresh Ubuntu 24.04 box every
+# attempt killed the agent with SIGSYS, and systemd does not say which
+# syscall was refused.  The filesystem, capability and verb limits are what
+# contain this process; seccomp would only be an extra layer.
 #
-# It went through three rounds of "narrow the deny list and try again" on a
-# fresh Ubuntu 24.04 box and killed the agent with SIGSYS every time.  systemd
-# does not say which syscall it refused, so each round was a guess, and guessing
-# at somebody else's install is not a way to build software.
-#
-# The honest position is that this was never tested.  The old test rig ran in
-# containers, containers have no systemd, so this unit file had never been
-# started even once before somebody tried it for real.  Shipping a setting in
-# that state is worse than not shipping it.
-#
-# If you want it back, work out what your Python actually needs first:
+# To try it, test what your Python needs first:
 #
 #   sudo systemd-run --pty --property=SystemCallFilter=@system-service \
 #        /usr/bin/python3 /opt/nginx-fleet-manager/nginx-mgr-agent.py
 #
-# then add the filter through a drop-in so an upgrade does not overwrite it:
+# then add it in a drop-in so upgrades do not overwrite it:
 #
 #   /etc/systemd/system/nginx-mgr-agent.service.d/seccomp.conf
-#
-# What actually contains this process is above and below: a read only
-# filesystem, six capabilities instead of forty, no access to home folders, no
-# new privileges, and a fixed verb list with a path allow list inside the agent
-# itself.  Seccomp was one more layer on top of that, not the thing holding the
-# door shut.
 #
 # SystemCallFilter=@system-service
 # SystemCallFilter=~@privileged @obsolete @cpu-emulation @mount @swap
 SystemCallArchitectures=native
 
-# Drop every capability except the ones we actually use.  Even as root the
-# kernel will refuse the rest.
-#   CHOWN, DAC_OVERRIDE, FOWNER: write config and set who owns it
-#   SETUID, SETGID: certbot drops privileges when it runs its hooks
-#   KILL: send nginx a reload signal when there is no systemd
-#   NET_BIND_SERVICE: nginx -t opens the real listen sockets while it checks a
-#     config, which is how it catches a port that is already taken.  nginx runs
-#     as a child of this agent and inherits this list, so without it every test
-#     of a config with a normal web port in it failed with
-#     "bind() to 0.0.0.0:80 failed (13: Permission denied)", and nothing could
-#     be applied.  The message points at nginx and the real cause is here.
-# CAP_NET_ADMIN is what writing a firewall rule needs.  It is a real widening
-# and it buys the one thing the container cannot do for itself, which is put
-# port 53 in front of a listener that runs unprivileged on purpose.
+# Only the capabilities in use:
+#   CHOWN, DAC_OVERRIDE, FOWNER: write config and set ownership
+#   SETUID, SETGID: certbot drops privileges for its hooks
+#   KILL: signal nginx to reload when there is no systemd
+#   NET_BIND_SERVICE: nginx -t binds the real listen ports, and inherits
+#     this list; without it tests fail with "bind() ... (13: Permission
+#     denied)", which looks like an nginx problem.
+#   NET_ADMIN: the firewall rule redirecting port 53 to the unprivileged
+#     DNS listener.
 CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETUID CAP_SETGID CAP_KILL CAP_NET_BIND_SERVICE CAP_NET_ADMIN
 
 # Keep one bad apply from eating the box.

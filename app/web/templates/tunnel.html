@@ -52,20 +52,13 @@
   </div>
   <div class="card-body no-pad">
     {#
-      The search only appears once there are enough workloads to need it.  A
-      search box above three rows is furniture, and it is the sort of thing
-      that makes a page look busier than the job it is doing.
-
-      It matches the note as well as the name and address, which is the point
-      of letting people write notes: "the billing box" is what somebody
-      remembers, not web07.
+      Matches the note as well as name and address. That is the point of
+      notes: people remember "the billing box", not web07.
     #}
     <div class="pad" id="wl-search-row" hidden>
       {#
-        Wide enough for its own placeholder.  At 340px the last words of
-        "by name, address or note" were cut off, which hides the one thing the
-        box is there to tell you: that it searches the note as well, which is
-        the whole reason notes are worth writing.
+        Wide enough for its placeholder. At 340px "by name, address or note"
+        was cut off, hiding the fact that it searches notes too.
       #}
       <input type="search" id="wl-search" placeholder="Find a workload by name, address or note"
              style="max-width:420px;width:100%">
@@ -128,8 +121,8 @@ document.addEventListener("DOMContentLoaded", function () {
       html += '<div class="small faint" style="margin-left:1rem">' +
         "Range " + esc(n.cidr) + ", listening on port " + esc(n.listen_port) +
         "</div>";
-      // What each load balancer holds, because a workload peers with all of
-      // them and a node missing from here is one it cannot reach.
+      // What each load balancer holds. A workload peers with all of them, so a
+      // node missing here is one it cannot reach.
       html += '<div style="margin-top:.75rem"><strong class="small">' +
         "These load balancers:</strong>";
       (n.nodes || []).forEach(function (node) {
@@ -234,13 +227,12 @@ document.addEventListener("DOMContentLoaded", function () {
     });
   }
 
-  // What each load balancer needs before it can carry a tunnel, and a button
-  // to put it there.
+  // What each load balancer needs to carry a tunnel, with a button to install
+  // it.
   //
-  // Only shown when the tunnel is on and something is missing.  A load
-  // balancer is somebody's production box, and installing a network package
-  // on one because a page happened to be open is not a decision this page
-  // gets to make on its own.
+  // Only shown when the tunnel is on and something is missing. These are
+  // production boxes, and installing packages on one is not something to do
+  // just because a page is open.
   let INSTALL = null;
   let INSTALL_POLL = null;
 
@@ -264,10 +256,8 @@ document.addEventListener("DOMContentLoaded", function () {
 
     el("install-card").hidden = false;
 
-    // When everything is ready this stays, as one line rather than nothing.
-    // Hiding it would be tidier and would also mean the only place that says
-    // what a load balancer needs disappears exactly when somebody goes
-    // looking to check.
+    // When everything is ready this stays as one line. Hiding it would remove
+    // the only place that says what a load balancer needs.
     if (INSTALL.all_ready && !INSTALL.any_running) {
       el("install-body").innerHTML = names.map(function (name) {
         return '<div class="small node-line"><span class="dot ok"></span>' +
@@ -323,8 +313,8 @@ document.addEventListener("DOMContentLoaded", function () {
     }
   }
 
-  // Poll while it runs, and stop when it stops.  An interval left running
-  // after the page has moved on is a page that keeps asking forever.
+  // Poll while it runs and stop when it stops, so nothing keeps polling
+  // after the page moves on.
   function watchInstall() {
     if (INSTALL_POLL) { clearInterval(INSTALL_POLL); }
     INSTALL_POLL = setInterval(async function () {
@@ -344,12 +334,8 @@ document.addEventListener("DOMContentLoaded", function () {
     }, 3000);
   }
 
-  // The search is always there.
-  //
-  // It was gated to four workloads on the grounds that a search box above
-  // three rows is furniture.  That was wrong in the way that matters: the
-  // owner went looking for it with two and could not find it, and a control
-  // nobody can find is worse than one that is occasionally unnecessary.
+  // The search is always shown. It used to appear only at four or more
+  // workloads, but people looked for it with two and could not find it.
   const SEARCH_FROM = 0;
 
   function drawWorkloads() {
@@ -391,9 +377,8 @@ document.addEventListener("DOMContentLoaded", function () {
         '<span class="dot ' + state + '"></span><strong>' + esc(p.name) + "</strong> " +
         '<span class="mono small faint">' + esc(p.address) + "</span>" +
         '<div class="small faint">' + words + "</div>" +
-        // Whether this peering survives somebody breaking Curve25519 later.
-        // Per workload, because a fleet is upgraded one at a time and the ones
-        // still without a key are the useful thing to see.
+        // Whether this peering survives a future break of Curve25519. Per
+        // workload, since they are upgraded one at a time.
         (p.enrolled
           ? (p.has_psk
              ? '<div class="small"><span class="badge ok">pre-shared key</span> ' +
@@ -403,9 +388,8 @@ document.addEventListener("DOMContentLoaded", function () {
                '<span class="faint">Curve25519 alone, so traffic recorded today ' +
                'is readable to whoever breaks it later</span></div>')
           : "") +
-        // What breaks if this goes away.  Sites rather than pools, because a
-        // pool nothing serves from breaks nothing and that is not the question
-        // anybody is asking before they press Remove.
+        // What breaks if this goes away. Sites rather than pools, because a
+        // pool nothing serves from breaks nothing.
         (function () {
           const sites = p.sites_using || [];
           if (!sites.length) return '<div class="small faint">no sites use it</div>';
@@ -439,9 +423,8 @@ document.addEventListener("DOMContentLoaded", function () {
     }).join("");
   }
 
-  // A command with a copy button.  These are one liners meant to be run on
-  // another machine, and a command you cannot copy is one somebody retypes
-  // wrongly, so every command on this page gets one of these.
+  // A command with a copy button. These are one liners run on another
+  // machine, and retyping them invites mistakes.
   function cmdBlock(id) {
     return '<textarea id="' + id + '" class="cmd mono" rows="3" readonly ' +
       'spellcheck="false"></textarea>' +
@@ -460,22 +443,17 @@ document.addEventListener("DOMContentLoaded", function () {
     const box = el(btn.getAttribute("data-copy"));
     if (!box) { return; }
     box.select();
-    // execCommand, not the clipboard API, which needs a secure context the
-    // browser agrees about.  Behind a proxy on a name somebody has not set up
-    // yet, the newer one silently does nothing.
+    // execCommand, not the clipboard API, which needs a secure context. Behind
+    // a proxy on a name without TLS the newer API silently does nothing.
     try { document.execCommand("copy"); NFM.toast("Copied", "ok"); }
     catch (e) { NFM.toast("Select it and copy by hand", "bad"); }
   });
 
   function showCommand(result) {
-    // Shown once, on screen, because this is the only moment it exists.  The
-    // ticket is single use and its hash is all that is stored, so there is no
-    // way to show it again later and it is better to say so than to let
-    // somebody go looking.
-    // Two commands share this: enrolling a new workload, and putting a
-    // pre-shared key on one that is already here.  Same shape, same warning
-    // about the ticket, different sentence underneath, so they share the modal
-    // rather than having two that drift apart.
+    // Shown once, because this is the only moment it exists. The ticket is
+    // single use and only its hash is stored, so it cannot be shown again.
+    // Shared by enrolling a new workload and adding a pre-shared key to an
+    // existing one: same shape and warning, different text underneath.
     const upgrade = !result.enrol_command;
     NFM.openModal("Run this on " + esc(result.name), "", `
       <p>${upgrade
@@ -511,18 +489,16 @@ document.addEventListener("DOMContentLoaded", function () {
     });
   }
 
-  // Redraw as they type.  The list is in memory already, so there is no call
-  // to make and no reason to wait for an enter key.
+  // Filter as they type. The list is already in memory.
   const wlSearch = el("wl-search");
   if (wlSearch) wlSearch.addEventListener("input", drawWorkloads);
 
   const add = el("add-workload");
   if (add) {
     add.addEventListener("click", async function () {
-      // What is actually free, so nobody has to guess.  The counter only goes
-      // up, which is right and is also invisible: somebody adding and removing
-      // workloads while testing watches the numbers climb and reasonably
-      // concludes they are running out.  They are not, and this shows why.
+      // Show what is actually free. The counter only goes up, so after adding
+      // and removing test workloads the numbers look like they are running
+      // out. They are not, and this shows why.
       let plan = null;
       try { plan = await NFM.api("/tunnel/addresses"); } catch (err) { plan = null; }
 
@@ -589,11 +565,10 @@ document.addEventListener("DOMContentLoaded", function () {
     });
   }
 
-  // Removing has two halves and only one of them happens here.  Taking the
-  // workload out stops the load balancers talking to it, but the machine keeps
-  // the interface, the config and the key until somebody clears them, so the
-  // command to do that is on screen and copyable rather than buried in a
-  // confirm box nobody can select text out of.
+  // Removing has two halves and only one happens here. The load balancers
+  // stop talking to the workload, but the machine keeps its interface, config
+  // and key until they are cleared. That command is shown copyable rather than
+  // in a confirm box.
   function confirmRemove(peer) {
     NFM.openModal("Remove " + esc(peer.name) + " from the tunnel", "", `
       <p>It stops being reachable through the tunnel straight away.</p>
@@ -629,9 +604,8 @@ document.addEventListener("DOMContentLoaded", function () {
       try { await NFM.api("/tunnel/peers/" + peer.id, { method: "DELETE" }); }
       catch (err) { NFM.toast(err.message, "bad"); el("rm-go").disabled = false; return; }
       NFM.toast("Removed", "ok");
-      // The command stays up afterwards.  Closing on success would take away
-      // the one thing they still need, at the exact moment the row it came
-      // from has just disappeared from the list behind the modal.
+      // Keep the command up afterward. It is still needed, and the row it came
+      // from has just disappeared behind the modal.
       el("rm-go").outerHTML =
         '<button class="btn primary" id="rm-done">Done</button>';
       el("rm-cancel").remove();
@@ -644,9 +618,8 @@ document.addEventListener("DOMContentLoaded", function () {
   el("workload-list").addEventListener("click", async function (ev) {
     const del = ev.target.closest("[data-del]");
     if (del) {
-      // String on both sides.  A dataset attribute is always a string and
-      // these ids are numbers, so a strict compare never matched and the
-      // button did nothing at all, without even an error to go on.
+      // Compare as strings. Dataset values are strings and these ids are
+      // numbers, so strict equality never matched and the button did nothing.
       const peer = (STATE.peers || []).find(function (p) {
         return String(p.id) === String(del.dataset.del);
       });
@@ -660,10 +633,8 @@ document.addEventListener("DOMContentLoaded", function () {
       return;
     }
 
-    // The note.  Editable on its own because it is the only thing here that
-    // goes stale: the name and the address are what pools are matched against,
-    // by eye and in code, so changing those is a rename with consequences and
-    // not a correction.
+    // The note is editable on its own. Name and address are what pools match
+    // against, so changing those is a rename with consequences, not a fix.
     const note = ev.target.closest("[data-note]");
     if (note) {
       const peer = (STATE.peers || []).find(function (p) {
@@ -701,13 +672,12 @@ document.addEventListener("DOMContentLoaded", function () {
       return;
     }
 
-    // The one command that puts a pre-shared key on a workload already on the
+    // The command that adds a pre-shared key to a workload already on the
     // tunnel.
     //
-    // It cannot be done from this end alone and that is not a gap: a WireGuard
-    // pre-shared key is never sent over the wire, which is the whole reason it
-    // survives somebody breaking Curve25519 later.  Both ends have to be told
-    // it separately.
+    // This end cannot do it alone, by design: a WireGuard pre-shared key is
+    // never sent over the wire, which is why it survives a future break of
+    // Curve25519. Each end has to be given it separately.
     const psk = ev.target.closest("[data-psk]");
     if (psk) {
       NFM.confirmThen(
@@ -747,8 +717,8 @@ document.addEventListener("DOMContentLoaded", function () {
       return;
     }
 
-    // A fresh enrolment link for a workload that never ran the command.  The
-    // old ticket is only kept as a hash, so this mints a new one and the old
+    // Fresh enrollment link for a workload that never ran the command. Only
+    // the old ticket's hash is kept, so this mints a new one and the old one
     // stops working.
     const relink = ev.target.closest("[data-relink]");
     if (!relink) { return; }

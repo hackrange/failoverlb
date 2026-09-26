@@ -1,13 +1,10 @@
 """
 Node to node endpoints.
 
-Nothing here is reachable from a browser.  The listener demands a client
-certificate signed by this cluster's CA, so the TLS handshake fails before any
-of this code runs for anybody else.
-
-On top of that, every route below verifies the message signature first.  The
-certificate proves the caller is a cluster member.  The signature proves which
-member, and that this exact body is what they sent.
+Served only on the peer listener, which requires a client certificate signed
+by the cluster CA. Every route also verifies the message signature first: the
+certificate proves the caller is a member, the signature proves which member
+and that the body is unaltered.
 """
 
 import asyncio
@@ -33,25 +30,22 @@ from app.models import ConfigVersion, Node, NodeRole, utcnow
 
 log = logging.getLogger("nfm.peer")
 
-# Snapshots that arrived with a prepare and are waiting to see whether the
-# commit follows.  Small, and cleared as versions move on.
+# Snapshots received with a prepare, held until the matching commit.
 _staged_snapshots = {}
 
 router = APIRouter()
 
-# Biggest peer body we will read.  A whole rendered config for a large fleet is
-# a few hundred KB, so this is generous.  It stops a peer, or something that got
-# past the TLS layer, from making us allocate unbounded memory.
+# Upper bound on a peer request body. A full rendered config for a large
+# fleet is a few hundred KB, so this is generous; it just prevents unbounded
+# allocation.
 MAX_PEER_BODY = 64 * 1024 * 1024
 
 
 async def authenticate(request: Request) -> tuple:
     """
-    Check the caller and give back the node and the parsed body.
-
-    Every route calls this first.  It is not a dependency on purpose: we need
-    the raw bytes to check the signature, and reading the body twice is exactly
-    the kind of thing that quietly breaks when FastAPI changes how it caches it.
+    Verify the caller and return (node, parsed body). Called first by every
+    route. Not a FastAPI dependency because we need the raw bytes for the
+    signature, and relying on body caching across a dependency is fragile.
     """
     import json
 
@@ -70,8 +64,7 @@ async def authenticate(request: Request) -> tuple:
         )
     except ClusterError as exc:
         log.warning("refused a peer request: %s", exc)
-        # 401 with no detail about which check failed.  Telling a caller that
-        # the signature was fine but the address was wrong helps them fix it.
+        # Don't say which check failed; that only helps the caller probe.
         raise HTTPException(status_code=401, detail="not authorized")
 
     try:
@@ -89,24 +82,21 @@ async def authenticate(request: Request) -> tuple:
 @router.post("/peer/heartbeat")
 async def heartbeat(request: Request):
     """
-    Answer a peer's heartbeat and tell them how we are.
-
-    This is also how the roster stays fresh in both directions.  They learn our
-    state from the answer, and we learn theirs from what they sent.
+    Answer a peer's heartbeat. Both sides learn each other's state: we
+    record what they sent, they read our reply.
     """
     node, payload = await authenticate(request)
     settings = get_settings()
 
     with session_scope() as session:
-        # Update what we know about them from what they told us.
+        # Update our record of them from what they sent.
         peer = session.query(Node).filter(Node.name == node.name).first()
         if peer:
             peer.last_heartbeat = utcnow()
             peer.applied_version = payload.get("applied_version", peer.applied_version)
             peer.nginx_active = payload.get("nginx_active", peer.nginx_active)
-            # Only move this if they actually said something.  An older manager
-            # leaves the key out, and reading that as a failure would withdraw
-            # them from DNS for running last week's build.
+            # Only update if the key is present. Older managers omit it, and
+            # treating that as a failure would pull them out of DNS.
             if "nginx_serving" in payload:
                 peer.nginx_serving = payload["nginx_serving"]
                 peer.nginx_serving_detail = (payload.get("nginx_serving_detail") or "")[:255]
@@ -117,9 +107,8 @@ async def heartbeat(request: Request):
                 except ValueError:
                     pass
 
-    # Outside the session above.  Taking on the other node's copy of the
-    # request writes settings rows of its own, and nesting that inside the
-    # transaction holding the node rows is how two of these deadlock.
+    # Outside the session above: this writes settings rows, and nesting it
+    # in the transaction holding the node rows can deadlock.
     if "preferred_active_at" in payload:
         adopt_preferred_active(payload.get("preferred_active"),
                                payload.get("preferred_active_at"))
@@ -131,9 +120,8 @@ async def heartbeat(request: Request):
             "node": settings.node_name,
             "role": me.role.value if me else "unknown",
             "priority": settings.cluster_priority,
-            # Which node somebody asked to be active.  Both nodes hold the same
-            # value and the newest instruction wins, so whichever of the two
-            # heard it first tells the other.
+            # The operator's preferred active node. Newest instruction wins,
+            # so whichever node heard it first passes it on.
             "preferred_active": _wanted,
             "preferred_active_at": _wanted_at,
             "applied_version": me.applied_version if me else 0,
@@ -143,11 +131,9 @@ async def heartbeat(request: Request):
             "nginx_config_ok": me.nginx_config_ok if me else False,
             "waf_module_loaded": me.waf_module_loaded if me else None,
             "nginx_version": me.nginx_version if me else None,
-            # The whole configure line, so the other nodes can work out which
-            # modules this box was actually built with.  Without it a node that
-            # was built from a different module list looks identical to every
-            # other one, and the first anybody knows is a setting that will not
-            # apply for no visible reason.
+            # Full configure line so peers can compare module builds. A node
+            # built with different modules otherwise looks identical until a
+            # setting fails to apply.
             "nginx_build_info": me.nginx_build_info if me else None,
             "public_ip": me.public_ip if me else None,
             "local_addresses": me.local_address_list() if me else [],
@@ -166,10 +152,8 @@ async def heartbeat(request: Request):
 @router.post("/peer/config/prepare")
 async def config_prepare(request: Request):
     """
-    Phase one.  Stage the config and test it, but do not go live.
-
-    Answering ok here is a promise that this node can apply it.  Getting that
-    promise from every node before anybody commits is the whole point.
+    Phase one: stage and test the config without going live. Answering ok
+    is a promise this node can apply it.
     """
     node, payload = await authenticate(request)
 
@@ -179,21 +163,17 @@ async def config_prepare(request: Request):
     if not isinstance(files, dict) or not files:
         raise HTTPException(status_code=400, detail="no files were sent")
 
-    # Do not let another node empty this one.
-    #
-    # The active node checks this before sending, so reaching here means either
-    # somebody forced it or the sender is running an older build.  Checking
-    # again costs one directory listing and is the difference between losing one
-    # node's config and losing the fleet's: the node that promoted itself and
-    # wiped its own config queued the same empty config for the node that was
-    # down, and that node was serving all the traffic.
+    # Refuse a config that would empty this node. The sender checks too, so
+    # getting here means a forced push or an older sender. It's worth the
+    # extra listing: a self-promoted node with a wiped config once queued
+    # that empty config for the peer that was serving all the traffic.
     if not payload.get("force"):
         try:
             listing = await get_agent().list_dir(f"{MANAGED_ROOT}/sites")
             live = {f"sites/{e['name']}" for e in listing.get("entries", [])
                     if e.get("name", "").endswith(".conf")}
         except AgentError:
-            live = set()          # cannot tell, so do not stand in the way
+            live = set()          # can't tell, so don't block
 
         reason = looks_like_a_wipe({p: "" for p in live}, files)
         if reason:
@@ -207,12 +187,12 @@ async def config_prepare(request: Request):
                 ),
             }
 
-    # Held until the commit lands, so a version that gets rolled back does not
-    # leave its objects behind as the newest thing this node knows about.
+    # Held until commit, so a rolled back version doesn't leave its objects
+    # behind as the newest thing this node knows about.
     snapshot = payload.get("snapshot")
     if isinstance(snapshot, dict) and snapshot.get("tables"):
         _staged_snapshots[version] = snapshot
-        # A node that never commits would otherwise grow this forever.
+        # Prune in case commits never arrive.
         for old in [v for v in _staged_snapshots if v < (version or 0) - 5]:
             _staged_snapshots.pop(old, None)
 
@@ -239,7 +219,7 @@ async def config_prepare(request: Request):
 
 @router.post("/peer/config/commit")
 async def config_commit(request: Request):
-    """Phase two.  Swap the staged config in and reload."""
+    """Phase two: swap the staged config in and reload."""
     node, payload = await authenticate(request)
     version = payload.get("version")
     settings = get_settings()
@@ -261,17 +241,10 @@ async def config_commit(request: Request):
                 me.nginx_config_ok = True
                 me.last_error = None
 
-            # Keep the objects this version was rendered from.
-            #
-            # A standby used to hold the files and nothing else, so being
-            # promoted left it able to serve what it had and unable to change
-            # any of it.  Keeping the snapshot is what makes a promotion useful
-            # rather than merely survivable.
-            #
-            # Written here rather than at prepare time because prepare is a
-            # promise and commit is the thing that happened.  A version that
-            # was staged and then rolled back should not leave its objects
-            # behind as the newest thing this node knows.
+            # Keep the objects this version was rendered from, so a promoted
+            # standby can change the config rather than just serve it.
+            # Written at commit, not prepare, so rolled back versions leave
+            # nothing behind.
             snapshot = _staged_snapshots.pop(version, None)
             if snapshot:
                 existing = session.query(ConfigVersion).filter(
@@ -289,20 +262,13 @@ async def config_commit(request: Request):
                     ))
             session.commit()
 
-    # Take on the objects behind the files we just agreed to serve.
+    # Load the objects behind the files we now serve, so the database always
+    # matches what the node is serving. Otherwise a node that was down
+    # during a promotion comes back with stale objects, becomes active
+    # again, and silently undoes every change made while it was away.
     #
-    # The invariant worth having is simple: what a node has in its database is
-    # what it is serving.  Without this the two drift the moment anything is
-    # changed anywhere else, and the drift is silent and one directional.
-    #
-    # A node that was down while the other one was promoted comes back, is given
-    # the files, serves them, and still has its own older objects.  It becomes
-    # active again, renders from those, and quietly undoes every change made
-    # while it was away.  Nothing warns anybody, because from its point of view
-    # nothing changed.
-    #
-    # Outside the session above because a restore rewrites most of the config
-    # tables and wants a transaction of its own.
+    # Separate session: a restore rewrites most config tables and wants its
+    # own transaction.
     if result.get("ok") and snapshot:
         try:
             with session_scope() as session:
@@ -310,9 +276,8 @@ async def config_commit(request: Request):
             log.info("took on the config behind version %s: %s", version,
                      ", ".join(f"{k}={v}" for k, v in written.items() if v))
         except Exception as exc:
-            # The files are applied and this node is serving correctly.  Failing
-            # here means the objects are stale, which is worth shouting about
-            # and is not worth undoing a good apply over.
+            # The apply succeeded and the node is serving correctly. Stale
+            # objects are worth logging loudly, not undoing a good apply.
             log.error("applied version %s but could not take on its objects, so "
                       "this node's database is now behind what it is serving: %s",
                       version, exc)
@@ -328,7 +293,7 @@ async def config_commit(request: Request):
 
 @router.post("/peer/config/rollback")
 async def config_rollback(request: Request):
-    """Put the previous config back.  Called when a fleet wide apply went bad."""
+    """Restore the previous config after a failed fleet wide apply."""
     node, payload = await authenticate(request)
     log.warning("rolling back, told to by %s", node.name)
 
@@ -342,7 +307,7 @@ async def config_rollback(request: Request):
 
 @router.post("/peer/config/status")
 async def config_status(request: Request):
-    """What version this node is on, and whether nginx is happy."""
+    """This node's config version and whether nginx accepts the config."""
     await authenticate(request)
     settings = get_settings()
 
@@ -369,11 +334,8 @@ async def config_status(request: Request):
 @router.post("/peer/acme/token")
 async def acme_token(request: Request):
     """
-    Put a challenge token on this node, or take it off again.
-
-    This is what makes issuing a cert reliable across a cluster.  Lets Encrypt
-    connects to whichever address DNS gives it, and we do not get to choose.  So
-    every node holds the token and it does not matter which one they pick.
+    Write or delete a challenge token on this node. Every node holds the
+    token because the CA connects to whatever address DNS gives it.
     """
     node, payload = await authenticate(request)
 
@@ -397,11 +359,8 @@ async def acme_token(request: Request):
 @router.post("/peer/acme/issue")
 async def acme_issue(request: Request):
     """
-    Run certbot here.
-
-    The active node sends this to whichever node currently owns the public
-    address for the domain.  That node may well not be the active one, which is
-    the entire reason this endpoint exists.
+    Run certbot here. Sent by the active node to whichever node currently
+    owns the domain's public address, which may not be the active one.
     """
     node, payload = await authenticate(request)
 
@@ -417,12 +376,10 @@ async def acme_issue(request: Request):
 @router.post("/peer/cert/export")
 async def cert_export(request: Request):
     """
-    Hand a cert bundle over to another node.
-
-    Yes, this includes the private key.  It has to: every node serves the same
-    sites and only one of them could get the cert.  The channel is mutual TLS
-    between two nodes holding certificates from the same private CA, and the
-    caller has already proved which node it is with a signature.
+    Send a certificate bundle, including the private key, to another node.
+    Every node serves the same sites and only one can obtain the cert. The
+    channel is mutual TLS within the cluster CA and the caller is signature
+    verified.
     """
     node, payload = await authenticate(request)
     name = payload.get("name")
@@ -436,14 +393,10 @@ async def cert_export(request: Request):
 @router.post("/peer/host-metrics")
 async def peer_host_metrics(request: Request):
     """
-    What this box is doing, for a peer's utilization page.
-
-    Read out of /proc by this manager rather than by its agent, because the
-    agent runs with ProcSubset=pid and cannot see /proc/stat.  Widening the one
-    root component in the system so a chart can be drawn would be a poor trade,
-    and the container needs no privilege to read these itself.
-
-    Nothing here is a secret: cpu jiffies, memory totals and a load average.
+    Host metrics for a peer's utilization page. Read from /proc by the
+    manager, not the agent: the agent runs with ProcSubset=pid and can't see
+    /proc/stat, and loosening the root component for a chart isn't worth it.
+    Nothing here is sensitive.
     """
     node, _payload = await authenticate(request)
     from app.core.metrics import read_host
@@ -454,9 +407,8 @@ async def peer_host_metrics(request: Request):
 @router.post("/peer/cert/forget")
 async def cert_forget(request: Request):
     """
-    Take a deleted certificate's files off this node.
-
-    Only our own folder, never certbot's.  See the agent verb for why.
+    Remove a deleted certificate's files from this node. Only our own
+    folder, never certbot's; see the agent verb.
     """
     node, payload = await authenticate(request)
     try:
@@ -467,7 +419,7 @@ async def cert_forget(request: Request):
 
 @router.post("/peer/cert/import")
 async def cert_import(request: Request):
-    """Take a cert bundle from the node that got it."""
+    """Accept a certificate bundle from the node that obtained it."""
     node, payload = await authenticate(request)
 
     try:
@@ -478,15 +430,9 @@ async def cert_import(request: Request):
     except AgentError as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
-    # Pick it up straight away.  nginx reads certificate files when it loads and
-    # then holds them, so new bytes on disk change nothing until it looks again.
-    # Without this the node quietly serves the old certificate until something
-    # unrelated reloads it, and at renewal time that means serving an expired
-    # one with a good one sitting next to it.
-    #
-    # A failed reload is logged, not raised.  The copy itself worked, and
-    # answering with a 500 would tell the sending node that replication failed
-    # when it did not.
+    # Reload so nginx picks up the new files; otherwise it keeps serving the
+    # old cert, possibly past expiry. A failed reload is logged, not raised,
+    # since the copy itself worked.
     from app.core.acme import _reload_for_new_cert
 
     await _reload_for_new_cert(payload.get("name"))
@@ -499,17 +445,12 @@ async def cert_import(request: Request):
 # Running a build on a peer
 # ==============================================================================
 
-# Verbs another node is allowed to ask this one to run.
-#
-# Deliberately a short list, not "whatever the caller names".  A peer being
-# able to invoke any verb would make one compromised node as good as root on
-# every other one, which is exactly the thing the agent's own verb list exists
-# to prevent.  Forwarding everything would hand that away one level up.
-#
-# These four are what a fleet wide rebuild needs and nothing more.
+# Agent verbs a peer may ask this node to run. An explicit list, never
+# "whatever the caller names": otherwise one compromised node would be root
+# on every other, defeating the agent's own verb list.
 PEER_AGENT_VERBS = {
-    # The tunnel.  Read only or write only to the tunnel's own files, and the
-    # private key never comes back out of any of them.
+    # Tunnel verbs touch only the tunnel's own files, and the private key is
+    # never returned.
     "tunnel_key",
     "tunnel_apply",
     "tunnel_install",
@@ -521,53 +462,39 @@ PEER_AGENT_VERBS = {
     "nginx_revert",
     "status",
     "config_test",
-    # Connection counts off stub_status.  Read only, no arguments that reach
-    # the filesystem, and the whole reason for a fleet view is seeing the other
-    # node's numbers on whichever page somebody happens to be on.
+    # Connection counts from stub_status, for the fleet view. Read only, no
+    # filesystem arguments.
     "nginx_metrics",
-    # The country database.  Installing it is a fleet wide job by nature: a node
-    # without the file refuses the whole config, so the node somebody clicked on
-    # has to be able to put it on the others.  Neither verb takes a URL or a
-    # path, only the name of a source the agent already knows.
+    # GeoIP database. A node without it refuses the whole config, so any
+    # node must be able to install it on the others. Takes only the name of
+    # a known source, never a URL or path.
     "geoip_install",
     "geoip_status",
-    # The firewall rule set, for exactly the same reason as the country
-    # database above: a node without the rules refuses the whole config, so
-    # whichever node somebody clicked on has to be able to put them on the
-    # others.  Neither verb takes a URL or a path either, only the name of a
-    # track the agent already knows.
+    # WAF rule set, same reasoning as GeoIP. Takes only a known track name.
     "crs_install",
     "crs_status",
     "crs_rule_ids",
-    # Loading the module.  Read only in the status case, and the install case
-    # writes one file whose contents this node decides, tests the result and
-    # puts the old state back if nginx refuses it.  It has to be reachable from
-    # a peer because the whole fleet has to agree about whether the module is
-    # loaded: one node with it and one without is a site that works on one box
-    # and fails its config test on the other.
+    # WAF module load/status. The fleet must agree on whether the module is
+    # loaded, or a site passes the config test on one node and fails on the
+    # other. The install writes one file we control, tests, and rolls back
+    # on failure.
     "waf_module",
     "waf_module_status",
-    # The hits.  A learning session has to see what fired on every node, not
-    # just the one somebody is looking at, because whichever node was active
-    # when the testers ran is the one holding the evidence.  Reading takes a
-    # site name and a timestamp; clearing throws away that site's own log and
-    # nothing else.
+    # WAF hits. A learning session needs every node's hits, since whichever
+    # node was active during testing holds them. Read takes a site and a
+    # timestamp; clear removes only that site's log.
     "waf_hits",
     "waf_hits_clear",
     "waf_log_status",
-    # The surface, for the same reason as the hits and with the same arguments.
-    # A positive model built from one node's log is built from half the walk,
-    # and the half it missed is refused in production.
+    # Surface model, same reason and arguments as hits. One node's log only
+    # covers part of the traffic.
     "waf_surface",
-    # Failed logins.  A password spray is spread thin across many addresses on
-    # purpose, so asking one node halves the signal and can put it under the
-    # threshold, which is the difference between reporting an attack and not.
-    # Takes a site name, some paths and a timestamp; returns counts per
-    # address and never a username, because the access log has none.
+    # Failed logins. Password spraying is spread thin on purpose, so one
+    # node's view can fall under the threshold. Returns counts per address,
+    # never usernames (the access log has none).
     "login_failures",
-    # Rotation runs on a schedule from the active node, for the whole fleet,
-    # because a standby filling its disk is a standby that cannot be failed
-    # over to, which is found out at the worst moment.
+    # Log rotation, run fleet wide from the active node so a standby's disk
+    # doesn't fill.
     "waf_log_rotate",
 }
 
@@ -575,11 +502,8 @@ PEER_AGENT_VERBS = {
 @router.post("/peer/agent")
 async def peer_agent(request: Request):
     """
-    Let the node running an upgrade drive a build on this one.
-
-    A rebuild has to be walked one node at a time from somewhere, and that
-    somewhere is whichever node the admin clicked on.  This is how it reaches
-    the others.
+    Run an allowed agent verb on behalf of a peer. Used to drive fleet wide
+    operations, like a rolling rebuild, from whichever node the admin is on.
     """
     node, payload = await authenticate(request)
 
@@ -600,37 +524,21 @@ async def peer_agent(request: Request):
     try:
         return await get_agent().call(verb, timeout=120, **args)
     except AgentError as exc:
-        # This has to be a status, not a two hundred with ok=false in the body.
-        #
-        # Calling the agent on this node raises.  Calling it on a peer used to
-        # return that envelope instead, and PeerClient hands a body straight
-        # back, so the caller saw no exception and carried on as though the verb
-        # had worked.  The upgrade walk did exactly that: lb02 refused to start
-        # a build, the walk marked it "building" anyway, and it sat there for its
-        # full forty five minute timeout before reporting that the build had not
-        # finished in time.  The real reason was in the agent log the whole time.
-        #
-        # Since the walk does standbys first, that was the path it always took
-        # first, and the node you clicked from was the only one that reported a
-        # refused build honestly.
+        # Must be an error status, not 200 with ok=false. PeerClient returns
+        # the body as-is, so callers would treat a refused verb as success;
+        # a rolling upgrade once marked a peer "building" and waited out the
+        # full 45 minute timeout for a build that never started.
         raise HTTPException(status_code=502, detail=str(exc))
 
 
 @router.post("/peer/gslb")
 async def peer_gslb(request: Request):
     """
-    Take on the fleet's DNS zones from the active node.
+    Accept the fleet's DNS zones from the active node.
 
-    Separate from the config apply for the same reason accounts are, and the
-    consequence of not having it is worse.  A full snapshot only travels when
-    the rendered nginx config changes, and a DNS zone changes no nginx config
-    at all: it is answered by this manager's own listener, not by nginx.  So a
-    zone created on the active node reached the standby only if somebody
-    happened to edit a site afterwards, and usually never.
-
-    A standby with no zones runs no listener and answers nothing, so the fleet
-    looks like it has two nameservers and has one.  That is the whole promise
-    of the feature, and it was failing in the one situation it exists for.
+    Zones render no nginx config, so they never travel with a config apply.
+    Without this push a standby had no zones, ran no listener, and the fleet
+    had one working nameserver instead of two.
     """
     node, payload = await authenticate(request)
 
@@ -651,25 +559,20 @@ async def peer_gslb(request: Request):
         log.error("refused the dns zones %s sent: %s", node.name, result["refused"])
         raise HTTPException(status_code=409, detail=result["refused"])
 
-    # The listener follows the zones on its own timer, so nothing is started or
-    # stopped here.  Doing it inline would mean a peer request holding a socket
-    # bind, and reconcile already knows how to do it safely.
+    # Nothing is started or stopped here; gslb.reconcile follows the zones on
+    # its own timer and handles the socket bind safely.
     return {"ok": True, **result}
 
 
 @router.post("/peer/accounts")
 async def peer_accounts(request: Request):
     """
-    Take on the fleet's accounts from the active node.
+    Accept the fleet's accounts from the active node.
 
-    Separate from the config apply on purpose.  Nothing anybody does to an
-    account changes a line of nginx config, so an account change would otherwise
-    wait for an unrelated site edit to carry it across.  Taking somebody's access
-    away is the case that matters: it has to land on every box now, not the next
-    time a site is edited.
-
-    The rules for what is taken on, what is kept, and the refusal when a set
-    arrives with no enabled admin in it, are all in `snapshot.py`.
+    Separate from config applies because account changes touch no nginx
+    config. Revoking access has to reach every node immediately, not on the
+    next site edit. The rules for what is merged, kept or refused (e.g. a set
+    with no enabled admin) are in snapshot.py.
     """
     node, payload = await authenticate(request)
 
@@ -682,9 +585,8 @@ async def peer_accounts(request: Request):
         session.commit()
 
     if result.get("refused"):
-        # Say so out loud rather than answering as though it worked.  A node
-        # quietly keeping different accounts from the rest of the fleet is the
-        # thing this whole path exists to stop.
+        # Fail loudly. A node silently keeping different accounts is exactly
+        # what this path exists to prevent.
         log.error("refused the accounts %s sent: %s", node.name, result["refused"])
         raise HTTPException(status_code=409, detail=result["refused"])
 
@@ -700,15 +602,10 @@ async def peer_accounts(request: Request):
 @router.post("/peer/join")
 async def join(request: Request):
     """
-    Let a new node into the cluster.
-
-    This one is different from everything else here, because a node that is
-    joining does not have a certificate yet, so it cannot pass the normal
-    checks.  It presents a join token instead, and the token is what gets it a
-    signed certificate.
-
-    Because of that the token is as good as a password.  They are single use,
-    they expire in a couple of hours, and only the hash is stored.
+    Admit a new node. Unlike every other route there is no signature check,
+    since the joiner has no certificate yet; it presents a join token and gets
+    a signed certificate back. Tokens are therefore as sensitive as passwords:
+    single use, short lived, stored only as a hash.
     """
     import json
 
@@ -755,16 +652,15 @@ async def join(request: Request):
         if existing and not existing.is_self:
             log.info("%s is rejoining", node_name)
 
-        # Sign their certificate.  The common name gets forced to the node name
-        # we agreed on, so they cannot ask for a cert claiming to be somebody
-        # else and then use it to impersonate that node.
+        # Sign with the common name forced to the agreed node name, so the
+        # joiner can't obtain a cert impersonating another node.
         try:
             signed = ca.sign_node_csr(csr, node_name)
         except Exception as exc:
             raise HTTPException(status_code=400, detail=f"could not sign that request: {exc}")
 
-        # A shared key for signing messages, one per node.  Separate from the
-        # certificate so a node can be cut off without reissuing anything.
+        # Per node HMAC key, separate from the certificate so a node can be
+        # cut off without reissuing anything.
         hmac_key = new_token(32)
 
         if existing:
@@ -787,8 +683,8 @@ async def join(request: Request):
         row.used_at = utcnow()
         row.used_by_node = node_name
 
-        # Everything the joining node needs to know about the rest of the
-        # cluster, including our own key so it can talk back to us.
+        # What the joiner needs about the rest of the cluster, including our
+        # own key so it can talk back to us.
         settings = get_settings()
         me = session.query(Node).filter(Node.name == settings.node_name).first()
 
@@ -812,18 +708,10 @@ async def join(request: Request):
 
     log.warning("%s joined the cluster from %s", node_name, address)
 
-    # Send the site certificates after it has settled.
-    #
-    # Joining brings the config across, so the new node knows a site uses a
-    # certificate called something.  It does not bring the certificate itself,
-    # which lives as files rather than as rows, so the next apply renders a
-    # config naming a file that is not there and nginx refuses it on that node
-    # alone.  The apply is correctly rolled back everywhere and stays broken
-    # until somebody presses Sync now, which only helps if they know to.
-    #
-    # Not sent inline, because the node restarts the moment this response is
-    # read, to bring up its peer listener.  Anything pushed now arrives at a
-    # container that is on its way down.
+    # Send certificates once the new node has settled. The join carries the
+    # config rows but not certificate files, so its first apply would fail
+    # on a missing file. Not inline, because the node restarts to bring up
+    # its peer listener as soon as it reads this response.
     asyncio.create_task(_send_certificates_after_join(node_name))
 
     return {
@@ -842,16 +730,9 @@ async def join(request: Request):
 async def _send_certificates_after_join(node_name: str, tries: int = 10,
                                         gap: int = 15):
     """
-    Copy every usable certificate to a node that has just joined.
-
-    Retried rather than attempted once, because the node is restarting when
-    this starts and there is no moment we can name in advance when it will be
-    listening again.  Ten tries fifteen seconds apart covers a slow container
-    start without holding anything open.
-
-    A failure here does not undo the join.  The node is a member either way,
-    and a member missing a certificate is a thing to say loudly rather than a
-    reason to throw away a join that worked.
+    Copy every usable certificate to a newly joined node. Retried (10 tries,
+    15s apart) since the node is restarting and we can't know when it will
+    be listening. Failure doesn't undo the join; it's logged loudly instead.
     """
     from app.core.acme import AcmeError, get_cert_manager
     from app.models import Certificate
@@ -894,11 +775,8 @@ async def _send_certificates_after_join(node_name: str, tries: int = 10,
 @router.post("/peer/roster")
 async def roster(request: Request):
     """
-    Tell a peer about every node we know, and take their list too.
-
-    This is how a third node learns about the second one.  Everybody joins
-    through one sponsor, so without this the new node would only know the box it
-    joined through.
+    Exchange node lists with a peer. Nodes join through one sponsor, so
+    this is how a third node learns about the second.
     """
     from app.core.crypto import encrypt
     from app.models import NodeState
@@ -916,8 +794,7 @@ async def roster(request: Request):
 
             existing = session.query(Node).filter(Node.name == name).first()
             if existing:
-                # Never overwrite a key we already have from something a peer
-                # told us.  Keys come from a join, not from gossip.
+                # Don't take keys from gossip; they only come from a join.
                 existing.address = entry.get("address", existing.address)
                 existing.priority = entry.get("priority", existing.priority)
                 continue
@@ -958,17 +835,12 @@ async def roster(request: Request):
 @router.post("/peer/settings")
 async def peer_settings(request: Request):
     """
-    Take the fleet wide settings from the node running a restore.
+    Accept fleet wide settings from the node running a restore.
 
-    Settings have always been node local in this system, which is fine while
-    somebody sets them on the box they are looking at and never fails over.
-    It is not fine after a restore: the whole point is that every node ends up
-    able to do the job, and a standby with no acme email and no resolvers is a
-    node that looks ready and behaves differently the moment it is promoted.
-
-    Values arrive in the clear, as they do everywhere else between peers, and
-    are sealed again here with this node's own key.  The channel is mutual TLS
-    between two nodes holding certificates from the same private CA.
+    Settings are otherwise node local, and after a restore a standby
+    without, say, the ACME email or resolvers would behave differently once
+    promoted. Values arrive in the clear over the peer channel (mutual TLS)
+    and are encrypted again here with this node's key.
     """
     node, payload = await authenticate(request)
 

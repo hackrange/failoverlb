@@ -1,28 +1,18 @@
 """
 Certificates that did not come from Lets Encrypt.
 
-Three jobs live here and they share nearly all their machinery:
+Covers three cases:
 
-  * **Take one somebody already has.**  A key and a certificate, a chain, a
-    bundle with everything in it, or a PKCS12 file with a password on it.
-  * **Make a self signed one.**  For a staging box, an internal name that no
-    public authority will sign, or just getting a site up before the real
-    certificate arrives.
-  * **Make a signing request.**  A key stays here and the request goes to
-    whichever authority somebody buys from.  When the certificate comes back it
-    gets paired with the key that never left.
+  * importing existing material: key and certificate, chain, a combined
+    bundle, or a password protected PKCS12 file
+  * generating a self signed certificate
+  * generating a CSR, keeping the key here, and pairing the returned
+    certificate with it
 
-The rule that matters more than any of the rest: **nothing is stored until the
-key and the certificate have been checked against each other.**  A key and a
-certificate that are not a pair is a documented trap in this project and it
-crash looped the process twice, because three separate places checked that a
-file existed and none of them checked it was the right file.  nginx does not
-notice at load time either.  It notices when a browser connects, and then the
-site is down and the config looks perfect.
-
-Chains get rebuilt rather than trusted.  A chain in the wrong order works on
-some clients and fails on others, which is a miserable thing to debug from the
-outside, and the person uploading it usually has no way to tell.
+Nothing is stored until the key and certificate are verified as a pair.
+nginx loads a mismatched pair without complaint and then fails every
+handshake.  Chains are rebuilt from verified links rather than trusted as
+uploaded, since a misordered chain works on some clients and not others.
 """
 import datetime
 import ipaddress
@@ -38,35 +28,24 @@ from cryptography.x509.oid import (AuthorityInformationAccessOID,
 
 log = logging.getLogger("nfm.certs")
 
-# What a signing request is allowed to ask for.
-#
-# RSA only, and only these two sizes, because that is what an authority you buy
-# from will take.  1024 has been refused everywhere for years and anything odd
-# in between is a way to find out months later that the certificate cannot be
-# issued.
+# CSR key sizes: RSA only, and only sizes commercial CAs reliably accept.
 CSR_KEY_SIZES = (2048, 4096)
 
-# Self signed can also be an elliptic curve key, because nothing outside this
-# fleet has to accept it, and P-256 is smaller and faster than RSA for the same
-# strength.
+# Self signed certificates may also use ECDSA P-256, since no public CA has
+# to accept them.
 SELF_SIGNED_KEY_TYPES = ("ecdsa", "rsa")
 
-# How long a self signed certificate lasts by default.
-#
-# Public authorities are capped well below this and browsers enforce it, but
-# none of that applies to a certificate a browser is going to warn about
-# anyway.  The people using these want them to stop being a chore, so the
-# default is long and the field is there for anybody who disagrees.
+# Browser lifetime caps apply to publicly trusted certificates, not to self
+# signed ones, so the default is long.  It can be changed per certificate.
 SELF_SIGNED_DEFAULT_DAYS = 825
 SELF_SIGNED_MAX_DAYS = 3650
 
-# Uploads are text or a small binary blob.  This is well past a full bundle
-# with a long chain in it and nowhere near enough to be worth worrying about.
+# Far larger than any real bundle, but small enough to bound memory use.
 MAX_UPLOAD_BYTES = 512 * 1024
 
 
 class CertProblem(Exception):
-    """Something about the material that has to be said out loud."""
+    """A user-facing problem with uploaded or generated material."""
 
 
 # ==============================================================================
@@ -83,11 +62,8 @@ def _as_bytes(data) -> bytes:
 
 def load_certificates(data) -> list:
     """
-    Every certificate in a blob, whether it is PEM or DER.
-
-    PEM first because that is what nearly everything hands out, and a PEM file
-    can hold several.  DER holds exactly one and has no header to recognise, so
-    it is the fallback rather than something we sniff for.
+    All certificates in a blob.  Tries PEM (may hold several) first, then
+    falls back to a single DER certificate.
     """
     raw = _as_bytes(data)
     if not raw:
@@ -149,10 +125,9 @@ def load_private_key(data, password=None):
 
 def load_pkcs12(data, password=None):
     """
-    Everything out of a .p12 or .pfx: the key, the certificate and the chain.
+    Key, certificate and chain from a .p12/.pfx file.
 
-    These nearly always have a password, and an empty one is different from no
-    password at all, which is why both get tried.
+    An empty password is not the same as no password, so both are tried.
     """
     raw = _as_bytes(data)
     secret = _as_bytes(password) or None
@@ -176,13 +151,7 @@ def load_pkcs12(data, password=None):
 # ==============================================================================
 
 def key_matches_certificate(cert, key) -> bool:
-    """
-    Do these two actually belong together.
-
-    Compared on the public key rather than on anything either of them claims
-    about itself, because that is the only thing that cannot be copied from one
-    file to another by accident.
-    """
+    """Whether the key and certificate are a pair, by public key."""
     try:
         want = cert.public_key().public_bytes(
             serialization.Encoding.DER,
@@ -196,7 +165,7 @@ def key_matches_certificate(cert, key) -> bool:
 
 
 def _issued_by(child, parent) -> bool:
-    """Did parent sign child.  Checked by verifying, not by comparing names."""
+    """Whether parent signed child, verified by signature, not just name."""
     if child.issuer != parent.subject:
         return False
     try:
@@ -207,10 +176,8 @@ def _issued_by(child, parent) -> bool:
         )
         return True
     except Exception:
-        # Names lining up without the signature checking out is either the
-        # wrong intermediate from the right authority, which happens a lot when
-        # somebody grabs one off a support page, or a genuinely broken file.
-        # Either way it does not go in the chain.
+        # Matching names but a bad signature usually means the wrong
+        # intermediate from the right CA.  Leave it out.
         return False
 
 
@@ -225,15 +192,8 @@ def order_chain(leaf, pool) -> list:
     """
     Rebuild the chain from the leaf up, using only links that verify.
 
-    Rebuilt rather than trusted because a chain in the wrong order works on
-    some clients and fails on others.  Whoever uploaded it usually cannot tell,
-    since the browser they tested with had the intermediate cached from another
-    site.
-
-    The self signed root at the top is left off.  Sending it is legal and
-    wastes a couple of kilobytes on every single handshake, and no client that
-    trusts the certificate needed it, because trusting it is the definition of
-    already having it.
+    The self signed root is left off: any client that trusts it already has
+    it, so sending it only adds bytes to every handshake.
     """
     chain = [leaf]
     remaining = [c for c in pool if c.fingerprint(hashes.SHA256())
@@ -248,7 +208,7 @@ def order_chain(leaf, pool) -> list:
             break
         remaining.remove(nxt)
         if nxt.issuer == nxt.subject:
-            break   # that would be the root, which does not travel
+            break   # the root is not sent
         chain.append(nxt)
 
     return chain
@@ -259,7 +219,7 @@ def order_chain(leaf, pool) -> list:
 # ==============================================================================
 
 def names_in(cert) -> list:
-    """Every name this certificate is good for, SANs first, CN as a fallback."""
+    """Names the certificate covers: SANs, or the CN if there are none."""
     names = []
     try:
         san = cert.extensions.get_extension_for_oid(
@@ -270,10 +230,8 @@ def names_in(cert) -> list:
         pass
 
     if not names:
-        # Only worth falling back to when there are no SANs at all.  Every
-        # client stopped looking at the common name years ago, so a certificate
-        # that has only this is one nothing modern will accept, and the caller
-        # is told so rather than left to find out.
+        # CN fallback only when there are no SANs.  Modern clients ignore
+        # the CN, so such a certificate will not be accepted anyway.
         for attr in cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME):
             names.append(str(attr.value))
 
@@ -300,14 +258,11 @@ def _key_kind(cert) -> str:
 
 def _utc(value):
     """
-    The not_before and not_after, as naive UTC.
+    Convert a datetime to naive UTC.
 
-    cryptography 42 deprecated the naive properties in favour of the _utc ones,
-    and the certificate table holds naive UTC, which is what every row already
-    in it looks like.  Reading the new property and dropping the tzinfo keeps
-    both of those true.  Mixing the two is not a style question here: comparing
-    an aware datetime with a naive one raises, and it would raise on the
-    certificates page rather than anywhere near this line.
+    cryptography 42 deprecated the naive validity properties, but the
+    certificate table stores naive UTC.  Mixing aware and naive values raises
+    on comparison, so strip the tzinfo here.
     """
     return value.replace(tzinfo=None) if value.tzinfo else value
 
@@ -319,19 +274,11 @@ def _now():
 
 def ocsp_url(cert):
     """
-    The OCSP responder this certificate names, if it names one.
+    The OCSP responder URL in the certificate, or None.
 
-    Worth reading rather than assuming, because certificate authorities have
-    started dropping OCSP in favour of published revocation lists.  Lets
-    Encrypt did, so their certificates carry no responder at all now.
-
-    Asking nginx to staple a response for a certificate with no responder is
-    not an error, it just does nothing, and nginx says so once per reload:
-
-        "ssl_stapling" ignored, no OCSP responder URL in the certificate
-
-    So this is read at issue time and the stapling directives are only written
-    for a certificate that can actually use them.
+    Some CAs (including Lets Encrypt) have dropped OCSP.  Stapling is only
+    rendered for certificates that name a responder; otherwise nginx logs
+    "ssl_stapling ignored, no OCSP responder URL" on every reload.
     """
     try:
         aia = cert.extensions.get_extension_for_class(
@@ -378,12 +325,10 @@ def _key_pem(key) -> str:
 def analyse_upload(cert_data=None, key_data=None, chain_data=None,
                    pkcs12_data=None, password=None) -> dict:
     """
-    Work out what an upload really is, and refuse it if the pieces disagree.
+    Parse and check an upload; raise CertProblem if the pieces do not fit.
 
-    Writes nothing and touches nothing.  The caller gets back the finished
-    fullchain and key, plus everything worth showing somebody before they
-    commit to it, plus a list of things that are worth saying but are not
-    reasons to refuse.
+    Has no side effects.  Returns the ordered fullchain, the key, certificate
+    details for review, and non-fatal warnings.
     """
     for blob in (cert_data, key_data, chain_data, pkcs12_data):
         if blob is not None and len(_as_bytes(blob)) > MAX_UPLOAD_BYTES:
@@ -404,16 +349,15 @@ def analyse_upload(cert_data=None, key_data=None, chain_data=None,
         certs = load_certificates(cert_data)
         if not certs:
             raise CertProblem("no certificate was sent")
-        # A bundle in one file is the normal case.  The leaf is the one nothing
-        # else was issued by, rather than simply the first, because plenty of
-        # tools write the chain out top down.
+        # Bundles are common, and some tools write them root first, so
+        # find the leaf instead of taking the first certificate.
         leaf = _pick_leaf(certs)
         extras.extend(c for c in certs if c is not leaf)
         key = load_private_key(key_data, password)
 
     extras.extend(load_certificates(chain_data))
 
-    # Before anything else, and before anything is stored.
+    # Must pass before anything else happens.
     if not key_matches_certificate(leaf, key):
         raise CertProblem(
             "that private key does not go with that certificate.  Nothing has "
@@ -468,13 +412,7 @@ def analyse_upload(cert_data=None, key_data=None, chain_data=None,
 
 
 def _pick_leaf(certs):
-    """
-    The one at the bottom of the pile.
-
-    Whichever certificate did not sign any of the others.  Taking the first one
-    in the file is right most of the time and wrong often enough to matter,
-    because plenty of tools write a bundle root first.
-    """
+    """The certificate that signed none of the others."""
     if len(certs) == 1:
         return certs[0]
     for candidate in certs:
@@ -540,13 +478,10 @@ def check_domains(domains) -> list:
 def self_signed(domains, key_type="ecdsa", key_size=2048,
                 days=SELF_SIGNED_DEFAULT_DAYS, subject=None) -> dict:
     """
-    Make a certificate and the key that goes with it, signed by itself.
+    Generate a self signed certificate and key.
 
-    Everything a browser needs to accept it apart from being signed by somebody
-    it trusts: the names in a SubjectAlternativeName, not only in the common
-    name, and the usage extensions.  Getting those wrong produces a certificate
-    that fails for a reason nothing reports clearly, and it is the same handful
-    of lines either way.
+    Includes SANs and the usual key usage extensions so browsers accept it
+    once trusted; missing them causes obscure failures.
     """
     domains = check_domains(domains)
     if key_type not in SELF_SIGNED_KEY_TYPES:
@@ -596,13 +531,7 @@ def self_signed(domains, key_type="ecdsa", key_size=2048,
 
 
 def make_csr(domains, key_size=2048, subject=None) -> dict:
-    """
-    A signing request, and the key that stays here.
-
-    The key is generated on this box and never goes anywhere near the
-    authority, which is the whole point of a signing request: they sign a
-    statement about a public key and never see the private half.
-    """
+    """Generate an RSA key and a CSR for it.  The key never leaves here."""
     domains = check_domains(domains)
     key_size = int(key_size or 2048)
     if key_size not in CSR_KEY_SIZES:
@@ -628,12 +557,10 @@ def make_csr(domains, key_size=2048, subject=None) -> dict:
 
 def complete_csr(csr_privkey_pem, cert_data=None, chain_data=None) -> dict:
     """
-    Pair a certificate that came back from an authority with the key we kept.
+    Pair a CA-issued certificate with the key kept for its CSR.
 
-    The same match check as any other upload, and it earns its place here more
-    than anywhere else: the usual way this goes wrong is somebody pasting the
-    certificate for a different request, which looks completely reasonable and
-    fails at the first handshake.
+    The match check catches the common mistake of pasting the certificate
+    from a different request.
     """
     key = load_private_key(csr_privkey_pem)
     certs = load_certificates(cert_data)

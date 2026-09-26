@@ -1,20 +1,13 @@
 """
 Settings an admin can change from the GUI.
 
-There are two kinds of setting in this tool and it is worth being clear about
-which is which.
+Startup settings (listen port, node name, secret key) come from the
+environment and need a restart.  Settings worth changing at runtime (ACME
+email, staging, renewal window, SSO, and so on) live in the database and are
+handled here.
 
-Some live in the environment: which port to listen on, what this node is
-called, the secret key.  Those are read once at startup, they cannot change
-while the process is running, and putting them in the GUI would just mean a
-box that says "restart the container for this to do anything".
-
-The rest are things you genuinely want to change at 2am without touching a
-compose file.  The ACME email, whether to use the staging service, how early to
-renew.  Those live in the database and are what this module is for.
-
-Anything read here falls back to the environment when the database has nothing,
-so an existing setup keeps working and the GUI shows what is actually in force.
+Reads fall back to the environment when the database has no value, so the GUI
+shows what is actually in effect.
 """
 
 import json
@@ -28,18 +21,13 @@ from app.models import SystemSetting
 log = logging.getLogger("nfm.settings")
 
 
-# What the GUI is allowed to change, and how to treat each one.
+# Settings the GUI may change.
 #
-#   type     how to store and show it
-#   secret   encrypted at rest and never sent back to the browser
+#   type     how to store and show it ("secret" is encrypted at rest and
+#            never sent back to the browser)
 #   env      the environment variable it falls back to
-#   fleet    belongs to the fleet rather than to one box, so it travels with
-#            the config snapshot on every apply
-#
-# **fleet is not decoration.**  A setting only this node knows is a setting the
-# standby does not have the morning it gets promoted.  For most of what is
-# below that is survivable; for how people sign in it is not, which is why the
-# sign in settings are the first ones marked.
+#   fleet    fleet-wide rather than per node; travels with the config
+#            snapshot on every apply so a promoted standby has it
 EDITABLE = {
     "acme_email": {
         "type": "string",
@@ -134,10 +122,7 @@ EDITABLE = {
 
     # ---- how people sign in to this GUI --------------------------------------
     #
-    # These were environment only until now, which meant editing .env on every
-    # node and restarting all of them to change an identity provider.  They are
-    # all marked fleet, because sign in has to work on whichever node answers,
-    # and after a failover that is not the node somebody set them on.
+    # All fleet keys: sign in must work on whichever node is active.
     "auth_mode": {
         "type": "string",
         "env": None,
@@ -194,82 +179,47 @@ EDITABLE = {
     },
 }
 
-# The three ways in, and what each one means.
+# Sign in modes.
 #
-#   local   passwords on this box only.  The provider is ignored even if it is
-#           configured, which is what you want while you are still setting one
-#           up and do not want a half finished button on the login page.
-#   both    either.  The safe middle, and the only mode you can reach oidc from,
-#           because it is where somebody proves their account maps to a real
-#           person at the provider.
-#   oidc    the provider only.  Local passwords stop working.  This is the mode
-#           people want once the provider is the system of record, and it is the
-#           one that can lock everybody out, so it has its own guard rails.
+#   local   local passwords only; the provider is ignored even if configured
+#   both    either.  The only mode oidc can be selected from, so an admin
+#           has proven an SSO login works first.
+#   oidc    provider only; local passwords are refused.  Can lock everyone
+#           out, hence the guard rails.
 AUTH_MODES = ("local", "both", "oidc")
 
-# Settings that belong to the fleet rather than to one box.  Read by the config
-# snapshot so they travel on every apply.
+# Fleet-wide editable settings, carried in the config snapshot.
 FLEET_KEYS = tuple(k for k, spec in EDITABLE.items() if spec.get("fleet"))
 
-# Internal values that still have to be the same on every node.
-#
-# `INTERNAL` below is deliberately off the settings page, and for most of it
-# that is the end of the story: it is this node's own bookkeeping.  These two
-# are not.  They describe what the *fleet* is, and a node that does not have
-# them makes the wrong decision the moment it becomes the active one.
-#
-# `waf_module` is the one that bites.  Every rebuild reads it so an unrelated
-# version upgrade does not quietly drop the WAF module, which is exactly the
-# promise its own comment makes further down.  That promise only held on the
-# node somebody happened to click on.  Fail over to the other node, upgrade
-# nginx from there, and it rebuilds without the module; every site running the
-# WAF then fails its config test, and since an apply is all or nothing that is
-# the whole fleet unable to apply anything.  Found on 18 August, on a fleet
-# where lb01 said True and lb02 said None.
-#
-# They travel in the config snapshot with everything else, so a standby that
-# has never been clicked on still knows what the fleet is.
+# INTERNAL values that must still match on every node, so they travel in
+# the snapshot too.  If waf_module were missing on the standby, an nginx
+# upgrade run after failover would rebuild without the WAF module, and every
+# WAF site would then fail the config test and block all applies.
 INTERNAL_FLEET_KEYS = ("waf_module", "waf_crs_last_install")
 
-# What may cross the wire in a snapshot, in one place, because capture and
-# restore reading two different lists is how a setting travels out and is
-# refused on arrival.
+# Single allowlist shared by capture_fleet() and restore_fleet().
 SNAPSHOT_KEYS = FLEET_KEYS + INTERNAL_FLEET_KEYS
 
 
-# Settings the app keeps for itself.  Not on the GUI's editable list, because
-# nobody should be typing these, but they still need somewhere to live that
-# survives a restart.  Kept separate so the settings page cannot show or change
-# them by accident.
+# Values the app keeps for itself.  Persisted like settings but kept off
+# the settings page.
 INTERNAL = {
     "acme_hook_secret": {"type": "secret", "env": None, "label": "certbot hook secret"},
-    # When the country database was last put on the fleet.  Kept by the app so
-    # the schedule knows whether anything is due, and shown on the page, but
-    # not something anybody should be typing.
+    # Last GeoIP database install, used by the refresh schedule.
     "geoip_last_install": {"type": "string", "env": None,
                            "label": "country database last installed"},
-    # Whether nginx is built with the WAF module in it.  Not a normal setting
-    # and deliberately not on the settings page: turning it on by itself does
-    # nothing, because the module only appears after nginx is rebuilt.  The
-    # flow that switches the WAF on sets this and then offers the rebuild, and
-    # every rebuild after that reads it so the module is not quietly dropped by
-    # an unrelated version upgrade.
+    # Whether nginx should be built with the WAF module.  Set by the WAF
+    # enable flow (which then offers a rebuild) and read by every later
+    # rebuild so an upgrade does not drop the module.
     "waf_module": {"type": "bool", "env": None,
                    "label": "build nginx with the WAF module"},
-    # When the rule set was last put on the fleet, so the schedule knows
-    # whether anything is due.  Kept by the app, shown on the page, not
-    # something anybody should be typing.
+    # Last CRS rule set install, used by the refresh schedule.
     "waf_crs_last_install": {"type": "string", "env": None,
                              "label": "rule set last installed"},
-    # Which node somebody asked to be the active one.  Empty means nobody
-    # asked and the election decides on priority as it always did.
-    #
-    # Not on the settings page, because it is not a preference somebody types,
-    # it is the record of pressing the failover button.  It is deliberately not
-    # a fleet key either: fleet keys travel in the config snapshot, which only
-    # moves on an apply, and this has to reach the other node in seconds.  It
-    # rides the heartbeat instead, with the timestamp below deciding which of
-    # two instructions is the newer one.
+    # Node requested as active via the failover button; empty means the
+    # election uses priority.  Not a fleet key, since snapshots only move on
+    # apply and this must propagate in seconds.  It travels on the heartbeat,
+    # and preferred_active_at decides which request is newer.
     "preferred_active_node": {"type": "string", "env": None,
                               "label": "node asked to be active"},
     "preferred_active_at": {"type": "string", "env": None,
@@ -282,9 +232,7 @@ def _spec(key: str):
 
 
 def get(key: str, default=None):
-    """
-    Read a setting.  Database first, then the environment, then the default.
-    """
+    """Read a setting: database, then environment, then default."""
     spec = _spec(key)
 
     with session_scope() as session:
@@ -296,8 +244,7 @@ def get(key: str, default=None):
         if was_encrypted:
             raw = decrypt(raw)
             if raw is None:
-                # The node key changed, so this cannot be read any more.  Fall
-                # through to the environment rather than handing back garbage.
+                # Node key changed; fall back to the environment.
                 log.warning("could not decrypt the stored value for %s", key)
                 raw = None
 
@@ -342,12 +289,8 @@ def set(key: str, value, actor: str = "system"):
 
 def all_visible() -> dict:
     """
-    Everything the settings page shows.
-
-    Secrets come back as a flag saying whether one is stored, never as the
-    value.  A settings page that helpfully fills the password box with the real
-    password is a settings page that leaks it to anybody who opens the browser
-    developer tools, or to the next person to use that machine.
+    Values for the settings page.  Secrets are reported only as set or not
+    set, never returned to the browser.
     """
     out = {}
     for key, spec in EDITABLE.items():
@@ -381,13 +324,11 @@ def _coerce(raw: str, kind: str):
 
 def auth_mode() -> str:
     """
-    Which of the three ways in is switched on: local, both, or oidc.
+    Current sign in mode: local, both, or oidc.
 
-    Falls back to the environment the way everything else here does, so an
-    install that set `NFM_OIDC_ENABLED` before this page existed keeps the
-    behaviour it had: the provider offered alongside local passwords.  Anything
-    unrecognised reads as local, because the failure that matters is a typo in
-    a database row turning into nobody being able to sign in.
+    Without a stored value, `NFM_OIDC_ENABLED` maps to "both", otherwise
+    "local".  An unrecognized stored value also falls back this way, so a bad
+    row cannot lock everyone out.
     """
     stored = str(get("auth_mode") or "").strip().lower()
     if stored in AUTH_MODES:
@@ -402,23 +343,18 @@ def local_passwords_allowed() -> bool:
 
 def oidc_offered() -> bool:
     """
-    Whether the provider should be offered at all.
-
-    Only says the mode allows it.  Whether it is actually usable is
-    `app.auth.oidc.is_configured()`, which also wants a discovery URL, a client
-    id and somewhere to come back to.
+    Whether the mode allows SSO.  See `app.auth.oidc.is_configured()` for
+    whether it is actually usable.
     """
     return auth_mode() in ("both", "oidc")
 
 
 def oidc_config() -> dict:
     """
-    Every OIDC value, database first and the environment behind it.
+    All OIDC settings, database first with environment fallback.
 
-    One function rather than nine lookups scattered about, because the failure
-    this prevents is subtle: half the flow reading the database and half of it
-    still reading the environment gives a login that starts against one
-    provider and finishes against another.
+    Read in one place so a login cannot start against one provider and finish
+    against another.
     """
     return {
         "discovery_url": (get("oidc_discovery_url") or "").strip(),
@@ -438,18 +374,11 @@ def oidc_config() -> dict:
 
 def capture_fleet() -> list:
     """
-    The fleet wide settings, as plain data, for the config snapshot.
+    Fleet-wide settings as plain data for the config snapshot.
 
-    Secrets are unsealed here and sealed again with the receiving node's own
-    key, exactly as `snapshot.py` already does for pool tokens and private
-    keys.  The reasoning is the same and so is the trade: the peer link is
-    mutual TLS between two nodes holding certificates from the same private CA,
-    with a signature on every message, and a client secret that does not
-    survive a failover is a fleet where nobody can sign in the moment the
-    standby takes over.
-
-    A value that will not decrypt here is left out rather than sent as bytes
-    the far end would store and never be able to read.
+    Secrets are decrypted here and re-encrypted with the receiving node's key,
+    as `snapshot.py` does for pool tokens and private keys; the peer link is
+    mutual TLS with signed messages.  Values that fail to decrypt are skipped.
     """
     out = []
     for key in SNAPSHOT_KEYS:
@@ -472,20 +401,14 @@ def capture_fleet() -> list:
 
 def restore_fleet(rows) -> int:
     """
-    Put the fleet wide settings back from a snapshot.
+    Restore fleet-wide settings from a snapshot.
 
-    Only keys on the fleet list are accepted.  A snapshot is data that arrived
-    over the network, and a loop that wrote whatever keys it was handed would
-    let a peer set anything in this table, including the internal values the
-    settings page deliberately cannot reach.
+    Only SNAPSHOT_KEYS are accepted, so a peer cannot write arbitrary rows.
     """
     if not rows:
         return 0
 
-    # A set literal, not set().  This module defines its own `set` a hundred
-    # lines up, so the builtin is not the builtin in here.  The check caught
-    # this, which is the only reason it is not still sitting in the one code
-    # path that runs during a failover and nowhere else.
+    # Not set(): this module defines its own `set`, shadowing the builtin.
     allowed = {*SNAPSHOT_KEYS}
     written = 0
     with session_scope() as session:
@@ -516,14 +439,9 @@ def restore_fleet(rows) -> int:
 
 def acme_email() -> str:
     """
-    The contact address for certificates, or empty if nobody set one.
+    ACME contact email, or "".
 
-    Empty is allowed.  Lets Encrypt will issue without a contact address, it
-    just will not email you before something expires.  That matters less here
-    than it would elsewhere, because the manager is watching expiry itself and
-    puts a warning on the dashboard well before it becomes a problem.
-
-    Refusing to issue without an email would be us inventing a requirement the
-    certificate authority does not have.
+    Empty is fine: the CA issues without one, and expiry is monitored here
+    anyway.
     """
     return (get("acme_email") or "").strip()

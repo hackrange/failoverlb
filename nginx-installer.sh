@@ -2,13 +2,12 @@
 #
 # Nginx from source installer.
 #
-# This builds nginx against a fresh OpenSSL so you get post quantum crypto.
-# It hides the nginx name from the Server header, loads the modules we like,
-# sets up certbot, and keeps a backup so you can roll back with one command.
+# Builds nginx against a current OpenSSL for post quantum key exchange, hides
+# the nginx name in the Server header, adds our usual modules, sets up certbot
+# and keeps a backup so a bad build can be reverted with one command.
 #
-# Certbot runs in webroot mode here.  Do not install python3-certbot-nginx and
-# expect it to help, that plugin edits your server blocks for you and it drags
-# in Ubuntu's nginx package.  See protect_from_apt below for why that hurts.
+# Certbot runs in webroot mode.  Do not install python3-certbot-nginx: it
+# pulls in Ubuntu's nginx package (see protect_from_apt).
 #
 # Everyday use:
 #   sudo ./nginx-installer.sh install          # build and install nginx
@@ -17,47 +16,44 @@
 #   sudo ./nginx-installer.sh renew            # renew every cert
 #   sudo ./nginx-installer.sh status           # quick health check
 #
-# To move to a newer nginx just change NGINX_VERSION below and run install again.
-# The old build gets backed up first so revert always has somewhere to go.
+# To upgrade, change NGINX_VERSION below and run install again.  The old
+# build is backed up first, so revert always has something to go back to.
 
-# The -E matters.  It lets the ERR trap below fire from inside a function, so a
-# command that quits early always tells you where it happened.
+# -E lets the ERR trap fire inside functions too, so a failure always reports
+# where it happened.
 set -Eeuo pipefail
 
 
-# ==============================================================================
+# =============================================================================
 # Versions
-# ==============================================================================
+# =============================================================================
 
-# Pin the versions here.  Bump these when a new release comes out, then rerun
-# install.  Keeping them at the top is the whole point, one edit and you upgrade.
-# You can also set these as env vars, which is handy for Ansible and Terraform.
+# Pinned versions.  Bump and rerun install to upgrade.  Each can also be set
+# from the environment (handy for Ansible or Terraform).
 NGINX_VERSION="${NGINX_VERSION:-1.30.4}"
 OPENSSL_VERSION="${OPENSSL_VERSION:-3.5.7}"
 HEADERS_MORE_VERSION="${HEADERS_MORE_VERSION:-0.40}"
 
-# The WAF engine, built from source rather than taken from apt.  Ubuntu 24.04
-# ships libmodsecurity3 at 3.0.12, which is older than the two CVEs fixed in
-# 3.0.15 (an integer underflow in the verify operators, and a buffer overflow
-# in hex_decode).  A WAF running a knowingly vulnerable engine is worse than no
-# WAF, so we pin a current one the same way we pin nginx and OpenSSL.
+# The WAF engine, built from source.  Ubuntu 24.04 ships libmodsecurity3
+# 3.0.12, which predates two CVE fixes in 3.0.15 (an integer underflow in the
+# verify operators and a buffer overflow in hex_decode).
 MODSECURITY_VERSION="${MODSECURITY_VERSION:-3.0.16}"
 
 
-# ==============================================================================
+# =============================================================================
 # Included modules
-# ==============================================================================
+# =============================================================================
 #
-# This is the one place to add or drop modules.  There are four lists.
+# Add or drop modules here.  There are four lists:
 #
-#   BUILTIN_MODULES      nginx's own modules, switched on with a configure flag.
-#   THIRD_PARTY_MODULES  outside modules we download and compile in.
-#   DYNAMIC_MODULES      outside modules built as .so and loaded only when used.
-#   EXTRA_BUILD_DEPS     apt packages that some of those modules need to build.
+#   BUILTIN_MODULES      nginx's own modules, enabled by configure flag.
+#   THIRD_PARTY_MODULES  outside modules downloaded and compiled in.
+#   DYNAMIC_MODULES      outside modules built as .so, loaded on demand.
+#   EXTRA_BUILD_DEPS     apt packages those modules need to build.
 #
-# To drop a module, comment out its line.  To add one, put a new line in the
-# right list and rerun install.  Order matters in THIRD_PARTY_MODULES, the devel
-# kit has to come before lua since lua leans on it.
+# Comment out a line to drop a module, add a line and rerun install to add
+# one.  Order matters in THIRD_PARTY_MODULES: the devel kit must come before
+# lua, which depends on it.
 
 # nginx's built in modules.  These are just flags, no downloads needed.
 BUILTIN_MODULES=(
@@ -66,13 +62,9 @@ BUILTIN_MODULES=(
   --with-file-aio
   --with-http_ssl_module
   --with-http_v2_module
-  # HTTP/3.  Needs a TLS library with the QUIC API, which is why this was left
-  # out for years: it wanted BoringSSL or quictls and we bake OpenSSL.  OpenSSL
-  # 3.5 has the API and the nginx we build knows how to use it, so the reason
-  # is gone.  Worth having beyond the version number, because QUIC is where the
-  # post quantum key exchange matters most: a handshake somebody captures today
-  # is decrypted whenever a quantum computer turns up, and QUIC handshakes are
-  # the ones carrying everything from the first flight.
+  # HTTP/3.  Needs a TLS library with the QUIC API, which OpenSSL has had
+  # since 3.5.  QUIC is also where post quantum key exchange matters most,
+  # since its handshake carries data from the first flight.
   --with-http_v3_module
   --with-http_realip_module
   --with-http_stub_status_module
@@ -97,8 +89,8 @@ BUILTIN_MODULES=(
   --with-pcre-jit
 )
 
-# Outside modules.  Format is "folder|git-url|git-ref".  We clone each one and
-# add it to the build.  The ref can be a tag or a branch.
+# Outside modules, as "folder|git-url|git-ref".  The ref can be a tag or a
+# branch.
 THIRD_PARTY_MODULES=(
   "ngx_devel_kit|https://github.com/vision5/ngx_devel_kit|master"
   "lua-nginx-module|https://github.com/openresty/lua-nginx-module|v0.10.28"
@@ -114,54 +106,20 @@ THIRD_PARTY_MODULES=(
   "upstream-fair|https://github.com/itoffshore/nginx-upstream-fair|master"
 )
 
-# nchan was here and was taken out on 25 August 2026.  Please do not put it
-# back without reading this.
-#
-# It is a publish and subscribe server built into nginx: an application posts a
-# message to a channel and every browser holding a connection open gets it, over
-# websockets, server sent events or long polling.  A good module, and nothing
-# here has ever used it.  The manager generates no nchan directive of any kind,
-# and the GUI's live pages poll on a timer rather than being pushed to.
-#
-# It cost two outages.  On 17 August and again on 24 August, seconds after an
-# nginx reload, every worker aborted inside it and died holding the lock on its
-# shared memory zone.  A zone left locked by a dead process stays locked, and
-# nginx builds those zones once at startup, so a reload hands the same poisoned
-# zone straight back to the replacement workers and they block on it too.  The
-# master keeps the listening sockets throughout, so the machine goes on
-# accepting connections and answering none of them.  It looks alive from
-# outside and from systemd, and the second time it took 72 minutes and a manual
-# restart to clear.
-#
-# Being compiled in is what made it unavoidable.  It claimed a 128 MB shared
-# memory zone on every node at startup purely because it was present, with no
-# directive asking for it.  The note under the dynamic module list below makes
-# this same argument about ModSecurity, and it applies here: a compiled in
-# module is part of the binary whether anybody wants it or not.
-#
-# If push ever is wanted, add it to the dynamic list below instead, so it sits
-# on disk doing nothing until a node's config actually asks for it.
+# nchan was removed on August 25, 2026.  Nothing here used it, but compiled
+# in it grabbed a 128 MB shared memory zone on every node.  Twice, after a
+# reload, workers aborted inside it holding that zone's lock, and since a
+# reload reuses the zone, nginx kept accepting connections without answering
+# any until a full restart.  If pub/sub is ever needed, add it to
+# DYNAMIC_MODULES so it only loads where a config asks for it.
 
-# Modules built as loadable .so files instead of compiled in.  Same
-# "folder|git-url|git-ref" format as the list above.
+# Modules built as loadable .so files, same format as above.  ModSecurity
+# links against libmodsecurity.so; compiled in, a missing or mismatched
+# library would stop nginx from starting at all.  As a .so it is only loaded
+# on nodes whose sites have the WAF on.  Needs --with-compat (set above).
 #
-# Why these are not just in THIRD_PARTY_MODULES: a compiled in module is part
-# of the binary whether anybody wants it or not.  ModSecurity links against
-# libmodsecurity.so, and if that library is ever missing or a version out of
-# step, a statically linked nginx will not exec at all.  That would take down
-# every node in the fleet over a feature most of them are not using.  Built
-# this way the .so sits on disk doing nothing until a load_module line asks for
-# it, and that line is only written for a node whose sites have the WAF on.
-#
-# --with-compat is in BUILTIN_MODULES above, which is what these need.
-#
-# The WAF is off unless asked for.  Measured at about two minutes of the four
-# a whole build takes on a sixteen core box, and a good deal more on a small
-# one, and most installs will never switch it on, so a fresh box does not pay
-# for it.
-# Turning it on in the GUI rebuilds nginx with WITH_MODSECURITY=1, which is the
-# same path the version upgrades already take, so nobody has to edit this file
-# or compile anything by hand.
+# The WAF is off by default since it adds a couple of minutes to every build.
+# Turning it on in the GUI rebuilds with WITH_MODSECURITY=1, or by hand:
 #
 #   sudo WITH_MODSECURITY=1 ./nginx-installer.sh install
 #
@@ -185,10 +143,8 @@ EXTRA_BUILD_DEPS=(
   libperl-dev         # perl
 )
 
-# What libmodsecurity needs to build, added only when the WAF is being built.
-# autotools because that is how it builds, yajl for the JSON audit log the hits
-# page reads, lmdb for the counters CRS keeps between requests, curl for rules
-# that fetch.  None of this goes on a box that is not building a WAF.
+# Build deps for libmodsecurity, only when the WAF is built: autotools, yajl
+# for the JSON audit log, lmdb for CRS counters, curl for remote rules.
 if [[ "$WITH_MODSECURITY" == "1" ]]; then
   EXTRA_BUILD_DEPS+=(
     automake
@@ -201,16 +157,16 @@ if [[ "$WITH_MODSECURITY" == "1" ]]; then
     libssl-dev
   )
 fi
-# Note: the lua module needs OpenResty's own LuaJIT, not the stock Ubuntu one.
-# We build that from source in build_lua_support, so it is not an apt package.
+# The lua module needs OpenResty's LuaJIT, not Ubuntu's.  build_lua_support
+# builds it from source.
 
 
-# ==============================================================================
+# =============================================================================
 # Other settings
-# ==============================================================================
+# =============================================================================
 
-# This is the name we show in the Server header instead of nginx.  Set it to
-# whatever you like, or leave it blank to drop the header completely.
+# Shown in the Server header instead of nginx.  Leave blank to drop the
+# header.
 FAKE_SERVER_NAME="server"
 
 # Where things live.  You probably do not need to touch these.
@@ -219,45 +175,42 @@ SBIN="/usr/sbin/nginx"
 BUILD_ROOT="/usr/local/src/nginx-build"
 BACKUP_ROOT="/var/backups/nginx-installer"
 
-# Source tarballs live here between builds.  BUILD_ROOT gets cleared at the
-# start of every build, so without this each one re-downloads nginx and the
-# whole of openssl.
+# Source tarball cache.  BUILD_ROOT is wiped on every build, so this saves
+# downloading nginx and OpenSSL each time.
 CACHE_DIR="/var/cache/nginx-installer"
 WEBROOT="/var/www/html"
 ACME_WEBROOT="/var/www/certbot"
 RUN_USER="www-data"
 
 
-# ==============================================================================
+# =============================================================================
 # Little helpers
-# ==============================================================================
+# =============================================================================
 
-# Colored log lines so it is easy to see what happened.
+# Colored log output.
 log()  { printf '\033[1;32m[+]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*"; }
 die()  { printf '\033[1;31m[x]\033[0m %s\n' "$*" >&2; exit 1; }
 
-# Catch anything that dies without going through die().  Before this was here a
-# command could fail with its errors sent to /dev/null and the script would
-# just stop, no message, halfway through the install.  Now you get the line.
+# Report the line for anything that fails without going through die(), so a
+# command with its output sent to /dev/null does not stop the script silently.
 trap 'rc=$?; printf "\033[1;31m[x]\033[0m Stopped at line %s (exit %s), command: %s\n" "$LINENO" "$rc" "$BASH_COMMAND" >&2; exit $rc' ERR
 
-# Most of this needs root since we touch system paths and services.
+# Most commands touch system paths and services, so they need root.
 require_root() {
   if [[ "$(id -u)" -ne 0 ]]; then
     die "Please run this with sudo or as root."
   fi
 }
 
-# True when systemd is actually running the box.  A container or a chroot can
-# have the systemctl binary sitting there without systemd as pid 1, and every
-# call we make would fail for a reason that has nothing to do with our config.
+# True when systemd is actually pid 1.  Containers and chroots can have
+# systemctl installed without it.
 have_systemd() {
   command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]
 }
 
-# We only promise this works on the two Ubuntu LTS releases the user asked for.
-# Anything else still tries, but we say so up front.
+# Tested on Ubuntu 24.04 and 26.04.  Anything else gets a warning but still
+# runs.
 check_ubuntu() {
   local id ver
   id="$(. /etc/os-release && echo "${ID:-}")"
@@ -272,19 +225,11 @@ check_ubuntu() {
   esac
 }
 
-# Grab a file, keeping a copy so the next build does not go out to the network
-# for the same fifty megabytes.
-#
-# Both callers pass a tarball.  The cached copy is only used if it still unpacks,
-# which catches a half written file from an interrupted build; a corrupt cache
-# that failed the build every time until somebody worked out to delete it would
-# be a worse bug than the one this fixes.
-#
-# The retries got longer after a real failure.  Both boxes sit behind one
-# address, so three builds in a row means three pulls of the same file from the
-# same place in a few minutes, and the third came back empty.  Five tries with a
-# wait between them costs nothing on a good day and saves a twenty minute build
-# on a bad one.
+# Download a tarball, caching it for the next build.  A cached copy is only
+# used if it still unpacks, so a half written file from an interrupted build
+# is fetched again instead of failing every build after it.  Retries are
+# generous because several nodes behind one address may pull the same file
+# within minutes.
 fetch() {
   local url="$1" out="$2" name cached
   name="$(basename "$out")"
@@ -300,7 +245,7 @@ fetch() {
   wget --https-only --tries=5 --waitretry=15 --timeout=60 -qO "$out" "$url" \
     || die "Could not download $url"
 
-  # Keep it, but never let a caching problem fail an otherwise good build.
+  # Cache it, but never let a caching problem fail the build.
   if tar tzf "$out" >/dev/null 2>&1; then
     mkdir -p "$CACHE_DIR"
     cp -a "$out" "${cached}.part" 2>/dev/null && mv "${cached}.part" "$cached" 2>/dev/null || true
@@ -308,14 +253,13 @@ fetch() {
 }
 
 
-# ==============================================================================
+# =============================================================================
 # Dependencies
-# ==============================================================================
+# =============================================================================
 
-# Pull in everything the source build needs.  We lean on the distro for pcre2
-# and zlib since those are stable, and we only build OpenSSL ourselves because
-# that is where the post quantum support comes from.  The module deps get added
-# on top from the EXTRA_BUILD_DEPS list.
+# Build dependencies.  pcre2 and zlib come from the distro; only OpenSSL is
+# built from source, for post quantum support.  Module deps come from
+# EXTRA_BUILD_DEPS.
 install_deps() {
   log "Installing build dependencies."
   export DEBIAN_FRONTEND=noninteractive
@@ -335,34 +279,27 @@ install_deps() {
 }
 
 
-# ==============================================================================
+# =============================================================================
 # Keep apt away from our binary
-# ==============================================================================
+# =============================================================================
 
-# Here is the trap this saves you from.  Install anything that depends on the
-# nginx package, and python3-certbot-nginx is the usual culprit, and apt pulls
-# in Ubuntu's nginx.  Dpkg then unpacks its binary right on top of ours at
-# /usr/sbin/nginx.  That binary has none of our modules compiled in, so the
-# very next config test blows up with something like:
+# Installing anything that depends on the nginx package (usually
+# python3-certbot-nginx) makes apt pull in Ubuntu's nginx, which overwrites
+# our /usr/sbin/nginx with a binary lacking our modules.  The next config
+# test then fails with something like:
 #
 #   unknown directive "more_set_headers" in /etc/nginx/nginx.conf
 #
-# The nginx postinst runs that test, so it fails, and the whole apt run ends up
-# half configured.  We block it three ways.  A stand in package so the nginx
-# dependency is already met, a hold so apt will not swap that out, and a
-# diversion so even a forced install lands on nginx.distrib instead of us.
+# and apt is left half configured.  Three guards: a stand in package so the
+# dependency is met, holds on the real packages, and a dpkg diversion so even
+# a forced install lands on nginx.distrib.
 protect_from_apt() {
   log "Setting up apt guards so nothing overwrites our nginx."
 
-  # If the real packages are already here, say so.  We do not pull them out for
-  # you, removing nginx-common can take your config down with it.
-  # The "|| true" on the end matters.  On a clean box none of these packages
-  # are installed, so dpkg-query exits 1, and with pipefail and set -e that
-  # kills the whole install right here without printing a thing.  Not finding
-  # them is the normal case, so it is not an error.
-  # Our own stand in is named nginx too, so skip anything carrying our epoch of
-  # 9.  Without this every rerun of install would tell you to remove the very
-  # package we put there on the run before.
+  # Warn if the real packages are installed, but do not remove them;
+  # removing nginx-common can take the config with it.  dpkg-query exits 1
+  # when none are found (the normal case), hence the "|| true".  Our own stand
+  # in is also named nginx, so skip epoch 9.
   local installed
   installed="$(dpkg-query -W -f='${Package} ${Status} ${Version}\n' nginx nginx-core nginx-common 2>/dev/null \
     | awk '$4 == "installed" && $5 !~ /^9:/ { printf "%s ", $1 }' || true)"
@@ -372,16 +309,15 @@ protect_from_apt() {
     warn "Use remove, not purge.  Purge deletes the config in ${PREFIX}."
   fi
 
-  # Hold the real names so apt will not quietly put them back on an upgrade.
+  # Hold the real packages so an upgrade does not bring them back.
   local pkg
   for pkg in nginx nginx-common nginx-core nginx-full; do
     apt-mark hold "$pkg" >/dev/null 2>&1 || true
   done
   log "Held: nginx nginx-common nginx-core nginx-full"
 
-  # Last line of defense.  With this in place dpkg writes any nginx binary it
-  # ships to ${SBIN}.distrib and ours stays put.  No --rename on purpose, we do
-  # not want it moving the binary we just built.
+  # Divert any packaged binary to ${SBIN}.distrib.  No --rename, so dpkg
+  # never moves our own binary.
   if ! dpkg-divert --list "$SBIN" 2>/dev/null | grep -q .; then
     dpkg-divert --local --divert "${SBIN}.distrib" --add "$SBIN" >/dev/null
     log "Diverted any packaged nginx to ${SBIN}.distrib"
@@ -389,28 +325,17 @@ protect_from_apt() {
 }
 
 
-# The stand in package, registered once the binary it describes actually exists.
-#
-# This used to run up front, alongside the holds above, and it recorded the
-# version we were about to build rather than the one we had.  A build that then
-# failed left the box telling dpkg it was running the new nginx while the old
-# binary carried on serving.  That is worse than an ugly failure: anything that
-# reads package versions, an inventory, a vulnerability scan, a person running
-# dpkg -l, was told the upgrade had happened.  It found us on a box whose
-# openssl download had timed out, which is a thing that will happen again.
-#
-# So it runs after the build, and it takes the version from the binary rather
-# than from what we were aiming at, because those are only the same thing when
-# everything worked.
+# Register the stand in package.  Runs after the build and takes the version
+# from the installed binary, so a failed build never leaves dpkg (and any
+# inventory or vulnerability scan reading it) reporting an upgrade that did
+# not happen.
 register_stand_in_package() {
   local installed
   installed="$(dpkg-query -W -f='${Package} ${Status} ${Version}\n' nginx nginx-core nginx-common 2>/dev/null \
     | awk '$4 == "installed" && $5 !~ /^9:/ { printf "%s ", $1 }' || true)"
 
-  # Build a tiny package named nginx that owns no files.  Apt sees the name as
-  # installed, so a dependency on nginx is satisfied without the real thing.
-  # The epoch of 9 keeps it sorted above anything Ubuntu will ever ship, so an
-  # upgrade never decides ours is the older one.
+  # An empty package named nginx satisfies anything that depends on nginx.
+  # Epoch 9 keeps it newer than anything Ubuntu ships.
   local stub ver built
   built="$("$SBIN" -v 2>&1 | sed -n 's|.*nginx/\([0-9][0-9.]*\).*|\1|p')"
   if [[ -z "$built" ]]; then
@@ -445,9 +370,9 @@ EOF
 }
 
 
-# ==============================================================================
+# =============================================================================
 # Fetch and unpack the sources
-# ==============================================================================
+# =============================================================================
 
 fetch_sources() {
   rm -rf "$BUILD_ROOT"
@@ -461,8 +386,8 @@ fetch_sources() {
   tar xf nginx.tar.gz
   tar xf openssl.tar.gz
 
-  # Clone each outside module into its own folder.  Both lists land in the same
-  # place, since the only difference between them is the configure flag.
+  # Static and dynamic modules are cloned to the same place; only the
+  # configure flag differs.
   local entry name url ref
   for entry in "${THIRD_PARTY_MODULES[@]}" "${DYNAMIC_MODULES[@]}"; do
     IFS='|' read -r name url ref <<< "$entry"
@@ -472,21 +397,18 @@ fetch_sources() {
   done
 }
 
-# True when the WAF module is in the build.  Several steps below are skipped
-# entirely without it, so a box that does not want a WAF does not spend any
-# time compiling one.
+# True when the WAF module is in the build.
 wants_modsecurity() {
   printf '%s\n' "${DYNAMIC_MODULES[@]}" | grep -q "modsecurity-nginx"
 }
 
 
-# ==============================================================================
+# =============================================================================
 # Back up whatever is already installed
-# ==============================================================================
+# =============================================================================
 
-# Before we overwrite anything we stash the current binary, the config, and the
-# service file.  That snapshot is what revert restores, so every install leaves
-# you a safe way back.
+# Snapshot the current binary, config and service file.  This is what
+# revert restores.
 backup_current() {
   local stamp dir
   stamp="$(date +%Y%m%d-%H%M%S)"
@@ -515,13 +437,12 @@ backup_current() {
 }
 
 
-# ==============================================================================
+# =============================================================================
 # Lua support
-# ==============================================================================
+# =============================================================================
 
-# The lua module is picky.  It needs OpenResty's own build of LuaJIT plus the
-# resty.core lua files, or nginx will not even start.  Stock Ubuntu luajit does
-# not cut it.  We only do any of this when lua is actually in the module list.
+# The lua module needs OpenResty's LuaJIT plus lua-resty-core, or nginx will
+# not start.  Skipped when lua is not in the module list.
 build_lua_support() {
   printf '%s\n' "${THIRD_PARTY_MODULES[@]}" | grep -q "lua-nginx-module" || return 0
 
@@ -532,9 +453,8 @@ build_lua_support() {
   # Make sure the loader can find the new library at runtime.
   ldconfig
 
-  # These two lua libs have to match the lua module version or nginx will not
-  # start.  This trio is the set OpenResty ships together, so they play nice.
-  # If you bump lua-nginx-module above, bump these to match.
+  # These must match the lua-nginx-module version (OpenResty ships them as a
+  # set).  Bump them together.
   log "Installing lua-resty-core and lua-resty-lrucache."
   git clone --depth 1 --branch v0.1.31 https://github.com/openresty/lua-resty-core "${BUILD_ROOT}/lua-resty-core"
   make -C "${BUILD_ROOT}/lua-resty-core" install LUA_LIB_DIR=/usr/local/share/lua/5.1
@@ -543,35 +463,23 @@ build_lua_support() {
 }
 
 
-# ==============================================================================
+# =============================================================================
 # The WAF engine
-# ==============================================================================
+# =============================================================================
 
-# libmodsecurity is the engine.  The nginx module in DYNAMIC_MODULES is only a
-# connector and will not build without this, the same way the lua module will
-# not build without LuaJIT.
-#
-# This is the slowest thing in the whole install after OpenSSL, so it only runs
-# when the module is actually in the list.
+# libmodsecurity, the engine behind the ModSecurity-nginx connector.  Slow
+# to build, so it only runs when the WAF is enabled.
 build_modsecurity() {
   wants_modsecurity || return 0
 
-  # Skip it when the right version is already here.
-  #
-  # This roughly halves a rebuild on a well specified box and saves far more on
-  # a small one.  People rebuild nginx to pick up a new OpenSSL or to add a
-  # module, and making all of them wait for a WAF engine that has not changed
-  # since last time is how a maintained thing stops being maintained.  Bump
-  # MODSECURITY_VERSION and it builds again; leave it alone and it does not.
-  #
-  # The connector in DYNAMIC_MODULES is rebuilt every time regardless, because
-  # an nginx module is tied to the exact nginx it was compiled against.  That
-  # part is quick.
+  # Skip when this version is already built; bump MODSECURITY_VERSION to
+  # force a rebuild.  The connector is still rebuilt every time, since it is
+  # tied to the exact nginx it was compiled against.
   local stamp="/usr/local/lib/.modsecurity-version"
   if [[ -f "$stamp" && -f /usr/local/lib/libmodsecurity.so ]] \
      && [[ "$(cat "$stamp" 2>/dev/null)" == "$MODSECURITY_VERSION" ]]; then
     log "libmodsecurity ${MODSECURITY_VERSION} is already built, skipping it."
-    # Still needs to be findable, in case ld.so.cache was rebuilt without it.
+    # In case ld.so.cache was rebuilt without it.
     ldconfig
     return 0
   fi
@@ -581,32 +489,19 @@ build_modsecurity() {
     https://github.com/owasp-modsecurity/ModSecurity "${BUILD_ROOT}/ModSecurity" \
     || die "Could not fetch libmodsecurity ${MODSECURITY_VERSION}."
 
-  # libinjection is a submodule, not vendored, and it is what does the SQL
-  # injection and XSS detection.  Without this the build gets a long way in
-  # before failing on a missing header.
+  # libinjection (SQLi and XSS detection) is a git submodule.
   git -C "${BUILD_ROOT}/ModSecurity" submodule update --init --recursive --depth 1 \
     || die "Could not fetch the libmodsecurity submodules."
 
   cd "${BUILD_ROOT}/ModSecurity"
   ./build.sh
-  # --prefix matters more than it looks.
+  # The default prefix is /usr/local/modsecurity, which is off the loader
+  # path; nginx would then fail to load libmodsecurity.so.3.  /usr/local is
+  # where ldconfig already looks.
   #
-  # ModSecurity's configure defaults to /usr/local/modsecurity, not /usr/local,
-  # which is unusual enough that it cost a whole build to find.  Two things go
-  # wrong if it is left alone: the nginx connector cannot find the library, and
-  # even pointed at it by hand the module would then fail at runtime, because
-  # /usr/local/modsecurity/lib is not on the loader's search path and nginx
-  # would start, load the module and die on a missing libmodsecurity.so.3.
-  #
-  # Installing into /usr/local instead puts it where ldconfig already looks, so
-  # both problems go away rather than being papered over with an ld.so.conf.d
-  # entry.
-  #
-  # The docs and examples are most of the build time and none of the value.
-  # yajl and lmdb are asked for by name rather than left to autodetect, so a
-  # missing package fails here with a clear reason instead of quietly producing
-  # an engine that cannot write a JSON audit log, which is what the hits page
-  # reads.
+  # Docs and examples are skipped to save build time.  yajl and lmdb are
+  # required explicitly so a missing package fails here instead of producing
+  # an engine that cannot write the JSON audit log.
   ./configure \
     --prefix=/usr/local \
     --with-yajl \
@@ -617,19 +512,17 @@ build_modsecurity() {
   make -j"$(nproc)"
   make install
 
-  # Make sure the loader can find it, or nginx loads the module and dies on a
-  # missing libmodsecurity.so.3 at startup.
+  # Otherwise nginx fails at startup on a missing libmodsecurity.so.3.
   ldconfig
 
-  # Only stamped once the build actually finished, so a run that died halfway
-  # through builds again next time instead of being skipped forever.
+  # Stamp only after a complete build, so a failed run is retried.
   printf '%s\n' "$MODSECURITY_VERSION" > "$stamp"
 }
 
 
-# ==============================================================================
+# =============================================================================
 # The actual build
-# ==============================================================================
+# =============================================================================
 
 build_nginx() {
   cd "${BUILD_ROOT}/nginx-${NGINX_VERSION}"
@@ -641,17 +534,15 @@ build_nginx() {
     addmods+=( "--add-module=${BUILD_ROOT}/modules/${name}" )
   done
 
-  # The dynamic ones get built into .so files under --modules-path instead of
-  # into the binary.  Nothing loads them until a load_module line says to.
+  # Dynamic modules are built as .so files under --modules-path and only
+  # loaded by a load_module line.
   for entry in "${DYNAMIC_MODULES[@]}"; do
     name="${entry%%|*}"
     addmods+=( "--add-dynamic-module=${BUILD_ROOT}/modules/${name}" )
   done
 
-  # Point the connector at the libmodsecurity we just built.  Its config script
-  # will fall back to pkg-config, which on Ubuntu can find the 3.0.12 package
-  # instead and produce a module linked against an engine we did not choose.
-  # Same reasoning as the LuaJIT variables below: say which one, do not guess.
+  # Point the connector at our libmodsecurity.  Otherwise it falls back to
+  # pkg-config, which may find Ubuntu's older 3.0.12 package.
   if wants_modsecurity; then
     export MODSECURITY_INC="/usr/local/include"
     export MODSECURITY_LIB="/usr/local/lib"
@@ -665,13 +556,11 @@ build_nginx() {
     log "Using OpenResty LuaJIT from $LUAJIT_INC"
   fi
 
-  # Newer compilers like the GCC on Ubuntu 26.04 turn some warnings into hard
-  # errors.  A few of the older modules trip those, so we tell the compiler to
-  # keep warnings as warnings.  That way the build finishes on both releases.
+  # -Wno-error: newer GCC (Ubuntu 26.04) turns some warnings into errors that
+  # older modules trip.
   #
-  # We also drop the perl module files inside /etc/nginx.  That folder gets
-  # backed up on every install, so a revert brings the perl bits back in step
-  # with the old binary instead of leaving a mismatched leftover behind.
+  # Perl modules go under /etc/nginx, which is backed up on every install, so
+  # a revert keeps them in step with the binary.
   log "Configuring nginx.  This bakes OpenSSL ${OPENSSL_VERSION} right in."
   ./configure \
     --prefix="$PREFIX" \
@@ -703,12 +592,11 @@ build_nginx() {
 }
 
 
-# ==============================================================================
+# =============================================================================
 # Config files
-# ==============================================================================
+# =============================================================================
 
-# Make all the folders nginx expects, plus the webroots for pages and for the
-# certbot challenge files.
+# Directories nginx expects, plus the site and certbot challenge webroots.
 make_dirs() {
   mkdir -p \
     /var/cache/nginx \
@@ -724,16 +612,14 @@ make_dirs() {
   chown -R "${RUN_USER}:${RUN_USER}" /var/cache/nginx /var/log/nginx "$WEBROOT" "$ACME_WEBROOT"
 }
 
-# The main config.  We only write this on a first install so an upgrade never
-# stomps on your tweaks.  Your server blocks live in sites-enabled, not here.
+# Main config, written only on first install so upgrades keep local edits.
+# Server blocks belong in sites-enabled.
 write_main_conf() {
   if [[ -f "${PREFIX}/nginx.conf" ]] && grep -q "installer-managed" "${PREFIX}/nginx.conf" 2>/dev/null; then
     log "Keeping your existing nginx.conf."
     return
   fi
-  # When lua is in the build we need to tell it where the resty files live.
-  # If lua is dropped from the module list these lines are left out so the
-  # config still loads.
+  # Only add the lua paths when lua is built, or the config will not load.
   local lua_conf=""
   if printf '%s\n' "${THIRD_PARTY_MODULES[@]}" | grep -q "lua-nginx-module"; then
     lua_conf='
@@ -785,19 +671,10 @@ ${lua_conf}
 EOF
 }
 
-# Put the modules-enabled include into an nginx.conf that predates it.
-#
-# write_main_conf above only writes on a first install, on purpose, so an
-# upgrade never stomps on somebody's edits.  That leaves every box installed
-# before dynamic modules existed with no way to load one: the manager would
-# write a perfectly good file into modules-enabled and nothing would ever read
-# it, and the WAF would look switched on while doing nothing at all.  That is
-# the exact shape of bug this project keeps finding, so it gets handled here
-# rather than discovered later.
-#
-# Only touches a config we wrote.  Somebody else's hand rolled nginx.conf is
-# left alone and told about, because guessing where to put a directive in a
-# file we do not understand is how an installer takes a node down.
+# Add the modules-enabled include to an nginx.conf that predates it.
+# Without it, files the manager writes to modules-enabled are never read and
+# the WAF looks enabled while doing nothing.  Only edits a config this
+# installer wrote; a hand written nginx.conf gets a warning instead.
 ensure_modules_include() {
   local conf="${PREFIX}/nginx.conf"
   [[ -f "$conf" ]] || return 0
@@ -817,9 +694,8 @@ ensure_modules_include() {
   log "Adding the modules-enabled include to your existing nginx.conf."
   cp -a "$conf" "${conf}.bak-modules"
 
-  # Go in above the events block.  That is the first thing in every config this
-  # installer has ever written, and anything before it is the main context,
-  # which is the only place load_module is allowed.
+  # Insert above the events block, which keeps it in the main context where
+  # load_module is allowed.
   if ! grep -qE '^[[:space:]]*events[[:space:]]*\{' "$conf"; then
     warn "No events block found in ${conf}, so the include was not added."
     return 0
@@ -837,8 +713,7 @@ ensure_modules_include() {
 
   mv -f "${conf}.new" "$conf"
 
-  # Prove it before leaving it there.  A config test runs later anyway, but
-  # failing here says which change did it.
+  # Test now so a failure points at this change.
   if ! "$SBIN" -t -c "$conf" >/dev/null 2>&1; then
     warn "nginx would not accept the include, putting your nginx.conf back."
     mv -f "${conf}.bak-modules" "$conf"
@@ -846,8 +721,8 @@ ensure_modules_include() {
   fi
 }
 
-# A shared TLS snippet.  Any site can include this to get solid settings plus
-# the post quantum key exchange groups that OpenSSL 3.5 gives us.
+# Shared TLS snippet with sane defaults and the post quantum key exchange
+# groups from OpenSSL 3.5.
 write_ssl_snippet() {
   log "Writing the TLS hardening snippet."
   cat > "${PREFIX}/snippets/ssl-hardening.conf" <<'EOF'
@@ -866,19 +741,9 @@ add_header Strict-Transport-Security "max-age=63072000" always;
 EOF
 }
 
-# A plain http site so a fresh box actually serves something, and so certbot
-# has a place to drop its challenge files.
-# Let QUIC in, when there is a firewall here that would stop it.
-#
-# HTTP/3 is UDP, and this is the one place where a missing rule fails silently.
-# A box allowing TCP 443 and nothing else serves every request perfectly over
-# HTTP/2 while HTTP/3 never connects at all: no error, no log line, and the
-# setting in the GUI looks on.  Somebody then spends an afternoon on the nginx
-# config, which is correct.
-#
-# Only touches a firewall that is actually running, and says so when it does.
-# Nothing is opened on a box with no firewall, because there is nothing to open
-# and quietly starting one would be a much bigger change than this deserves.
+# Open UDP for QUIC on an active ufw or firewalld.  Without it HTTP/3 fails
+# silently: clients just stay on HTTP/2 with no error anywhere.  A box with
+# no running firewall is left alone.
 open_quic_port() {
   local port="${1:-443}"
 
@@ -901,12 +766,13 @@ open_quic_port() {
     return 0
   fi
 
-  # No managed firewall here.  Say nothing loud, but leave the fact somewhere,
-  # because "it is already open" and "nobody checked" look identical later.
+  # No managed firewall.  Log it, since upstream filtering may still apply.
   log "No ufw or firewalld running, so nothing is filtering ${port}/udp here."
   log "Anything in front of this box still has to allow UDP ${port} for HTTP/3."
 }
 
+# A plain http site so a fresh box serves something and certbot has a place
+# for challenge files.
 write_default_site() {
   if [[ -e "${PREFIX}/sites-available/default.conf" ]]; then
     log "Keeping your existing default site."
@@ -936,13 +802,12 @@ EOF
   fi
 }
 
-# The systemd unit so nginx starts on boot and reloads cleanly.
+# systemd unit for nginx.
 write_service() {
   log "Writing the systemd service."
 
-  # Clear the old file first.  If nginx.service was ever masked it is a symlink
-  # pointing at /dev/null, and writing through that symlink throws our unit
-  # away without a single error message.
+  # Remove first: a masked unit is a symlink to /dev/null, and writing
+  # through it silently discards the file.
   rm -f /etc/systemd/system/nginx.service
 
   cat > /etc/systemd/system/nginx.service <<EOF
@@ -963,9 +828,8 @@ KillMode=mixed
 [Install]
 WantedBy=multi-user.target
 EOF
-  # No systemd on this box means no service to install, and that is fine.  But
-  # if systemd is here and the reload fails, say so.  Hiding it is what leaves
-  # you staring at "Unit nginx.service not found" later on.
+  # No systemd is fine, but a failed daemon-reload is fatal, or it shows up
+  # later as "Unit nginx.service not found".
   if have_systemd; then
     systemctl daemon-reload || die "systemctl daemon-reload failed, systemd never saw the new unit."
   else
@@ -974,19 +838,17 @@ EOF
 }
 
 
-# ==============================================================================
+# =============================================================================
 # Our stand in for the certbot nginx plugin
-# ==============================================================================
+# =============================================================================
 #
-# python3-certbot-nginx does four handy things.  It reads your config to find
-# which domains you serve, it makes sure the acme challenge can be answered, it
-# writes the cert into the right server block, and it can flip plain http over
-# to a redirect.  We cannot install it, it wants Ubuntu's nginx.  So we do the
-# same four things here with our own code and plain webroot auth.
+# python3-certbot-nginx cannot be installed (it wants Ubuntu's nginx), so
+# this covers what it does using webroot auth: find the served domains, make
+# the ACME challenge answerable, wire the cert into the server block, and
+# optionally redirect http to https.
 #
-# The one rule everything below follows: back up the site file, make the edit,
-# run a config test, and put the backup back if the test fails.  A bad edit
-# never reaches a running server.
+# Every edit backs up the site file, runs a config test, and restores the
+# backup if the test fails.
 
 # The challenge location, kept in one snippet so every site shares it.
 write_acme_snippet() {
@@ -1001,9 +863,8 @@ location ^~ /.well-known/acme-challenge/ {
 EOF
 }
 
-# Print every server_name we actually serve, one per line.  This is the part
-# that replaces the plugin's domain picker.  We skip the catch all and any
-# wildcard or regex name since Let's Encrypt will not take those over http-01.
+# Print every served server_name, one per line.  Skips the catch all and
+# wildcard or regex names, which http-01 cannot validate.
 discover_domains() {
   local f
   for f in "${PREFIX}"/sites-enabled/* "${PREFIX}"/conf.d/*.conf; do
@@ -1014,8 +875,8 @@ discover_domains() {
   done | tr ' ' '\n' | grep -vE '^\s*$|^_$|^\*|^~|^\.' | sort -u
 }
 
-# Find which file in sites-available holds a domain.  We look through the
-# enabled links so we never touch a site that is turned off.
+# Find the site file serving a domain, via sites-enabled so disabled sites
+# are never touched.
 site_file_for_domain() {
   local domain="$1" link target
   for link in "${PREFIX}"/sites-enabled/*; do
@@ -1029,16 +890,13 @@ site_file_for_domain() {
   return 1
 }
 
-# The rewriter.  Reads a site file on stdin and writes the fixed one on stdout.
+# Site file rewriter, stdin to stdout.
 #
-# For the matching plain http block it adds the challenge include, and if
-# redirect is on it swaps the body of "location /" for a 301.  For the matching
-# https block it points ssl_certificate at the new cert and pulls in our TLS
-# snippet.  If there is no https block yet it appends one at the end.
-#
-# It walks the file counting braces so it only ever touches top level server
-# blocks, and it strips comments before counting so a brace in a comment does
-# not throw the depth off.
+# In the domain's http block: add the challenge include and, with redirect
+# on, replace "location /" with a 301.  In its https block: point the cert
+# lines at the new cert and include the TLS snippet.  With no https block,
+# append one.  Only top level server blocks are touched; braces are counted
+# with comments stripped.
 rewrite_site() {
   local domain="$1" redirect="$2"
   awk -v domain="$domain" -v redirect="$redirect" -v prefix="$PREFIX" -v webroot="$WEBROOT" '
@@ -1171,8 +1029,7 @@ rewrite_site() {
   '
 }
 
-# Apply the rewrite to a real file, but only keep it if nginx still likes it.
-# This is the safety net the plugin does not really give you.
+# Rewrite a site file in place, restoring it if the config test fails.
 apply_site_edit() {
   local file="$1" domain="$2" redirect="$3" backup tmp
   backup="${file}.bak-$(date +%Y%m%d-%H%M%S)"
@@ -1194,8 +1051,7 @@ apply_site_edit() {
   return 1
 }
 
-# Certbot runs everything in this folder after a renewal.  Without it the new
-# cert sits on disk while nginx keeps serving the old one until a restart.
+# Deploy hook so nginx picks up renewed certs.
 write_renewal_hook() {
   mkdir -p /etc/letsencrypt/renewal-hooks/deploy
   cat > /etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh <<EOF
@@ -1209,9 +1065,8 @@ EOF
   chmod +x /etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh
 }
 
-# Before we ask Let's Encrypt for anything, prove the challenge path works.
-# We drop a file where certbot will put its token and fetch it over port 80,
-# the same way the acme server will.  Way easier to debug than a failed order.
+# Check the challenge path works before asking Let's Encrypt, by fetching a
+# test token over port 80 the way the ACME server will.
 check_acme_path() {
   local domain="$1" token="installer-check-$$" got
   mkdir -p "${ACME_WEBROOT}/.well-known/acme-challenge"
@@ -1247,9 +1102,9 @@ request_cert() {
 }
 
 
-# ==============================================================================
+# =============================================================================
 # Commands
-# ==============================================================================
+# =============================================================================
 
 cmd_install() {
   require_root
@@ -1274,25 +1129,13 @@ cmd_install() {
   write_default_site
   open_quic_port 443
 
-  # Test before stopping anything.
-  #
-  # This used to come after the disable below, and the order cost a node.  A
-  # build that produced a working binary but one the live config would not load,
-  # which is what you get when a module the config depends on drops out of the
-  # build, went like this: nginx stopped, config test failed, installer died,
-  # nginx never started again.  The box was left down, with a new binary that
-  # could not serve the config it had.  On a standby you would not notice; on
-  # the node taking traffic it is a full outage caused by the very step that was
-  # meant to be safe.
-  #
-  # Testing first means a bad build leaves the old nginx running and serving.
-  # The new binary is already in place at this point, so the way out is a revert,
-  # but the site stays up while somebody does it.
+  # Test before stopping anything.  If the new binary cannot load the live
+  # config (say a module it uses was dropped), the old nginx keeps serving
+  # until someone runs revert, instead of the node going down.
   log "Testing the config before we stop anything."
   "$SBIN" -t
 
-  # Get any old apt nginx out of the way before we drop our own unit in, so we
-  # are never disabling the service we just wrote.
+  # Stop any apt nginx before writing our unit, so we never disable our own.
   if have_systemd; then
     systemctl disable --now nginx 2>/dev/null || true
   fi
@@ -1301,14 +1144,13 @@ cmd_install() {
   write_renewal_hook
 
   if have_systemd; then
-    # Prove the unit really landed before we tell anyone the install worked.
+    # Make sure the unit really landed.
     [[ -s /etc/systemd/system/nginx.service ]] \
       || die "The service file is missing or empty, so systemctl will not find nginx."
 
     systemctl enable nginx || die "Could not enable nginx.service."
 
-    # Let the real error through here.  A silent failure is how you end up
-    # thinking the install worked when nothing is running.
+    # Show the real error rather than failing quietly.
     if ! systemctl restart nginx; then
       systemctl status nginx --no-pager -l || true
       die "nginx would not start, see the status above."
@@ -1325,8 +1167,8 @@ cmd_install() {
   fi
 }
 
-# Roll back to the last snapshot we saved.  This swaps the binary, the config,
-# and the service file back, then restarts nginx.
+# Restore the binary, config and service file from the last snapshot, then
+# restart nginx.
 cmd_revert() {
   require_root
   local dir="${BACKUP_ROOT}/latest"
@@ -1335,16 +1177,9 @@ cmd_revert() {
   log "Reverting from $(readlink -f "$dir")"
 
   if [[ -f "${dir}/nginx.bin" ]]; then
-    # You cannot write over a binary that is running.  The kernel says "Text
-    # file busy" and the copy fails, which is exactly what this did for as long
-    # as it existed: revert, the way out of a bad build, did not work at all,
-    # and the one time you would ever reach for it is when something is already
-    # broken.  It went unnoticed because nothing had reverted on a box where
-    # nginx was up.
-    #
-    # Renaming a running binary is fine, the running process keeps the inode it
-    # already has.  This is the same move nginx's own make install makes, which
-    # is why building over a running nginx has always worked while this did not.
+    # Copying over a running binary fails with "Text file busy".  Renaming
+    # it is fine (the process keeps its inode), which is also what nginx's
+    # make install does.
     if [[ -f "$SBIN" ]]; then
       mv -f "$SBIN" "${SBIN}.old" \
         || die "Could not move the running nginx aside, so the revert stopped here."
@@ -1359,19 +1194,10 @@ cmd_revert() {
   fi
 
   if [[ -f "${dir}/etc-nginx.tar.gz" ]]; then
-    # Emptied and refilled, not deleted and replaced.
-    #
-    # The agent reaches ${PREFIX} through a systemd ReadWritePaths bind mount,
-    # and that mount is tied to the directory that existed when the agent
-    # started.  Deleting the directory and untarring a new one in its place
-    # leaves the agent holding a mount to an inode that no longer exists, so
-    # every write it makes to nginx config comes back read only.  The node then
-    # sits there looking healthy and quietly refusing to apply anything, until
-    # somebody restarts the agent, and the one time you have just run a revert
-    # is the one time you are least likely to guess that is what is wrong.
-    #
-    # Keeping the directory itself and swapping what is inside it keeps every
-    # mount valid and needs nothing restarted.
+    # Empty and refill ${PREFIX} rather than replacing it.  The agent sees it
+    # through a systemd ReadWritePaths bind mount tied to the original inode;
+    # a new directory would leave the agent's writes failing as read only
+    # until it was restarted.
     local staged
     staged="$(mktemp -d)"
     tar xzf "${dir}/etc-nginx.tar.gz" -C "$staged"
@@ -1379,7 +1205,7 @@ cmd_revert() {
     if [[ -d "${staged}/$(basename "$PREFIX")" ]]; then
       mkdir -p "$PREFIX"
       find "$PREFIX" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
-      # The dot matters, it copies what is inside rather than the folder itself.
+      # The trailing dot copies the contents, not the folder itself.
       cp -a "${staged}/$(basename "$PREFIX")/." "$PREFIX/"
       log "Restored the old config."
     else
@@ -1400,9 +1226,8 @@ cmd_revert() {
   fi
 }
 
-# Grab a Let's Encrypt cert for a domain and write a fresh https site for it.
-# Use this when the domain has no server block yet.  If it already has one,
-# use autocert instead so we edit what is there rather than adding a second.
+# Get a cert for a domain with no server block yet and write an https site
+# for it.  For an existing server block, use autocert instead.
 # Usage: cmd_cert domain email
 cmd_cert() {
   require_root
@@ -1453,10 +1278,9 @@ EOF
   log "Done.  ${domain} is on https now."
 }
 
-# This is our version of "certbot --nginx".  With no domains it reads your
-# config, finds every server_name you serve, and does them all.  For each one
-# it makes sure the challenge is answerable, gets the cert, then edits the
-# existing server block in place instead of writing a whole new site.
+# Our version of "certbot --nginx".  With no domains given, does every
+# served server_name.  For each: make the challenge answerable, get the cert,
+# then edit the existing server block in place.
 # Usage: cmd_autocert email [domain ...]
 cmd_autocert() {
   require_root
@@ -1488,8 +1312,8 @@ cmd_autocert() {
       continue
     fi
 
-    # Step one, make sure the challenge location is in the http block.  We ask
-    # for no redirect yet, the cert does not exist so https would not load.
+    # Step one, add the challenge location.  No redirect yet, since https
+    # has no cert to load.
     if ! apply_site_edit "$site" "$domain" 0; then
       failed+=("$domain"); continue
     fi
@@ -1502,7 +1326,7 @@ cmd_autocert() {
       failed+=("$domain"); continue
     fi
 
-    # Step three, now that the cert is on disk, wire it in and add the redirect.
+    # Step three, wire in the cert and add the redirect.
     if ! apply_site_edit "$site" "$domain" 1; then
       failed+=("$domain"); continue
     fi
@@ -1517,7 +1341,7 @@ cmd_autocert() {
   log "All done."
 }
 
-# Show what we would work on, same list autocert uses.
+# List the domains autocert would work on.
 cmd_domains() {
   local d found=0
   while read -r d; do
@@ -1532,9 +1356,8 @@ cmd_domains() {
   [[ "$found" -eq 1 ]] || warn "No server_name found in ${PREFIX}/sites-enabled."
 }
 
-# Renew every cert and reload nginx.  The certbot package also does this on a
-# timer, this is just for when you want to force it by hand.  The reload comes
-# from the deploy hook we wrote, so there is nothing to pass here.
+# Renew certs by hand.  certbot's timer does this anyway, and the deploy hook
+# handles the reload.
 cmd_renew() {
   require_root
   write_renewal_hook
@@ -1550,8 +1373,7 @@ cmd_status() {
   else
     warn "nginx is not installed."
   fi
-  # Call out a missing unit on its own.  "Service is not running" sends you
-  # hunting through logs when the real problem is that systemd has no unit.
+  # A missing unit is reported separately from a stopped service.
   if ! have_systemd; then
     warn "No systemd on this box, nothing to report on the service."
   elif [[ ! -s /etc/systemd/system/nginx.service ]]; then
@@ -1591,9 +1413,9 @@ EOF
 }
 
 
-# ==============================================================================
+# =============================================================================
 # Dispatch
-# ==============================================================================
+# =============================================================================
 
 main() {
   local cmd="${1:-}"

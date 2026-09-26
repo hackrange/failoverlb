@@ -1,17 +1,12 @@
 """
-What the rules caught, gathered from every node and made into a decision.
+WAF hits gathered from every node, and which of them may be whitelisted.
 
-Two jobs live here.  Collecting the hits, which is mostly merging what each
-node saw, and deciding which of them somebody is allowed to whitelist, which is
-the part that matters.
-
-**The address filter is the safeguard, not a convenience.**  A firewall that
-whitelists whatever fired while it was learning is a gift to anybody scanning
-the site at the time: their probes become permanent exclusions, and nothing in
-the interface would ever say so.  So a hit is only ever a candidate when it
-came from an address somebody named as a tester **before** the traffic
-happened.  Everything else is shown, because it is the more interesting half.  It is either a real attack or
-a real user meeting a false positive, and those need different answers.
+The tester address filter is a safeguard, not a convenience.  Whitelisting
+whatever fired during learning would turn anyone scanning the site at the
+time into a permanent exclusion.  A hit is only a candidate when it came from
+an address named as a tester before the traffic happened.  Everything else
+is still shown: it is either a real attack or a real user hitting a false
+positive, and those need different answers.
 """
 import ipaddress
 import logging
@@ -23,16 +18,11 @@ log = logging.getLogger("nfm.waf.hits")
 
 def parse_addresses(raw):
     """
-    Turn what somebody typed into networks, and say what could not be read.
+    Parse tester addresses (one per line or comma separated, v4 or v6,
+    addresses or CIDRs).  Returns (networks, unparsed).
 
-    Accepts one per line or comma separated, addresses or CIDRs, v4 or v6.  A
-    bare address becomes a /32 or /128 so everything downstream compares the
-    same way.
-
-    What cannot be parsed is returned rather than dropped.  Silently ignoring a
-    typo in a tester address means the page shows fewer candidates than
-    expected and the reason is invisible, and somebody then widens the filter
-    to compensate, which is exactly the wrong direction.
+    Bad entries are returned, not dropped, so a typo is visible instead of
+    tempting someone to widen the filter.
     """
     if isinstance(raw, str):
         parts = [p.strip() for p in raw.replace(",", "\n").splitlines()]
@@ -65,17 +55,11 @@ async def fleet_hits(site: str, since=None, until=None) -> dict:
     """
     Every node's hits for one site, merged.
 
-    Both nodes rather than the active one.  Whichever node was active while the
-    testers were working is the one holding the evidence, and that is not
-    necessarily the node somebody is looking at now, least of all after a
-    failover, which is exactly when people go looking.
+    All nodes, since the evidence is on whichever node was active during
+    testing, which after a failover is not the one you are looking at.
 
-    `until` is what makes a finished session readable.  The window used to be
-    open ended, so the only thing anybody could ask for was "since the running
-    session started", and stopping a session therefore hid its own evidence.
-    The hits were still in the log the whole time, which is the part that made
-    it costly: somebody had exercised an application properly, stopped
-    watching, and had no way back to the work they had just done.
+    `until` lets a finished session be read back; without it, stopping a
+    session hid its own hits.
     """
     payload = {"site": site}
     if since is not None:
@@ -141,16 +125,9 @@ async def fleet_hits(site: str, since=None, until=None) -> dict:
 
 async def fleet_surface(site: str, since=None, until=None) -> dict:
     """
-    What the application is, as every node saw it, merged.
-
-    The positive model's version of `fleet_hits`.  Both nodes rather than the
-    active one, for the same reason: whichever node was active while the
-    testers worked is the one holding the evidence, and after a failover that
-    is not the node somebody is looking at.
-
-    Merging on the templated path is what makes this useful.  Two nodes each
-    saw a different half of the walk, and without merging somebody would save a
-    surface that only covers the pages that happened to land on one box.
+    The positive model's version of `fleet_hits`: the application's paths
+    as every node saw them, merged on the templated path.  Without merging,
+    a saved surface would only cover pages that landed on one node.
     """
     payload = {"site": site}
     if since is not None:
@@ -216,14 +193,10 @@ async def fleet_surface(site: str, since=None, until=None) -> dict:
 
 def split_surface_by_tester(entries, networks):
     """
-    What a tester reached, and what everybody else did, never in one list.
+    Split surface entries into tester-only, mixed, and others.
 
-    Same safeguard as the exclusion side and it matters more here.  An
-    exclusion learned from a stranger switches one rule off.  A surface entry
-    learned from a stranger **permanently allows a path they found**, which on
-    a positive model is the one thing the model exists to prevent.  Somebody
-    scanning the site during a round would otherwise get every path they probed
-    written into the allowed list as though a tester had walked it.
+    Same safeguard as split_by_tester, and it matters more here: a surface
+    entry learned from a stranger permanently allows a path they probed.
     """
     mine, mixed, theirs = [], [], []
     for entry in entries:
@@ -241,17 +214,12 @@ def split_surface_by_tester(entries, networks):
 
 def split_by_tester(groups, networks):
     """
-    Candidates and everything else, and never the two in one list.
+    Split hit groups into candidates, mixed, and others.
 
-    A group is a candidate only when **every** address that produced it is a
-    tester.  Not "any", which is the tempting version and the wrong one: a
-    group that a tester and a stranger both triggered is exactly the shape of
-    an attack that happened to arrive during a test window, and whitelisting it
-    on the strength of the tester's half is the failure this whole design
-    exists to prevent.
-
-    Mixed groups are called out as their own thing rather than quietly dropped
-    into the other pile, because they are the ones worth a person's attention.
+    A group is a candidate only when every client was a tester, not any.  A
+    group triggered by both a tester and a stranger may be an attack that
+    arrived during testing.  Mixed groups are listed separately because they
+    deserve a person's attention.
     """
     candidates, mixed, others = [], [], []
 
@@ -291,14 +259,8 @@ async def clear_fleet(site: str) -> dict:
 
 async def rotate_logs() -> dict:
     """
-    Rotate any audit log past its cap, on every node.
-
-    Every node rather than the active one.  A standby quietly filling its disk
-    is a standby that cannot be failed over to, and that is discovered at
-    exactly the moment it was needed.
-
-    Nothing here decides the cap or does the copying: the agent owns both,
-    because it is the only part that can see the disk it is protecting.
+    Rotate any audit log past its cap, on every node.  A standby with a full
+    disk can't take over.  The agent owns the cap and the copying.
     """
     results = await ask_every_node("waf_log_rotate", {})
 
@@ -320,12 +282,8 @@ async def rotate_logs() -> dict:
 
 async def log_status() -> dict:
     """
-    How much disk the audit logs are using, per node.
-
-    Its own call because it is the answer to a different question from "what
-    fired": a site under a scan in watching mode writes steadily, and filling
-    the disk on a load balancer is a worse outage than anything the firewall
-    prevents.
+    Disk used by the audit logs, per node.  A scanned site in watching mode
+    writes steadily, and a full disk on a load balancer is its own outage.
     """
     results = await ask_every_node("waf_log_status", {})
 

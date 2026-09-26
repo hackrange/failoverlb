@@ -2,29 +2,22 @@
 """
 Failover LB host agent.
 
-This runs as root on the nginx box, outside the container.  The container is
-not root and cannot write to /etc/nginx or restart anything.  When it needs
-something done on the host it asks this agent over a unix socket, and the agent
-decides whether to do it.
+Runs as root on the nginx box, outside the container.  The container is
+unprivileged and asks this agent over a unix socket when it needs something
+done on the host.  The container is the larger attack surface, so the agent
+treats its requests with suspicion and is kept small enough to read.
 
-That is the whole point.  The container is the big pile of code with a web
-server in it, so we treat it as the thing most likely to get popped.  This file
-is small enough to actually read start to finish, and it is the only thing here
-running as root.
+Rules:
 
-Rules this agent lives by:
+  1. A fixed list of verbs; anything else is refused.  No "run a command"
+     verb.
+  2. Every path is resolved (symlinks, ../) and checked against an allow list.
+  3. Config changes are staged and pass nginx -t before going live.
+  4. Every reload keeps a numbered backup.
+  5. Everything is logged with the verb and the caller's uid.
 
-  1. There is a fixed list of verbs.  Anything not on the list is refused.
-     There is no "run this command" verb and there never will be.
-  2. Every path gets checked against an allow list before we touch it.  We
-     resolve the real path first, so symlinks and ../ do not get you out.
-  3. Config changes get staged, tested with nginx -t, and only then moved into
-     place.  A config that does not pass never reaches a running server.
-  4. Every reload keeps a numbered backup, so putting it back is one call.
-  5. Everything gets logged with the verb and the caller's uid.
-
-Talk to it with newline delimited JSON.  One request per line, one response per
-line.  See VERBS at the bottom for the list.
+Protocol is newline delimited JSON, one request and one response per line.
+See VERBS at the bottom.
 """
 
 import grp
@@ -58,18 +51,12 @@ AGENT_VERSION = "1.0.0"
 
 def _own_fingerprint():
     """
-    A short hash of this file, as it was when the running process read it.
+    Short hash of this file as loaded, to tell whether the running agent
+    matches the repo.  AGENT_VERSION is only bumped by hand, and rebuilding
+    the container image does not touch the agent.
 
-    AGENT_VERSION is a number somebody has to remember to change, so it says
-    nothing about whether the agent running right now is the one in the repo.
-    That question matters here more than in most places: the agent lives
-    outside the container, so the normal upgrade of pulling and rebuilding the
-    image leaves it exactly as it was, running last month's code against this
-    month's manager, with nothing anywhere saying so.
-
-    Computed once at start up on purpose.  Reading it fresh would report what
-    is on disk rather than what is loaded, which is the opposite of the
-    question being asked.
+    Computed once at startup so it reflects the loaded code, not what is
+    on disk now.
     """
     try:
         return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:12]
@@ -88,62 +75,46 @@ NGINX_BIN = Path(os.environ.get("NFM_NGINX_BIN", "/usr/sbin/nginx"))
 LETSENCRYPT_DIR = Path("/etc/letsencrypt")
 ACME_WEBROOT = Path(os.environ.get("NFM_ACME_WEBROOT", "/var/www/certbot"))
 
-# Everything we generate lives under here.  Keeping it in one folder means we
-# never have to guess whether a file is ours or something a person wrote by
-# hand, and blowing away our own config never touches theirs.
+# Everything we generate lives here, apart from anything written by hand.
 MANAGED_DIR = NGINX_PREFIX / "nginxmgr"
 
 # Where we stage a config before testing it.
 STAGING_DIR = NGINX_PREFIX / ".nginxmgr-staging"
 
-# A throwaway copy of the staging folder, used only when a staged file names
-# the live bundle in a path nginx opens while loading the config.  See
-# _staging_for_test.  Never applied and never moved anywhere.
+# Throwaway copy of staging for tests that need path rewriting.  See
+# _staging_for_test.  Never applied.
 TEST_DIR = NGINX_PREFIX / ".nginxmgr-test"
 
-# The throwaway nginx.conf we test a staged config with.
-#
-# This has to sit in the prefix folder itself, next to the real nginx.conf, and
-# that is not a style choice.  nginx resolves a relative include against the
-# folder the config file is in, not against whatever you passed to -p.  The
-# stock nginx.conf has "include mime.types;" in it, so a candidate written
-# anywhere else looks for mime.types beside itself, does not find it, and the
-# test fails for a reason that has nothing to do with the config you changed.
+# Throwaway nginx.conf used to test a staged config.  It must sit next to the
+# real nginx.conf: nginx resolves relative includes (like "include
+# mime.types;") against the config file's folder, not -p.
 CANDIDATE_CONF = NGINX_PREFIX / ".nginxmgr-candidate.conf"
 
-# Marker on the include block we add to nginx.conf.  It carries a version so a
-# future release can tell an out of date block from a current one and replace
-# it, rather than leaving a node quietly running an old set of includes.
+# Marks our include block in nginx.conf.  Versioned so an old block can be
+# recognized and replaced.
 INCLUDE_MARKER = "# failover lb includes, v5.  Do not reorder."
 
 # Numbered backups of the managed folder, one per apply.
 BACKUP_DIR = Path("/var/backups/nginx-fleet-manager")
 BACKUP_KEEP = 30
 
-# The installer script that builds nginx from source.  Rebuilding nginx is the
-# only way to add or drop a module, since they are compiled in, so upgrading
-# the version and changing the module list are the same operation.
+# Builds nginx from source.  Modules are compiled in, so changing modules
+# and upgrading are the same operation.
 INSTALLER = Path(os.environ.get("NFM_INSTALLER", "/opt/nginx-installer.sh"))
 
-# Where a running build writes what it is doing.  A build takes ten to twenty
-# minutes, far longer than any sensible request timeout, so it runs detached and
-# the manager reads progress from here.
+# Build progress.  A build takes 10 to 20 minutes, so it runs detached and
+# the manager polls these.
 UPGRADE_STATE = Path("/var/lib/nginx-fleet-manager/upgrade.json")
 UPGRADE_LOG = Path("/var/log/nginx-fleet-manager-upgrade.log")
 
-# How long any host command gets before we give up on it.  Certbot gets its own
-# longer budget since it waits on a remote server.
+# Command timeouts.  Certbot waits on a remote server, so it gets longer.
 DEFAULT_TIMEOUT = 60
 CERTBOT_TIMEOUT = 300
 
-# Biggest request we will read.  A big site config is a few KB, so this is
-# already generous.  It is here so a bad or hostile caller cannot make us eat
-# all the memory on the box.
+# Generous for configs; stops a hostile caller exhausting memory.
 MAX_REQUEST_BYTES = 8 * 1024 * 1024
 
-# Paths the agent is allowed to write.  Anything outside these is refused, and
-# we check after resolving symlinks so you cannot point a link somewhere else
-# and ride it out of the sandbox.
+# Writable paths, checked after resolving symlinks.
 WRITE_ALLOWED = (
     MANAGED_DIR,
     STAGING_DIR,
@@ -153,8 +124,8 @@ WRITE_ALLOWED = (
     NGINX_PREFIX / "snippets",
 )
 
-# Paths the agent is allowed to read.  Wider than the write list, because the
-# GUI shows you the running config and the certs, but still not the whole disk.
+# Readable paths.  Wider than the write list so the GUI can show the running
+# config and certs.
 READ_ALLOWED = (
     NGINX_PREFIX,
     LETSENCRYPT_DIR,
@@ -162,9 +133,8 @@ READ_ALLOWED = (
     BACKUP_DIR,
 )
 
-# Inside conf.d and snippets we only get to touch our own files.  Those two
-# folders are shared with whatever the installer and the admins put there, and
-# clobbering somebody's hand written snippet would be a bad day.
+# conf.d and snippets are shared with the installer and admins, so we only
+# touch files with this prefix there.
 MANAGED_FILE_PREFIX = "nginxmgr-"
 
 log = logging.getLogger("nfm-agent")
@@ -189,12 +159,8 @@ class AgentError(Exception):
 
 def _resolve(path_str):
     """
-    Turn whatever the caller sent into a real absolute path.
-
-    We resolve the whole thing, including symlinks, before anybody gets to
-    compare it against the allow list.  Checking the string the caller sent is
-    how you end up serving /etc/shadow because someone put a symlink in a
-    folder you trusted.
+    Resolve the caller's path, symlinks included, before any allow list
+    check.  Checking the raw string would let a symlink escape.
     """
     if not isinstance(path_str, str) or not path_str:
         raise AgentError("path has to be a non empty string", "bad_path")
@@ -205,9 +171,7 @@ def _resolve(path_str):
     if not p.is_absolute():
         raise AgentError(f"path has to be absolute, got {path_str}", "bad_path")
 
-    # strict=False so we can also resolve a file that does not exist yet, which
-    # is the normal case when we are creating one.  The parent still has to be
-    # real, and resolve() walks the symlinks that do exist.
+    # strict=False so files we are about to create still resolve.
     return p.resolve(strict=False)
 
 
@@ -225,16 +189,15 @@ def check_write_path(path_str):
     """Resolve a path and make sure we are allowed to write it."""
     p = _resolve(path_str)
 
-    # The candidate config is the one file we write straight into the prefix
-    # folder, and only this exact name.  See CANDIDATE_CONF for why it cannot
-    # live in the staging folder with everything else.
+    # The one file written straight into the prefix folder.  See
+    # CANDIDATE_CONF.
     if p == CANDIDATE_CONF.resolve(strict=False):
         return p
 
     if not _under_any(p, WRITE_ALLOWED):
         raise AgentError(f"not allowed to write outside the managed paths: {p}", "denied")
 
-    # conf.d and snippets are shared ground.  Only our own files there.
+    # Shared folders: only our own files.
     for shared in (NGINX_PREFIX / "conf.d", NGINX_PREFIX / "snippets"):
         try:
             rel = p.relative_to(shared.resolve(strict=False))
@@ -255,9 +218,7 @@ def check_read_path(path_str):
     if not _under_any(p, READ_ALLOWED):
         raise AgentError(f"not allowed to read outside the managed paths: {p}", "denied")
 
-    # Private keys are the one thing we hand out, and only from the place
-    # certbot puts them.  If a caller can talk us into reading a key from some
-    # other folder, that is a way to pull keys off the box.
+    # Private keys only come from where certbot puts them.
     if p.name.endswith((".pem", ".key")) and "privkey" in p.name:
         if not _under_any(p, (LETSENCRYPT_DIR,)):
             raise AgentError("private keys only come out of /etc/letsencrypt", "denied")
@@ -269,11 +230,8 @@ def check_read_path(path_str):
 # Running things
 # ==============================================================================
 
-# Flags whose value must never reach a log.  The command line is only logged at
-# debug level, which nobody runs by default, and "nobody runs it by default" is
-# exactly the assumption that fails: somebody turns debug on to work out why a
-# certificate will not issue, and the credential for the account lands in the
-# journal where it stays.
+# Flags whose values must never be logged, even at debug level.  Debug gets
+# turned on to chase certificate problems, and the journal keeps everything.
 SECRET_FLAGS = {
     "--eab-hmac-key",
     "--eab-kid",
@@ -296,11 +254,10 @@ def _safe_for_log(cmd):
 
 def run(cmd, timeout=DEFAULT_TIMEOUT, input_text=None, env_extra=None):
     """
-    Run a command and hand back what happened.
+    Run a command and return rc, stdout and stderr.
 
-    Always a list, never a string, and shell=False.  Nothing the caller sends
-    ever becomes part of a shell line, so there is no quoting bug waiting to
-    turn into command injection.
+    Always an argv list with shell=False, so caller input never reaches a
+    shell.
     """
     log.debug("running: %s", " ".join(_safe_for_log(cmd)))
 
@@ -345,12 +302,8 @@ def have_systemd():
 
 def atomic_write(path, content, mode=0o644, owner=None):
     """
-    Write a file so a reader never sees it half done.
-
-    Write to a temp file in the same folder, fsync it, then rename over the
-    target.  Rename inside one filesystem is atomic, so nginx either reads the
-    old file or the new one.  It never catches us mid write, which as far as
-    nginx is concerned would just be a broken config.
+    Write via a temp file in the same folder, fsync, then rename, so nginx
+    only ever sees the old file or the new one.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -370,8 +323,7 @@ def atomic_write(path, content, mode=0o644, owner=None):
                 log.warning("user %s does not exist, leaving the file owned by root", owner)
         os.replace(tmp, path)
 
-        # fsync the folder too, or the rename can still be sitting in a buffer
-        # when the power goes out and you come back up to no file at all.
+        # fsync the folder too so the rename survives a power loss.
         dir_fd = os.open(str(path.parent), os.O_RDONLY)
         try:
             os.fsync(dir_fd)
@@ -388,10 +340,8 @@ def atomic_write(path, content, mode=0o644, owner=None):
 
 def make_backup(label="apply"):
     """
-    Tar up the managed config folder before we change it.
-
-    Cheap, since it is only our own files, and it means every apply has a way
-    back that does not involve remembering what the config used to say.
+    Tar up the managed config folder before we change it.  Cheap, since it
+    is only our own files.
     """
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
@@ -402,8 +352,7 @@ def make_backup(label="apply"):
         with tarfile.open(dest, "w:gz") as tar:
             tar.add(str(MANAGED_DIR), arcname="nginxmgr")
     else:
-        # First run.  Still write an empty marker so rolling back to "there was
-        # nothing here" is a thing you can actually do.
+        # First run.  An empty archive still lets you roll back to "nothing".
         with tarfile.open(dest, "w:gz"):
             pass
 
@@ -430,8 +379,7 @@ def restore_backup(name):
     tmp = Path(tempfile.mkdtemp(prefix="nfm-restore-", dir=str(BACKUP_DIR)))
     try:
         with tarfile.open(src, "r:gz") as tar:
-            # Check every member before unpacking.  A tar can hold absolute
-            # paths and ../ that would land outside where you told it to go.
+            # A tar can hold absolute paths and ../, so check every member.
             for member in tar.getmembers():
                 target = (tmp / member.name).resolve()
                 if not str(target).startswith(str(tmp.resolve())):
@@ -459,31 +407,23 @@ def restore_backup(name):
 # The verbs
 # ==============================================================================
 #
-# Each one takes the request dict and gives back a dict.  Raise AgentError for
-# anything the caller got wrong.  Nothing in here builds a shell command out of
-# caller input, and nothing takes a command to run.
+# Each takes the request dict and returns a dict, raising AgentError for bad
+# input.  None builds a shell command from caller input.
 
 def v_ping(req):
     return {
         "pong": True,
         "agent_version": AGENT_VERSION,
-        # What is actually running, as opposed to what somebody remembered to
-        # bump.  See _own_fingerprint.
+        # See _own_fingerprint.
         "agent_fingerprint": AGENT_FINGERPRINT,
         "hostname": socket.gethostname(),
         "time": datetime.now(timezone.utc).isoformat(),
     }
 
 
-# Status asks five separate programs how they are doing, and the caller only
-# waits 30 seconds for the lot.  The default subprocess timeout is 60, so one
-# slow systemctl was enough to blow the whole budget and the caller got nothing
-# back, not even the parts that answered.  "the agent did not answer status
-# within 30s" tells you nothing about which of the five was the problem.
-#
-# So each one gets a short leash of its own, and a call that misses it is
-# recorded as unknown rather than taken as a failure.  Status is a dashboard
-# read.  Partial and quick beats complete and never.
+# Status runs five commands and the caller waits only 30s for all of them.
+# With the default 60s timeout one slow systemctl lost the whole answer, so
+# each step gets a short timeout and a miss is reported as unknown.
 STATUS_STEP_TIMEOUT = 5
 
 
@@ -497,8 +437,7 @@ def _status_step(out, name, fn):
         log.warning("status step %s failed: %s", name, exc)
     took = time.monotonic() - started
     if took > 1:
-        # Worth knowing which one is dragging, because from the outside the
-        # whole call just looks slow.
+        # From outside the whole call just looks slow, so name the step.
         log.warning("status step %s took %.1fs", name, took)
 
 
@@ -509,14 +448,12 @@ def v_status(req):
     if out["installed"]:
         def _version():
             ver = run([str(NGINX_BIN), "-v"], timeout=STATUS_STEP_TIMEOUT)
-            # nginx prints its version banner to stderr, which trips people up.
+            # nginx prints its version to stderr.
             out["version_banner"] = (ver["stderr"] or ver["stdout"]).strip()
         _status_step(out, "version", _version)
 
         def _build():
-            # -V gives the whole configure line.  This is how we work out which
-            # modules got compiled in, so the GUI only offers settings that will
-            # actually load on this box.
+            # The configure line tells the GUI which modules are compiled in.
             build = run([str(NGINX_BIN), "-V"], timeout=STATUS_STEP_TIMEOUT)
             out["build_info"] = (build["stderr"] or build["stdout"]).strip()
         _status_step(out, "build", _build)
@@ -536,7 +473,6 @@ def v_status(req):
         _status_step(out, "is_enabled", _enabled)
 
         def _props():
-            # A few useful bits without shelling out to the whole status output.
             props = systemctl(
                 "show", "nginx",
                 "--property=MainPID,ActiveEnterTimestamp,NRestarts,SubState",
@@ -576,12 +512,9 @@ def v_config_test(req):
     }
 
 
-# Where a load_module line has to live, and the one file we put there.
-#
-# It cannot go in the config bundle.  Everything the manager renders is pulled
-# in by an include inside http {}, and load_module is only legal in the main
-# context, so this is written here instead and the installer puts the matching
-# include above the events block.
+# load_module is only legal in the main context, and the managed bundle is
+# included inside http {}, so the WAF module line goes here instead.  The
+# installer includes this folder above the events block.
 MODULES_ENABLED = NGINX_PREFIX / "modules-enabled"
 MODSEC_LOAD_CONF = MODULES_ENABLED / "50-modsecurity.conf"
 MODSEC_MODULE_SO = Path("/usr/lib/nginx/modules/ngx_http_modsecurity_module.so")
@@ -591,22 +524,10 @@ def v_waf_module(req):
     """
     Load or unload the WAF module, and prove nginx still starts either way.
 
-    Two things have to be true before this can say yes, and they fail in
-    different ways:
-
-      * The .so has to be there, which it only is after a rebuild with
-        WITH_MODSECURITY=1.  Writing a load_module line for a file that does
-        not exist means nginx will not start at all, and the node that was
-        serving traffic a second ago is now down.  So the file is checked
-        first, and a missing one is an error the caller can act on rather than
-        an outage.
-      * nginx has to accept the result.  A module built against a different
-        nginx loads and then fails on a version check, which nginx -t catches.
-
-    So it writes, tests, and puts the old state back if the test fails.  The
-    node is never left in a state it cannot start from, which matters more here
-    than anywhere else in this file: this is the one verb that can stop nginx
-    from starting rather than just serving the wrong thing.
+    This verb can stop nginx starting at all, so: refuse if the .so is
+    missing (it only exists after a rebuild with WITH_MODSECURITY=1), then
+    write, run nginx -t (catches a module built for another nginx version),
+    and restore the previous state if the test fails.
     """
     enabled = req.get("enabled")
     if not isinstance(enabled, bool):
@@ -635,7 +556,7 @@ def v_waf_module(req):
 
     result = run([str(NGINX_BIN), "-t"])
     if result["rc"] != 0:
-        # Put it back exactly as it was, then say what nginx objected to.
+        # Restore, then report what nginx objected to.
         if had is None:
             MODSEC_LOAD_CONF.unlink(missing_ok=True)
         else:
@@ -650,9 +571,7 @@ def v_waf_module(req):
     return {"enabled": enabled, "path": str(MODSEC_LOAD_CONF)}
 
 
-# Where nginx keeps config that is not ours.  Anything the manager renders
-# lives under MANAGED_DIR; these are the two places a distribution or an
-# installer drops server blocks of its own.
+# Where distributions and installers drop their own server blocks.
 UNMANAGED_CONFIG_DIRS = (
     NGINX_PREFIX / "sites-enabled",
     NGINX_PREFIX / "conf.d",
@@ -666,11 +585,8 @@ def _default_server_files() -> list:
     """
     Config outside the managed tree that already claims default_server.
 
-    nginx allows exactly one default server per address and port, and refuses
-    to start with two.  The manager can render a perfectly good site marked as
-    the default and still have every apply on the fleet refused, because the
-    installer's own catch all got there first and nothing in the manager knew
-    that file existed.
+    nginx refuses two default servers on one address and port, so an
+    installer's catch all would make every apply with a managed default fail.
     """
     found = []
     for folder in UNMANAGED_CONFIG_DIRS:
@@ -688,41 +604,28 @@ def _default_server_files() -> list:
     return found
 
 
-# Where we remember a catch all we stood down, so it can be put back.
-#
-# Under /usr/local/lib and not /var/lib, because the unit runs with
-# ProtectSystem=strict and only the paths it names are writable.  /var/lib is
-# not one of them, so a state file there cannot be written at all: the first
-# version of this put it there, the write failed with a read only filesystem,
-# and by then the symlink had already been removed.  The node was left with no
-# catch all and nothing recording that it ever had one.
+# Records catch all links we stood down, so they can be put back.  Under
+# /usr/local/lib because /var/lib is read only under the unit's
+# ProtectSystem=strict.
 DEFAULT_SITE_STATE = Path("/usr/local/lib/nginx-fleet-manager/default-site.json")
 
 
 def _takeable(path: Path) -> bool:
     """
-    Can the manager stand this one down and put it back exactly as it was.
+    Whether we can stand this one down and restore it exactly.
 
-    Only a symlink in sites-enabled.  That is how the installer enables its
-    catch all, and a symlink can be removed and recreated with nothing lost,
-    because the real file stays in sites-available where somebody put it.
-
-    A regular file is not touched.  It might be somebody's own config with
-    their own content in it, and moving that out of the way is not a decision
-    an apply gets to make quietly.  nginx globs `sites-enabled/*`, so renaming
-    in place does not hide anything either: the new name matches the glob just
-    as well as the old one.
+    Only symlinks in sites-enabled, which is how the installer enables its
+    catch all; removing one loses nothing.  Regular files may be someone's own
+    config and are left alone (renaming would not help, since nginx globs
+    sites-enabled/*).
     """
     return path.is_symlink() and path.parent == (NGINX_PREFIX / "sites-enabled")
 
 
 def v_default_server_conflict(req):
     """
-    Who else already claims to be the default site on this box.
-
-    Split by whether the manager could take it over, because the two need
-    different answers.  A symlink we can stand down is not a reason to refuse
-    somebody's setting; a file we must not touch is.
+    Who else claims to be the default site, split into ones we can stand
+    down and ones that block the setting.
     """
     files = _default_server_files()
     takeable = [f for f in files if _takeable(Path(f))]
@@ -751,16 +654,9 @@ def reconcile_default_site(managed_wants_it: bool) -> dict:
     """
     Make room for a managed default site, or give the room back.
 
-    nginx allows one default server per address and port.  When a managed site
-    claims the role, the catch all the installer enabled has to stand down or
-    nothing on the fleet can be applied at all.  When no managed site claims
-    it, the catch all goes back, so unmatched traffic lands where it always did
-    rather than on whichever server block happens to be first.
-
-    Only symlinks in sites-enabled are touched, and what was removed is written
-    down so putting it back is exact rather than a guess.  The caller tests
-    nginx afterwards; this does not, because it runs inside a staging test that
-    is about to do exactly that.
+    When a managed site is the default, the installer's catch all symlink is
+    removed (and recorded).  When none is, the catch all is restored so
+    unmatched traffic goes where it always did.  The caller runs nginx -t.
     """
     changed = {"removed": [], "restored": []}
 
@@ -779,11 +675,8 @@ def reconcile_default_site(managed_wants_it: bool) -> dict:
         if not going:
             return changed
 
-        # Write down what is about to move **before** moving it.  The other
-        # order loses the box's catch all the moment anything goes wrong
-        # between the two steps, and there is then nothing on disk saying what
-        # used to be there.  That is not a hypothetical: it is what the first
-        # version of this did.
+        # Record before removing, or a failure in between loses the catch
+        # all with no record of it.
         _remember_stood_down(links)
 
         for path, _entry in going:
@@ -825,32 +718,13 @@ def v_waf_module_status(req):
 
 def _staged_mode(rel_path):
     """
-    How readable a staged file has to be, which is not the same for all of them.
+    File mode for a staged file.
 
-    Nearly everything we stage is config, and config is read by the nginx master
-    process while it is still root, so 0640 root only is right and is what we
-    want: those files carry backend tokens and htpasswd hashes.
-
-    Error pages are different.  They are read by a worker at request time, and
-    workers have already dropped to www-data, so a page written 0640 cannot be
-    opened at all.  That failure is not quiet and it is not harmless: nginx
-    throws away the status it was going to send and answers 403 instead.  A 502
-    from a dead backend turns into a 403 about nothing, and the error log line
-    is about a file rather than about the backend that actually broke.
-
-    Worth knowing that a *missing* page does not do this.  nginx falls back to
-    its own page and keeps the real status.  Only an unreadable one lies.
-
-    The password files are the same story found a second time.  auth_basic is
-    checked by a worker as well, so a 0640 htpasswd meant every site with a
-    password on it answered 401, then 500 to anybody who actually typed the
-    password, with "permission denied" in the error log about a file the person
-    had never heard of.  Basic auth had never worked once.
-
-    These two are the only content we stage.  Everything else here is config,
-    read by the master while it is still root, and those stay 0640 because they
-    carry backend tokens.  The password hashes in a htpasswd are bcrypt, which
-    is what that format is for, so world readable is what the format expects.
+    Config is read by the nginx master as root and may hold backend tokens,
+    so it is 0640.  Error pages and htpasswd files are read by workers
+    (www-data) at request time and must be 0644.  An unreadable error page
+    turns the real status into a 403; an unreadable htpasswd makes basic
+    auth return 500.  htpasswd hashes are bcrypt, so world readable is fine.
     """
     first = Path(rel_path).parts[0] if Path(rel_path).parts else ""
     return 0o644 if first in ("errorpages", "auth") else 0o640
@@ -858,11 +732,8 @@ def _staged_mode(rel_path):
 
 def v_write_staging(req):
     """
-    Drop a whole set of files into the staging folder.
-
-    The manager renders every managed file and sends the lot.  We wipe staging
-    first, so a file the manager stopped generating actually disappears instead
-    of hanging around and getting included forever.
+    Replace the staging folder with the full set of rendered files.  Wiping
+    it first means files the manager stopped generating really go away.
     """
     files = req.get("files")
     if not isinstance(files, dict) or not files:
@@ -888,36 +759,18 @@ def v_write_staging(req):
 
 def _staging_for_test() -> str:
     """
-    Which folder the test should include, and why it is sometimes not staging.
+    The folder the test should include: usually staging itself.
 
-    Nearly every directive we render points outside the bundle or is opened
-    lazily at request time, so testing the staging folder as it stands is
-    fine.  `auth_basic_user_file` is the usual example: nginx -t never opens
-    it, so the absolute path in a staged site file pointing at the *live*
-    bundle costs nothing.
+    Staged files use absolute paths into the live bundle.  That is harmless
+    for things opened at request time (auth_basic_user_file), but nginx -t
+    reads modsecurity_rules_file while loading, so it would test the live
+    rules, or fail on a first apply when none exist.  In that case the test
+    runs against a copy with those paths pointed at the copy.  Staging itself
+    is not rewritten because apply moves it into place as is.
 
-    `modsecurity_rules_file` is not like that.  nginx reads and parses it while
-    loading the config, which is the whole reason a bad rule file fails the
-    test rather than failing at runtime.  A staged site file pointing at the
-    live bundle then tests the rules that are already there, and on a first
-    apply there is no file at that path at all and the test fails on a config
-    that is perfectly good.
-
-    So when a staged file refers to the live bundle, the test runs against a
-    rewritten copy instead, leaving the staging folder exactly as the manager
-    sent it.  Rewriting staging itself would be worse than the bug: apply moves
-    that folder into place, so the paths have to be the live ones by then.
-
-    A config with no such reference, which is every config this project wrote
-    before the firewall existed, takes the old path and copies nothing.
-
-    **Only what staging actually holds gets rewritten.**  Certificates are the
-    reason.  They live in the bundle but are put there by the certificate sync
-    rather than by an apply, so they are not in the staging folder, and nginx
-    opens them while loading the config exactly like it opens a rule file.
-    Rewriting those too pointed them at a folder with no certificates in it and
-    turned a passing test into "cannot load certificate", which is a far more
-    alarming message than the bug deserved.
+    Only paths that staging actually holds are redirected.  Certificates live
+    in the bundle but come from the certificate sync, not staging, and must
+    keep pointing at the live copy.
     """
     if TEST_DIR.exists():
         shutil.rmtree(TEST_DIR, ignore_errors=True)
@@ -925,9 +778,7 @@ def _staging_for_test() -> str:
     live = str(MANAGED_DIR)
     staged = str(STAGING_DIR)
 
-    # A reference is only redirected when the staging folder has the thing it
-    # points at.  Anything else is a file the bundle carries but an apply does
-    # not replace, and it has to keep pointing at the live copy.
+    # Redirect only references to files staging actually has.
     reference = re.compile(re.escape(live) + r"(/[^\s;\"']*)")
 
     def redirect(match, root):
@@ -949,7 +800,7 @@ def _staging_for_test() -> str:
                 found = True
                 break
         except (OSError, UnicodeDecodeError):
-            # Binary or unreadable.  Nothing we would rewrite anyway.
+            # Binary or unreadable; nothing to rewrite.
             continue
 
     if not found:
@@ -986,32 +837,24 @@ def _staging_declares_default() -> bool:
 
 def v_test_staging(req):
     """
-    Test the staged config without letting it near the running server.
+    Test the staged config without touching the running server.
 
-    The trick is that nginx -t wants a whole config, not a folder of pieces.
-    So we write a throwaway nginx.conf that is the real one with our include
-    line pointed at staging instead of the live folder, and test that.  If it
-    passes, the same files will load for real.
+    nginx -t needs a whole config, so we test a copy of the real nginx.conf
+    with our include pointed at staging.
     """
     main_conf = NGINX_PREFIX / "nginx.conf"
     if not main_conf.is_file():
         raise AgentError(f"cannot find {main_conf}", "not_found")
 
-    # Make room for a managed default site before testing, or give the room
-    # back if the staged config no longer has one.
-    #
-    # This has to happen before the test rather than after it, because the
-    # candidate config includes sites-enabled the same way the live one does.
-    # Two default servers is the one clash nginx refuses outright, so leaving
-    # it until the commit would mean the test passes and the apply falls over
-    # on the node that already said yes.
+    # Before the test, since the candidate includes sites-enabled too and a
+    # second default server would fail it (or worse, pass here and fail at
+    # apply).
     staged_default = _staging_declares_default()
     moved = reconcile_default_site(staged_default)
 
     original = main_conf.read_text()
 
-    # Swap our include line over to staging.  If the manager has never applied
-    # anything yet there is no include line, so we add one inside http.
+    # Point our include at staging, adding one if we have never applied.
     live_include = str(MANAGED_DIR)
     staged_include = _staging_for_test()
 
@@ -1023,42 +866,31 @@ def v_test_staging(req):
     atomic_write(CANDIDATE_CONF, candidate, mode=0o640)
 
     try:
-        # -p as well, so anything that genuinely does key off the prefix, like
-        # a relative access_log path, lands where it normally would.
+        # -p so prefix relative paths (like access_log) resolve as usual.
         result = run([str(NGINX_BIN), "-t", "-p", str(NGINX_PREFIX), "-c", str(CANDIDATE_CONF)])
         output = (result["stderr"] + result["stdout"]).strip()
 
-        # Tidy up the message before anybody reads it in the GUI.  nginx names
-        # the temp file and the staging folder, and neither means anything to
-        # the person who just changed a setting.  Point them at the real thing.
+        # Show the real paths in the GUI, not the temp and staging ones.
         output = output.replace(str(CANDIDATE_CONF), "the candidate config")
         output = output.replace(staged_include + "/", live_include + "/")
 
         ok = result["rc"] == 0
         if not ok and moved.get("removed"):
-            # The config we made room for is not going to be applied, so give
-            # the room back rather than leaving the box with its catch all
-            # gone and nothing having replaced it.
+            # This config will not be applied, so restore the catch all.
             reconcile_default_site(False)
 
         return {"ok": ok, "output": output, "default_site": moved}
     finally:
-        # Always clean up, even if nginx blew up.  Leaving this behind would
-        # mean the next test reads a stale candidate.
+        # Always clean up so nothing stale is left for the next test.
         CANDIDATE_CONF.unlink(missing_ok=True)
-        # And the rewritten copy, if this test needed one.  It is a copy of
-        # config that is about to be applied anyway, but leaving it on disk
-        # would give the next reader two folders that look equally live.
         shutil.rmtree(TEST_DIR, ignore_errors=True)
 
 
 def _inject_include(conf_text, include_dir):
     """
-    Put our include line inside the http block.
-
-    Only used the first time, before we have ever applied.  We walk the braces
-    instead of regexing for a closing one, since the http block has plenty of
-    nested blocks and a regex would find the wrong brace every time.
+    Put our include lines inside the http block, and the stream include
+    after it.  Walks the braces, since http has nested blocks and a regex
+    would find the wrong closing brace.
     """
     lines = conf_text.splitlines()
     depth = 0
@@ -1074,20 +906,12 @@ def _inject_include(conf_text, include_dir):
 
         depth += stripped.count("{") - stripped.count("}")
 
-        # Back down to where http started means we just passed its closing
-        # brace, so this is the spot.
+        # Back at http's depth: this line holds its closing brace.
         if in_http and http_depth is not None and depth == http_depth:
-            # Order matters here and it is not cosmetic.  Anything that gets
-            # referenced by name has to be defined before the thing that uses
-            # it.  00-managed.conf holds the log formats, and a site saying
-            # "access_log ... nfm_main" before that file is read fails with
-            # "unknown log format".  Same story for maps, limit zones and cache
-            # zones.  Sites go last because they use all of it.
-            #
-            # Globs everywhere, never a named file.  nginx treats a missing
-            # named include as fatal, but a glob matching nothing is fine, so a
-            # partial staging tree gives a useful error about the thing you
-            # changed rather than about a file that was never there.
+            # Order matters: log formats, maps, limit and cache zones must be
+            # defined before sites use them ("unknown log format" otherwise).
+            # Always globs, since a missing named include is fatal but an
+            # empty glob is fine.
             block = [
                 "",
                 f"    {INCLUDE_MARKER}",
@@ -1100,23 +924,10 @@ def _inject_include(conf_text, include_dir):
             ]
             lines[i:i] = block
 
-            # TCP and UDP proxying lives in its own top level block, a sibling
-            # of http rather than something inside it, so it needs a second
-            # include out here.  Without it the manager renders stream config
-            # that nginx never reads: the files are on disk, the GUI says the
-            # apply worked, and the port is not listening.
-            #
-            # The whole block is generated into one file rather than assembled
-            # from includes here, because a bare `stream { }` with nothing in it
-            # is still a block nginx has to accept, and because the strip above
-            # only knows how to remove include lines.  Leaving an orphaned brace
-            # in nginx.conf would be a config that will not load at all.
-            #
-            # A glob, like every other include we write, so no streams means the
-            # line matches nothing and costs nothing.
-            # After the closing brace, not before it.  lines[i] is the brace
-            # that ends http, so the block above went inside it, and this has
-            # to land on the other side.
+            # stream {} is a sibling of http, so it gets its own top level
+            # include, after http's closing brace.  The generated file holds
+            # the whole stream block, so nginx.conf only ever has include
+            # lines, which is all _ensure_include_present knows how to strip.
             close_at = i + len(block)
             lines[close_at + 1:close_at + 1] = [
                 "",
@@ -1132,9 +943,8 @@ def v_apply(req):
     """
     Move the staged config into place and reload nginx.
 
-    The order matters and it is the whole reason this verb exists:
-      back up, test staging, swap it in, test again, reload, and if the reload
-      fails put the backup back and reload again.
+    Order: test staging, back up, swap in, test again, reload, and roll
+    back and reload if the reload fails.
     """
     reload_after = bool(req.get("reload", True))
     label = req.get("label", "apply")
@@ -1151,8 +961,7 @@ def v_apply(req):
 
     backup_name = make_backup(label)
 
-    # Swap the folder over.  Move the old one aside instead of deleting it, so
-    # if something blows up halfway we still have the files right here.
+    # Move the old folder aside rather than deleting it, for a quick rollback.
     previous = None
     try:
         if MANAGED_DIR.exists():
@@ -1167,15 +976,10 @@ def v_apply(req):
             os.rename(previous, MANAGED_DIR)
         raise AgentError(f"could not swap the config into place: {exc}", "io_error")
 
-    # Carry the certificates over.  They live in this folder but they are not
-    # rendered config, so the manager never stages them, and swapping the folder
-    # threw every one of them away.  That is a hole you cannot climb out of:
-    # copy the certs to a node, apply, the apply deletes them, the next render
-    # sees the files missing and leaves the https block out, and applying again
-    # does the same thing forever.
-    #
-    # Copy rather than move, so the folder we set aside stays whole and a
-    # rollback still has everything it started with.
+    # Certificates live in this folder but are never staged, so carry them
+    # over or the swap deletes them (and the next render drops https because
+    # they are missing).  Copy, so the set aside folder stays whole for a
+    # rollback.
     if previous is not None:
         old_certs = previous / "certs"
         new_certs = MANAGED_DIR / "certs"
@@ -1183,17 +987,14 @@ def v_apply(req):
             try:
                 shutil.copytree(old_certs, new_certs)
             except OSError as exc:
-                # Worth stopping for.  Going on without the certificates means
-                # nginx cannot load any https site, and the test below would
-                # fail with a missing file rather than saying what happened.
+                # Without certificates no https site loads; stop here with a
+                # clear error.
                 _rollback(previous, backup_name)
                 raise AgentError(
                     f"could not carry the certificates across the apply: {exc}", "io_error"
                 )
 
-    # Make sure nginx.conf actually pulls our folder in.  Only matters on the
-    # first apply, but checking every time is cheap and catches somebody
-    # editing the include back out.
+    # Cheap, and catches someone editing the include out.
     _ensure_include_present()
 
     live = v_config_test(req)
@@ -1240,11 +1041,8 @@ def _ensure_include_present():
     """
     Make sure nginx.conf pulls our folder in, with the current include list.
 
-    Checking only for the folder name would miss the case where an older
-    version of the manager wrote a shorter list of includes.  That node would
-    keep running, and keep failing in a confusing way, because a file we now
-    generate is never read.  So we look for the marker instead, and if it is
-    missing or from an older version we strip the old block and write a new one.
+    Keyed on the versioned marker, not the folder name, so a block written by
+    an older release with fewer includes gets replaced.
     """
     main_conf = NGINX_PREFIX / "nginx.conf"
     text = main_conf.read_text()
@@ -1259,11 +1057,8 @@ def _ensure_include_present():
             stripped = line.strip()
             if stripped.startswith("# failover lb includes"):
                 continue
-            # The two names this went under before v5.  A node installed under
-            # either still has that comment sitting in its nginx.conf, and the
-            # block is only recognised as ours by these prefixes, so dropping
-            # them would leave the old lines behind and add a second block
-            # underneath.  They stay for as long as an un-upgraded node might.
+            # Markers used before v5.  Keep these while older nodes may
+            # still have them, or their old block would be left behind.
             if stripped.startswith("# nginx fleet manager includes"):
                 continue
             if stripped.startswith("# added by nginx fleet manager"):
@@ -1291,7 +1086,7 @@ def v_reload(req):
     if have_systemd():
         result = systemctl("reload", "nginx")
         if result["rc"] != 0:
-            # Not running yet is a normal thing on a fresh box.  Start it.
+            # Normal on a fresh box: nginx is not running yet, so start it.
             active = systemctl("is-active", "nginx")
             if active["stdout"].strip() != "active":
                 result = systemctl("start", "nginx")
@@ -1323,17 +1118,11 @@ def v_service(req):
         result = systemctl(action, "nginx")
         return {"ok": result["rc"] == 0, "output": (result["stderr"] + result["stdout"]).strip()}
 
-    # No systemd.  Drive nginx directly instead of refusing.
-    #
-    # This is not only containers.  It matters after a rebuild: the installer
-    # replaces the binary on disk, but the process already running keeps the old
-    # one in memory until something restarts it.  Refusing here would leave a
-    # box reporting the new version from nginx -v while still serving with the
-    # old build, which is a genuinely nasty thing to be wrong about.
+    # No systemd: drive nginx directly.  Needed after a rebuild too, or the
+    # old binary keeps serving while nginx -v reports the new version.
     if action in ("stop", "restart"):
         run([str(NGINX_BIN), "-s", "quit"])
-        # Give the workers a moment to finish what they are doing.  quit is the
-        # graceful one, so this is not instant by design.
+        # quit is graceful, so wait for the workers to finish.
         for _ in range(20):
             check = run(["pgrep", "-x", "nginx"])
             if check["rc"] != 0:
@@ -1383,11 +1172,8 @@ def v_list_dir(req):
             "is_dir": child.is_dir(),
             "size": st.st_size,
             "modified": st.st_mtime,
-            # The permission bits, because a listing without them cannot answer
-            # the question that has now bitten twice: whether a file an nginx
-            # worker has to open at request time is readable by www-data.
-            # Both times the symptom was a status code that lied and a log line
-            # about a file nobody had heard of.
+            # Shows whether files workers open at request time are readable
+            # by www-data.  See _staged_mode.
             "mode": st.st_mode & 0o7777,
         })
     return {"path": str(p), "entries": entries}
@@ -1397,16 +1183,12 @@ def v_acme_token_write(req):
     """
     Put an http-01 challenge token on disk.
 
-    Every node in the cluster gets a copy of the token, not just the one asking
-    for the cert.  Lets Encrypt picks which address to hit and we do not get a
-    say, so if only one node had the file the check would fail whenever they
-    picked a different one.
+    Every node gets a copy, since the CA may validate against any of them.
     """
     token = req.get("token", "")
     value = req.get("value", "")
 
-    # Tokens out of the acme spec are base64url.  Pinning the shape here means
-    # a token can never turn into a path.
+    # ACME tokens are base64url, so a token can never become a path.
     if not re.fullmatch(r"[A-Za-z0-9_-]{16,256}", str(token)):
         raise AgentError("that token does not look like an acme token", "bad_request")
     if not isinstance(value, str) or len(value) > 1024:
@@ -1441,10 +1223,8 @@ def v_certbot(req):
     """
     Ask certbot for a cert.
 
-    We build the whole command line ourselves from a small set of choices.
-    None of the caller's text goes anywhere near a shell, and there is no way
-    to pass a random flag through.  Domains get checked against a hostname
-    pattern first, so a domain cannot turn into an argument.
+    The command line is built here from a fixed set of options.  Every
+    caller value is validated first, so none can become an extra flag.
     """
     domains = req.get("domains") or []
     email = req.get("email", "")
@@ -1455,10 +1235,8 @@ def v_certbot(req):
     dns_credentials = req.get("dns_credentials")
     force = bool(req.get("force_renewal", False))
 
-    # Somewhere other than Lets Encrypt.  Two real uses: an internal CA like
-    # step-ca or Smallstep, which plenty of places run for internal names, and
-    # a local test server so the whole path can be exercised without spending
-    # a public rate limit.
+    # A non Lets Encrypt directory: an internal CA such as step-ca, or a
+    # local test server that avoids public rate limits.
     acme_server = req.get("acme_server")
     ca_bundle = req.get("ca_bundle")
 
@@ -1474,25 +1252,17 @@ def v_certbot(req):
         if not isinstance(d, str) or not hostname_re.match(d):
             raise AgentError(f"{d!r} is not a valid domain name", "bad_request")
 
-    # No email is allowed.  Lets Encrypt will register without a contact
-    # address, you just get no mail before something expires.  The manager
-    # watches expiry itself and warns on the dashboard, so refusing to issue
-    # without one would be us inventing a rule the CA does not have.
+    # Email is optional.  The CA allows it, and the manager warns about
+    # expiry itself.
     if email and not re.fullmatch(r"[^@\s]{1,64}@[^@\s]{1,255}", str(email)):
         raise AgentError("that email address does not look right", "bad_request")
 
     if key_type not in ("ecdsa", "rsa"):
         raise AgentError("key_type has to be ecdsa or rsa", "bad_request")
 
-    # The name the manager calls this certificate, falling back to the first
-    # domain when it did not say.
-    #
-    # This has to match, and getting it wrong is quiet.  certbot puts the files
-    # in a folder named after --cert-name, and the manager later looks them up
-    # by the name in its own database.  Guess the name here and the two disagree
-    # the moment somebody calls a certificate anything other than its first
-    # domain.  Issuing then works, and the copy to the other nodes fails with
-    # "no cert called ...", so one box has a certificate and the rest do not.
+    # Must match the manager's name for the certificate, since it later looks
+    # up the files by that name.  A guessed name would issue fine and then
+    # fail to sync to other nodes.
     cert_name = req.get("cert_name") or domains[0].replace("*.", "")
     if not re.fullmatch(r"[A-Za-z0-9._-]{1,253}", str(cert_name)):
         raise AgentError("that certificate name is not valid", "bad_request")
@@ -1505,12 +1275,8 @@ def v_certbot(req):
         "--key-type", key_type,
     ]
 
-    # Which chain to ask for.
-    #
-    # The ISRG root is Lets Encrypt's own, so it is only asked for when no
-    # other directory is in play.  Any authority that needs a particular chain
-    # names it on its own profile, because that is a fact about the authority
-    # rather than about this installation.
+    # ISRG Root X1 only applies to Lets Encrypt.  Other authorities name
+    # their preferred chain on their own profile.
     chain = req.get("preferred_chain")
     if chain:
         if not re.fullmatch(r"[A-Za-z0-9 ._()-]{1,128}", str(chain)):
@@ -1522,23 +1288,19 @@ def v_certbot(req):
     if email:
         cmd += ["-m", email]
     else:
-        # certbot will not register without either a contact address or being
-        # told outright that you meant it.  The flag name is dramatic, but all
-        # it means is nobody gets an expiry warning by mail.
+        # Required by certbot without an address.  It only means no expiry
+        # mail.
         cmd.append("--register-unsafely-without-email")
 
     if acme_server:
         if not re.fullmatch(r"https://[A-Za-z0-9._:-]{1,253}(/[A-Za-z0-9._~/-]*)?", str(acme_server)):
             raise AgentError("that acme server url is not valid", "bad_request")
         cmd += ["--server", acme_server]
-        # A custom directory and --staging together makes no sense, since
-        # staging is just Lets Encrypt's own other directory.
+        # --staging is just another Lets Encrypt directory.
         staging = False
 
-    # External account binding.  A paid authority hands these out with the
-    # entitlement rather than letting anybody register, so without them
-    # registration is refused and the error talks about the account rather
-    # than about the credentials being missing.
+    # External account binding, required by some commercial CAs.  Without it
+    # registration fails with an unhelpful account error.
     eab_kid = req.get("eab_kid")
     eab_hmac = req.get("eab_hmac_key")
     if eab_kid or eab_hmac:
@@ -1561,10 +1323,8 @@ def v_certbot(req):
         cmd.append("--force-renewal")
 
     if challenge == "http-01":
-        # The manual hooks are what let us answer on every node.  certbot calls
-        # the hook, the hook calls the manager over localhost, and the manager
-        # pushes the token out to the whole cluster before certbot tells Lets
-        # Encrypt to go look.
+        # The hooks call the manager on localhost, which pushes the token to
+        # every node before the CA checks.
         auth_hook = req.get("auth_hook")
         cleanup_hook = req.get("cleanup_hook")
         if auth_hook and cleanup_hook:
@@ -1598,9 +1358,8 @@ def v_certbot(req):
     for d in domains:
         cmd += ["-d", d]
 
-    # An internal or test ACME server signs with a CA nothing trusts by
-    # default, so certbot needs pointing at it.  Written to our own folder, not
-    # somewhere that would change what the rest of the box trusts.
+    # CA for an internal or test ACME server.  Kept in our own folder so the
+    # rest of the box's trust store is unchanged.
     env_extra = None
     if ca_bundle:
         if not isinstance(ca_bundle, str) or "BEGIN CERTIFICATE" not in ca_bundle:
@@ -1634,8 +1393,7 @@ def v_cert_list(req):
 
         info = {"name": d.name, "path": str(d)}
 
-        # Reading the dates with openssl instead of parsing it ourselves.  It
-        # is already on the box and it is never wrong about its own format.
+        # Let openssl parse the certificate rather than doing it ourselves.
         out = run(["openssl", "x509", "-in", str(fullchain), "-noout",
                    "-enddate", "-startdate", "-subject", "-ext", "subjectAltName"])
         if out["rc"] == 0:
@@ -1664,10 +1422,8 @@ def v_cert_export(req):
     """
     Read a cert bundle so it can go out to the other nodes.
 
-    Yes, this hands back a private key.  That is on purpose.  Every node in the
-    cluster has to serve the same cert, and only one of them can answer the
-    acme challenge for a given public address.  The key only ever moves over
-    mutual TLS between nodes that already trust each other.
+    This returns the private key on purpose: every node serves the same cert.
+    It only travels over mutual TLS between trusted nodes.
     """
     name = req.get("name", "")
     if not re.fullmatch(r"[A-Za-z0-9._-]{1,253}", str(name)):
@@ -1693,11 +1449,9 @@ def v_cert_import(req):
     """
     Write a cert bundle that came from another node.
 
-    These go in their own folder, not in /etc/letsencrypt/live.  certbot owns
-    live, and it keeps the renewal state that goes with it.  Dropping somebody
-    else's files in there would leave certbot thinking it owns a cert it has no
-    account for, and then renewals get weird.  Ours go somewhere obvious
-    instead, and the generated config points at whichever one is real.
+    Written to our own folder, not /etc/letsencrypt/live, which certbot owns
+    along with the renewal state.  The generated config points at whichever
+    copy exists.
     """
     name = req.get("name", "")
     bundle = req.get("bundle")
@@ -1717,9 +1471,8 @@ def v_cert_import(req):
         if not isinstance(content, str):
             raise AgentError(f"contents of {fname} has to be a string", "bad_request")
 
-        # The key is the sensitive one.  0600 and root only.  nginx reads its
-        # certs as the master process, which is root, before it drops to
-        # www-data, so the workers never need to see this.
+        # Keys are root only; the nginx master reads them before dropping
+        # privileges.
         mode = 0o600 if fname == "privkey.pem" else 0o644
         atomic_write(synced / fname, content, mode=mode)
         written.append(fname)
@@ -1732,15 +1485,9 @@ def v_cert_forget(req):
     """
     Take a certificate's files off this node.
 
-    Only the folder we own, never certbot's.  certbot keeps renewal state
-    alongside its copies and deleting one out from under it leaves an account
-    with a lineage it can no longer complete.  `certbot delete` is the way to
-    remove those and it is a person's decision, not ours.
-
-    Worth having at all because a deleted certificate used to leave its private
-    key sitting on every node forever.  Nothing pointed at it and nothing
-    listed it, so the only way anybody would find out is by looking at the
-    disk, which is exactly the sort of thing nobody does until an audit.
+    Only our own copy, never certbot's, which carries renewal state;
+    removing those is a job for `certbot delete`.  Without this, a deleted
+    certificate's private key stayed on every node indefinitely.
     """
     name = req.get("name", "")
     if not re.fullmatch(r"[A-Za-z0-9._-]{1,253}", str(name)):
@@ -1773,17 +1520,10 @@ def v_rollback(req):
             raise AgentError("there are no backups to roll back to", "not_found")
         name = backups[-1].name
 
-    # Set the current folder aside before unpacking anything over it.
-    #
-    # restore_backup deletes the managed folder and moves the unpacked one into
-    # its place, and the test happens afterwards.  So a rollback to a config
-    # nginx will not load used to leave the bad config sitting on disk while
-    # nginx carried on running the good one from memory.  Nothing looked wrong
-    # until the next restart, which could be a reboot weeks later, and then the
-    # node would not come back.  This is the oh-no button, so it is the last
-    # place that should be able to leave a node in a state it cannot start
-    # from.  The apply path has always kept a copy for exactly this reason;
-    # this one did not.
+    # Keep a copy of the current folder.  restore_backup replaces it before
+    # the test runs, so a backup that fails nginx -t would otherwise stay on
+    # disk while nginx ran the old config from memory, and the node would not
+    # come back after its next restart.
     previous = None
     if MANAGED_DIR.exists():
         previous = MANAGED_DIR.parent / (MANAGED_DIR.name + ".before-rollback")
@@ -1816,10 +1556,8 @@ def v_nginx_metrics(req):
     """
     Pull the numbers out of stub_status.
 
-    The installer builds nginx with --with-http_stub_status_module, and the
-    config we generate exposes it on localhost only.  It is basic compared to
-    what the paid version reports, but it is free and it is enough to see
-    connection counts moving.
+    The installer builds in stub_status and the generated config exposes it
+    on localhost only.  Basic, but enough for connection counts.
     """
     port = int(req.get("port", 7081))
     if not (1 <= port <= 65535):
@@ -1849,9 +1587,8 @@ def v_nginx_metrics(req):
     return {"ok": True, "metrics": metrics, "raw": text}
 
 
-# Our own nftables table.  A table of our own means the whole thing can be
-# removed in one command without touching a rule anybody else wrote, which
-# matters on a box where a firewall is somebody's job.
+# Our own nftables table, so it can be dropped in one command without
+# touching anyone else's rules.
 NFT_TABLE = "nginxmgr"
 
 
@@ -1859,16 +1596,10 @@ def v_dns_redirect(req):
     """
     Send port 53 to the port the manager is really listening on.
 
-    The manager cannot bind 53.  It runs unprivileged with no-new-privileges
-    set, which makes the kernel ignore file capabilities, so the usual setcap
-    route does nothing.  Turning that hardening off would weaken the most
-    exposed component in the system to save one rule here.
-
-    A destination NAT rewrites where the packet is headed and leaves the source
-    alone, so the DNS server still sees the real client address.  Proxying
-    through nginx would have cost that, and would also have meant a node whose
-    nginx was stopped could not answer a query telling the world to use the
-    other node, which is exactly when the answer matters most.
+    The manager runs unprivileged with no-new-privileges, so it cannot bind
+    53 and setcap does not help.  DNAT keeps the real client address and,
+    unlike proxying through nginx, still works when nginx is stopped, which
+    is when failover answers matter most.
     """
     address = str(req.get("address", "")).strip()
     try:
@@ -1883,51 +1614,20 @@ def v_dns_redirect(req):
     if not shutil.which("nft"):
         raise AgentError("nftables is not installed on this box", "not_found")
 
-    # Built fresh every time rather than added to.  Appending would stack a new
-    # rule on every restart, and the last one written is not necessarily the one
-    # that matches.
-    # Every address this box owns, not just the one it calls itself.
+    # The table is rebuilt each time, never appended to.
     #
-    # This used to be `ip daddr <node address>`, which matches only packets
-    # sent to the one address in NODE_ADDRESS.  A node reached on any other
-    # address it owns, which is every node behind NAT, every node with a
-    # separate public and internal address, and every node with more than one
-    # interface, got no redirect at all: the listener answered perfectly on its
-    # own port and port 53 refused the connection.
+    # Match every local address, not just NODE_ADDRESS, so nodes behind NAT
+    # or with several addresses still redirect.  `fib daddr type local` also
+    # leaves forwarded traffic alone, so we never answer other hosts' DNS.
     #
-    # The shape of the failure is what makes it worth this comment.  The node
-    # looks healthy, the zone is right, the listener is up, and the box answers
-    # when you test it from itself using the address it calls itself by.  It
-    # only fails for the outside world, and on a two node fleet it only fails
-    # visibly when the other node is gone, because until then the other node
-    # answers everything.
-    #
-    # `fib daddr type local` matches a packet addressed to any address this
-    # machine holds, and nothing else.  Forwarded traffic passing through on
-    # its way somewhere else is still left alone, which a bare port match would
-    # not do: a load balancer that routes for other people must not quietly
-    # answer their DNS.
-    #
-    # Loopback is cut out of it, and that exclusion is not optional.  Ubuntu
-    # and most others run a stub resolver on 127.0.0.53 and point
-    # /etc/resolv.conf at it, so "every local address" includes the box's own
-    # resolver.  Without the exclusion this table takes every name lookup the
-    # machine makes and hands it to an authoritative server that knows two
-    # zones, and the box loses DNS entirely: no apt, no certificate renewal,
-    # no reaching a backend by name.  Found by breaking exactly that, on the
-    # first version of this fix, one command after writing it.
+    # Loopback must be excluded: the local stub resolver on 127.0.0.53 would
+    # otherwise be redirected too, and the box would lose all name
+    # resolution.
     daddr = "fib daddr type local ip daddr != 127.0.0.0/8 "
 
-    # dnat rather than redirect, and the difference only shows on this box.
-    #
-    # `redirect` sends a packet to the local machine, and in the output chain
-    # that means 127.0.0.1.  The listener binds this node's public address, so
-    # a query made from the box to its own address landed on loopback where
-    # nothing was listening and came back refused, while the same query from
-    # anywhere else worked perfectly.  That is the worst shape of bug to leave
-    # in: it works everywhere except where somebody testing it will try first.
-    #
-    # Naming the address explicitly sends it to the socket that exists.
+    # dnat rather than redirect: in the output chain `redirect` goes to
+    # 127.0.0.1, but the listener binds the node's own address, so queries
+    # from the box itself were refused.
     target = f"{address}:{port}" if address else f":{port}"
     verb = "dnat to" if address else "redirect to"
     ruleset = f"""table ip {NFT_TABLE} {{
@@ -1947,10 +1647,8 @@ def v_dns_redirect(req):
     run(["nft", "delete", "table", "ip", NFT_TABLE])      # fine if it is absent
     result = run(["nft", "-f", "-"], input_text=ruleset)
 
-    # `fib daddr type local` wants a reasonably recent nftables.  On an older
-    # one the whole ruleset is rejected, and a rejected ruleset means no
-    # redirect at all, which is worse than the narrow rule it replaced.  So
-    # fall back to naming the address, say so plainly, and carry on.
+    # Older nftables rejects the fib match.  Fall back to the single address
+    # rather than having no redirect at all.
     if result["rc"] != 0 and "fib" in ruleset and address:
         narrow = ruleset.replace("fib daddr type local ip daddr != 127.0.0.0/8 ",
                                  f"ip daddr {address} ")
@@ -1982,23 +1680,12 @@ def v_dns_redirect_clear(req):
 
 def v_dns_redirect_status(req):
     """
-    What rule is actually in place, as opposed to what we think we wrote.
+    The rule actually in place.
 
-    `installed` and `present` say the same thing.  Both are here because the
-    manager asked for `installed` while this only ever returned `present`, so
-    the answer was always missing and always read as false.  The manager
-    therefore deleted the whole table and wrote it again every ten seconds,
-    for the life of every node.
-
-    Rebuilding means `nft delete table` and then `nft -f`, so there is a gap
-    with no rule at all on every one of those cycles, on the one thing that is
-    supposed to keep answering.  The manager's own comment says it asks first
-    "rather than just rewritten, because writing it means dropping the table
-    and rebuilding it, and doing that every few seconds would put a small hole
-    in the one thing this is here to keep up".  It was doing exactly that.
-
-    `target` and `matches_all_local` let the manager notice a rule that exists
-    but is the wrong shape, which is what an agent upgrade leaves behind.
+    `installed` and `present` are the same; the manager reads `installed`,
+    and when it was missing it rebuilt the table (briefly dropping the rule)
+    every few seconds.  `target` and `matches_all_local` let it spot a rule
+    of an outdated shape after an agent upgrade.
     """
     if not shutil.which("nft"):
         return {"installed": False, "present": False,
@@ -2020,14 +1707,12 @@ def v_public_ip(req):
     """
     Work out what public address this box goes out as.
 
-    We ask a few different services and go with whatever most of them say.  Any
-    one of them can be down, or wrong, or lying, and picking the wrong answer
-    here sends the cert request to the wrong node.  Best of three beats trusting
-    one.  DNS first since it is faster and harder to mess with, then https.
+    Asks several services and takes the majority, since any one can be
+    down or wrong and a wrong answer sends the cert request to the wrong
+    node.  DNS first (faster, harder to tamper with), then https.
     """
     answers = []
 
-    # OpenDNS will tell you your own address.  No http, no TLS handshake.
     dns_checks = [
         (["dig", "+short", "+time=3", "+tries=1", "myip.opendns.com",
           "@resolver1.opendns.com"], "opendns"),
@@ -2091,9 +1776,8 @@ def v_local_addresses(req):
     """
     Every address on this box.
 
-    Used two ways.  It tells us if this node is holding a floating VIP, and it
-    gives the manager the list of addresses to put in the whitelist so the
-    cluster's own health checks never get blocked by an ACL somebody wrote.
+    Shows whether this node holds a floating VIP, and lets the manager
+    allowlist cluster addresses so health checks are never blocked by an ACL.
     """
     addrs = []
     out = run(["ip", "-json", "addr", "show"])
@@ -2119,10 +1803,8 @@ def v_write_hook_scripts(req):
     """
     Write the certbot hook scripts.
 
-    These live outside the container because certbot runs on the host and has
-    to be able to exec them.  They are tiny: all they do is call back into the
-    manager on localhost with a one time token.  We write them from here so the
-    manager can update them without anybody hand copying files to every box.
+    certbot runs on the host, so the hooks live here.  They just call the
+    manager on localhost with a one time token.
     """
     scripts = req.get("scripts")
     if not isinstance(scripts, dict):
@@ -2161,24 +1843,17 @@ def _write_upgrade_state(**fields):
     atomic_write(UPGRADE_STATE, json.dumps(current, indent=1), mode=0o644)
 
 
-# The build runs as its own unit rather than as a child of this agent.  See
-# nginx-rebuild.service for why; the short version is that this agent runs with
-# ProtectSystem=strict and a source build has to write where a package manager
-# writes.  A child process inherits that sandbox, so the build has to be handed
-# to systemd instead of forked from here.
+# Builds run as their own units because a child of this agent would inherit
+# its ProtectSystem=strict sandbox.  See nginx-rebuild.service.
 REBUILD_UNIT = "nginx-rebuild.service"
 REVERT_UNIT = "nginx-revert.service"
 
-# On tmpfs, which the agent can write and which clears at reboot.  A build that
-# was interrupted by a reboot did not finish, and coming back up with no marker
-# is the honest answer.
+# On tmpfs, so a build interrupted by a reboot leaves no marker behind.
 REBUILD_ENV = Path("/run/nginxmgr/rebuild.env")
 REBUILD_MARKER = Path("/run/nginxmgr/rebuild.started")
 
-# Written by the unit itself as it stops.  See nginx-rebuild.service: systemd
-# unloads a finished oneshot unit and every property it has resets to zero, so
-# asking systemd after the event cannot tell a successful build from one that
-# never happened.  This file existing is what says the build is over.
+# Written by the unit as it stops; its existence means the build is over.
+# See nginx-rebuild.service for why systemd cannot tell us afterward.
 REBUILD_RESULT = Path("/run/nginxmgr/rebuild.result")
 
 
@@ -2199,14 +1874,11 @@ def _unit_props(unit, names):
 
 def _systemd_build_state():
     """
-    How the build unit is doing, as the same shape the file based path returns.
+    Build unit status, in the same shape the file based path returns.
 
-    The trap here is that a unit which has never run looks exactly like one that
-    ran and succeeded: ActiveState=inactive, Result=success, ExecMainStatus=0.
-    Reading that as a finished build would report success for a build that was
-    never started, which is the failure this whole exercise turned up in the
-    first place.  So a build only counts as ours if the unit's own start
-    timestamp is at or after the moment we asked for it.
+    A unit that never ran looks the same as one that succeeded, so state
+    comes from our start marker and the result file the unit writes, not
+    from systemd's properties alone.
     """
     marker = {}
     if REBUILD_MARKER.is_file():
@@ -2240,8 +1912,7 @@ def _systemd_build_state():
     if props.get("ActiveState") in ("activating", "active", "reloading", "deactivating"):
         return base
 
-    # Not running.  Either it has finished and left its result behind, or
-    # systemd has not got round to starting it yet.
+    # Not running: either finished (result file present) or not started yet.
     if REBUILD_RESULT.is_file():
         try:
             recorded = REBUILD_RESULT.read_text().split()
@@ -2261,8 +1932,7 @@ def _systemd_build_state():
         }
 
     if props.get("ActiveState") == "failed":
-        # Failed before it could write a result, which usually means it never
-        # got as far as running the installer at all.
+        # Failed before writing a result, usually before the installer ran.
         return {
             **base,
             "state": "finished",
@@ -2272,7 +1942,7 @@ def _systemd_build_state():
             "error": f"{REBUILD_UNIT} failed to start.  See journalctl -u {REBUILD_UNIT}.",
         }
 
-    # Asked for, not begun.  Queued behind something, or systemd is slow.
+    # Requested but not begun yet.
     return base
 
 
@@ -2280,21 +1950,12 @@ def v_nginx_upgrade(req):
     """
     Rebuild nginx from source, at a version and module list we are given.
 
-    This is the same script an admin would run by hand, driven from here so the
-    fleet can be walked one node at a time instead of somebody sshing to four
-    boxes and hoping they all end up the same.
+    Runs the same installer an admin would, so the manager can walk the
+    fleet one node at a time.  Detached, since a build takes 10 to 20
+    minutes and a dropped connection must not interrupt it.
 
-    It runs detached and writes progress to a file.  A build takes ten to
-    twenty minutes, which is far longer than any request should wait, and a
-    dropped connection halfway through a compile must not leave a box with half
-    an nginx.
-
-    Nothing about the caller's input becomes a shell command.  Every value is
-    checked here first, the versions against a version shaped pattern and the
-    WAF switch against the two strings it is allowed to be, then passed as
-    environment variables, which is exactly how the installer expects to be
-    told.  They go into an environment file the unit reads, so no part of the
-    request is ever parsed as a shell word.
+    Inputs are validated here and passed as environment variables (through
+    an environment file under systemd), never as shell words.
     """
     if not INSTALLER.is_file():
         raise AgentError(
@@ -2315,12 +1976,8 @@ def v_nginx_upgrade(req):
         if value and not version_re.match(str(value)):
             raise AgentError(f"{value!r} is not a {label} version number", "bad_request")
 
-    # The WAF module.  Sent on every rebuild once a fleet has one, because the
-    # installer rebuilds from the list it is given rather than from what is
-    # already on the box: leave this out of a later version upgrade and nginx
-    # comes back without the module, with every site that had the WAF on now
-    # failing its config test.  So the manager always says which it wants, and
-    # absent means off.
+    # The installer builds exactly the modules it is told, so the manager
+    # sends this on every rebuild; absent means off.
     with_modsecurity = req.get("with_modsecurity")
     if with_modsecurity is None:
         with_modsecurity = False
@@ -2335,10 +1992,7 @@ def v_nginx_upgrade(req):
     env["WITH_MODSECURITY"] = "1" if with_modsecurity else "0"
 
     if _have_systemd():
-        # Hand it to systemd.  The versions go in an environment file rather
-        # than on a command line, so nothing the caller sent is ever parsed as
-        # a shell word, and both have already been checked against a version
-        # shaped pattern above.
+        # Values were validated above and go in an environment file.
         REBUILD_ENV.parent.mkdir(parents=True, exist_ok=True)
         atomic_write(
             REBUILD_ENV,
@@ -2346,15 +2000,11 @@ def v_nginx_upgrade(req):
             mode=0o600,
         )
 
-        # Last build's outcome goes before this one is asked for, or the first
-        # status call would read the old result and report the new build as
-        # already finished.
+        # Clear the old result or status would report this build finished.
         REBUILD_RESULT.unlink(missing_ok=True)
 
-        # Written before the unit is asked to start, so that a build which
-        # begins between these two lines still counts as ours.  The other way
-        # round leaves a window where a finished build looks like it was never
-        # asked for.
+        # Write the marker before starting the unit, so a fast build is
+        # never mistaken for one we did not ask for.
         atomic_write(
             REBUILD_MARKER,
             json.dumps({
@@ -2370,8 +2020,7 @@ def v_nginx_upgrade(req):
         log.warning("starting an nginx rebuild through %s: %s",
                     REBUILD_UNIT, env or "same versions, module change")
 
-        # --no-block, because a build is twenty minutes and this call has to
-        # come back now.  Failures show up through the status verb.
+        # --no-block: return now; failures show up through the status verb.
         out = run(["systemctl", "start", "--no-block", REBUILD_UNIT])
         if out["rc"] != 0:
             REBUILD_MARKER.unlink(missing_ok=True)
@@ -2383,7 +2032,7 @@ def v_nginx_upgrade(req):
 
         return {"started": True, "versions": env, "unit": REBUILD_UNIT}
 
-    # No systemd.  Nothing is sandboxing us either, so the old way still works.
+    # No systemd, so no sandbox either: run the build ourselves.
     _write_upgrade_state(
         state="running",
         started=datetime.now(timezone.utc).isoformat(),
@@ -2395,9 +2044,7 @@ def v_nginx_upgrade(req):
         error=None,
     )
 
-    # Detached, with output to a log the manager can read back.  setsid means
-    # it survives this connection going away, which it will, because nobody is
-    # holding a socket open for twenty minutes.
+    # setsid so the build outlives this connection.
     UPGRADE_LOG.parent.mkdir(parents=True, exist_ok=True)
 
     wrapper = f"""#!/usr/bin/env bash
@@ -2487,8 +2134,7 @@ def v_nginx_upgrade_status(req):
         except OSError:
             pass
 
-    # What is actually installed right now, so the manager can tell whether the
-    # build changed anything rather than trusting the exit code alone.
+    # The installed version, so the manager need not trust the exit code.
     version = None
     if NGINX_BIN.is_file():
         out = run([str(NGINX_BIN), "-v"])
@@ -2504,23 +2150,17 @@ def v_nginx_revert(req):
     """
     Put the previous nginx back.
 
-    The installer keeps a snapshot of the binary and config before every build,
-    and this is its revert path.  It is the way out when a new build starts but
-    misbehaves.
+    Uses the snapshot of binary and config the installer takes before every
+    build.
     """
     if not INSTALLER.is_file():
         raise AgentError(f"no installer script at {INSTALLER}", "missing_installer")
 
     if _have_systemd():
-        # Same reasoning as the build: a revert copies a binary back over
-        # /usr/sbin/nginx, which this agent's sandbox forbids.  Run it as a unit.
-        # No --no-block here, because a revert is quick and the caller wants to
-        # know whether it worked.
-        # Where the log ends before we start, so what comes back is what the
-        # revert said and not the tail of the last build.  The first version
-        # returned the last forty lines of the file, which on a box that had
-        # just built something was forty lines about a successful build sitting
-        # under a failure, and the actual reason was nowhere to be seen.
+        # Runs as a unit for the same sandbox reason as the build.  Blocking,
+        # since a revert is quick and the caller wants the outcome.
+        # Remember where the log ends so we return only what the revert
+        # wrote, not the tail of the last build.
         before = UPGRADE_LOG.stat().st_size if UPGRADE_LOG.is_file() else 0
 
         out = run(["systemctl", "start", REVERT_UNIT], timeout=300)
@@ -2555,13 +2195,9 @@ def v_acme_register_test(req):
     """
     Register an account against an ACME directory, and keep nothing.
 
-    Asks for no certificate, so nothing is issued and nothing is spent.  All
-    this proves is that the directory answers and that the external account
-    credentials are accepted, which is the half that fails quietly months later
-    if it is wrong.
-
-    Uses its own config directory so a failed attempt cannot disturb the
-    accounts certbot is already using for real certificates.
+    Issues nothing.  Proves the directory answers and the external account
+    credentials are accepted.  Uses a throwaway config directory so certbot's
+    real accounts are untouched.
     """
     import shutil
     import tempfile
@@ -2600,8 +2236,7 @@ def v_acme_register_test(req):
         result = run(cmd, timeout=90)
         if result["rc"] == 0:
             return {"ok": True}
-        # certbot puts the useful sentence at the end, and the rest is noise
-        # nobody can act on.
+        # The useful part of certbot's output is at the end.
         output = ((result["stderr"] or "") + (result["stdout"] or "")).strip()
         tail = [ln for ln in output.splitlines() if ln.strip()][-4:]
         return {"ok": False, "error": "\n".join(tail) or "registration was refused"}
@@ -2615,26 +2250,17 @@ def v_acme_register_test(req):
 # The tunnel
 # ==============================================================================
 #
-# WireGuard so a backend can be reached without a public address.  The agent
-# owns it for the same reason it owns nginx: bringing an interface up and
-# writing firewall rules needs root, and the manager does not have it.
+# WireGuard, so a backend can be reached without a public address.  Managed
+# here because it needs root.  Two fixed rules:
 #
-# Two rules run through all of this and neither is negotiable:
-#
-#   * The private key is generated here and never leaves.  Only the public half
-#     is ever reported.
-#   * AllowedIPs for a peer is that peer's single address and nothing wider.  A
-#     tunnel that carries a route to anywhere else is a tunnel that has quietly
-#     become part of somebody's network.
+#   * The private key is generated here and never leaves; only the public
+#     half is reported.
+#   * A peer's AllowedIPs is its single address, never a wider range.
 
 TUNNEL_IF = "nfm0"
-# /etc/wireguard, because that is where the tools expect it.
-#
-# Not a style choice.  Ubuntu ships enforcing AppArmor profiles for wg and
-# wg-quick that only permit reading configs from this directory.  Keeping the
-# config under /etc/nginx meant wg-quick was refused with "Permission denied"
-# on a file root owned and could read perfectly well by hand, which reads like
-# a file permission problem and is not one.
+# Required: Ubuntu's AppArmor profiles for wg and wg-quick only allow configs
+# from /etc/wireguard.  Elsewhere they fail with a misleading "Permission
+# denied".
 TUNNEL_DIR = Path("/etc/wireguard")
 
 
@@ -2642,8 +2268,8 @@ def _wg_available():
     return shutil.which("wg") is not None
 
 
-# Installing what the tunnel needs, handed to systemd for the same reason the
-# nginx build is.  See nfm-tunnel-install.service.
+# Installed through its own unit, like the nginx build.  See
+# nfm-tunnel-install.service.
 TUNNEL_INSTALL_UNIT = "nfm-tunnel-install.service"
 TUNNEL_INSTALL_SCRIPT = Path("/opt/nfm-tunnel-installer.sh")
 TUNNEL_INSTALL_RESULT = Path("/run/nginxmgr/tunnel-install.result")
@@ -2652,11 +2278,8 @@ TUNNEL_INSTALL_LOG = Path("/var/log/nginx-fleet-manager-tunnel-install.log")
 
 def _tunnel_ready():
     """
-    Whether this node can actually run the tunnel, asked rather than assumed.
-
-    The script is the one place that knows what the answer depends on, so it
-    gets asked instead of this guessing from the presence of a binary.  A node
-    with the tools and no datapath looks installed and carries nothing.
+    Whether this node can run the tunnel, per the installer's check.  Having
+    the wg binary is not enough; the node also needs a datapath.
     """
     if not TUNNEL_INSTALL_SCRIPT.is_file():
         return {"ready": _wg_available(), "detail": "", "checked": False}
@@ -2670,9 +2293,7 @@ def v_tunnel_install(req):
     """
     Install what the tunnel needs on this node.
 
-    Starts the unit and returns.  Installing takes as long as a package
-    manager takes, which is longer than a request should wait, so the GUI asks
-    how it is going rather than holding the connection open.
+    Starts the unit and returns; the GUI polls the status verb.
     """
     if not _have_systemd():
         raise AgentError(
@@ -2692,8 +2313,7 @@ def v_tunnel_install(req):
     if active:
         return {"ok": True, "started": False, "running": True}
 
-    # The old result, gone before the new run, so a stale one cannot be read as
-    # this one finishing instantly.
+    # Clear the old result so it is not read as this run finishing.
     try:
         TUNNEL_INSTALL_RESULT.unlink()
     except OSError:
@@ -2740,9 +2360,8 @@ def v_tunnel_key(req):
     """
     This node's tunnel key pair, made once and kept.
 
-    Reports only the public half.  The private half is written with no group or
-    other access and stays on this box, so nothing that reads the API or the
-    database can ever obtain it.
+    Reports only the public half.  The private key is 0600 and never leaves
+    this box.
     """
     if not _wg_available():
         raise AgentError("wireguard is not installed on this node", "unsupported")
@@ -2768,10 +2387,8 @@ def v_tunnel_apply(req):
     """
     Write the interface and the peers, then bring it up.
 
-    Rewritten whole every time rather than patched, for the same reason the
-    nginx config is: a file assembled from what is wanted now cannot drift from
-    what was asked for, and a half applied peer list is a machine that is
-    reachable when it should not be.
+    Rewritten whole every time rather than patched, so the file cannot
+    drift from what was asked for.
     """
     if not _wg_available():
         raise AgentError("wireguard is not installed on this node", "unsupported")
@@ -2791,25 +2408,10 @@ def v_tunnel_apply(req):
     if not private.exists():
         v_tunnel_key({})
 
-    # The key goes in the file, not in a PostUp.
-    #
-    # PostUp looks tidier and is wrong.  wg-quick runs PostUp when the
-    # interface comes up, so the key is set once and everything works.  Every
-    # change after that is a reload, and reload is
-    #
-    #   wg syncconf %i <(wg-quick strip %i)
-    #
-    # where strip removes exactly the wg-quick only lines, PostUp among them.
-    # syncconf then applies what is left as the whole truth about the
-    # interface, and what is left has no key, so it takes the key away.
-    #
-    # Nothing complains.  The interface stays up, keeps its address, keeps its
-    # peers and keeps listening.  It simply drops every handshake, because it
-    # has no key to answer with, and there is no counter or log line anywhere
-    # that says so.  Every tunnel was dead from its first config change
-    # onwards, and both ends looked perfect.
-    #
-    # PrivateKey survives strip, so it survives reload.
+    # The key must be in the file, not set by PostUp.  wg-quick's reload runs
+    # `wg syncconf %i <(wg-quick strip %i)`, and strip drops PostUp, so the
+    # key would be removed on the first reload.  The interface then stays up
+    # but silently drops every handshake.  PrivateKey survives strip.
     key_text = private.read_text().strip()
     lines = [
         "# Generated by Failover LB.  Do not edit this by hand.",
@@ -2832,14 +2434,10 @@ def v_tunnel_apply(req):
             f"PublicKey = {key}",
         ]
 
-        # The pre-shared key, when this workload has one.
-        #
-        # It is WireGuard's own answer to a quantum computer: 32 bytes mixed
-        # into the handshake as an extra symmetric input, so breaking
-        # Curve25519 is no longer enough on its own to read traffic somebody
-        # recorded today.  Optional per peer on purpose, because both ends have
-        # to hold the same value and adding one to a workload that is already
-        # connected would drop it until the far end is updated too.
+        # Optional pre-shared key, a symmetric input to the handshake that
+        # protects recorded traffic if Curve25519 is ever broken.  Per peer,
+        # since both ends need it and adding one drops a connected peer
+        # until the far end is updated.
         psk = str(peer.get("psk") or "").strip()
         if psk:
             if not re.fullmatch(r"[A-Za-z0-9+/]{42,44}=", psk):
@@ -2847,8 +2445,7 @@ def v_tunnel_apply(req):
             lines.append(f"PresharedKey = {psk}")
 
         lines += [
-            # One address, never a range.  This is what keeps a workload from
-            # being able to speak for anything but itself.
+            # One address, never a range, so a peer speaks only for itself.
             f"AllowedIPs = {peer_address}/32",
             "",
         ]
@@ -2857,23 +2454,11 @@ def v_tunnel_apply(req):
     conf.write_text("\n".join(lines))
     os.chmod(conf, 0o600)
 
-    # Hand the interface to systemd rather than bringing it up from here.
+    # Use wg-quick@.service rather than running wg-quick ourselves.  Under
+    # our NoNewPrivileges the kernel refuses AppArmor profile transitions, so
+    # a child wg-quick cannot exec ip or wg ("Operation not permitted").
     #
-    # wireguard-tools ships wg-quick@.service, so the OS already knows how to
-    # own this.  Driving wg-quick as a child of the agent does not work and
-    # cannot be made to: the agent runs with NoNewPrivileges, and under that
-    # flag the kernel refuses AppArmor profile transitions, so a confined
-    # wg-quick cannot exec ip or wg at all.  It fails with "Operation not
-    # permitted" on running a binary, which reads like a missing capability and
-    # is not one.
-    #
-    # Asking systemd to start the unit sidesteps all of it.  The unit runs in
-    # its own context, unconfined by this service's sandbox, which is the same
-    # reason the nginx build runs from its own unit rather than from here.
-    #
-    # reload rather than restart when it is already up: wg-quick's reload does
-    # a syncconf, so adding one workload does not drop every tunnel that was
-    # already working.
+    # Reload when already up: it does a syncconf, so existing tunnels stay up.
     unit = f"wg-quick@{TUNNEL_IF}.service"
     active = run(["systemctl", "is-active", "--quiet", unit], timeout=15)["rc"] == 0
 
@@ -2893,12 +2478,8 @@ def v_tunnel_apply(req):
             f"systemd could not bring the tunnel up: {detail or 'no detail'} "
             f"{(status['stdout'] or '').strip()[-300:]}", "failed")
 
-    # Prove the interface can actually answer, rather than assuming it.
-    #
-    # An interface with no key is up, addressed, listening and carrying its
-    # full peer list, and it drops every handshake in silence.  It is the
-    # exact shape of a tunnel that works, which is why it went unnoticed for a
-    # day.  A cheap check here turns it into a failed apply with a reason.
+    # An interface without a key looks healthy but drops every handshake, so
+    # check for one and fail the apply if it is missing.
     shown = run(["wg", "show", TUNNEL_IF, "public-key"], timeout=15)
     if shown["rc"] != 0 or not shown["stdout"].strip() or \
             shown["stdout"].strip() == "(none)":
@@ -2945,26 +2526,19 @@ def v_tunnel_down(req):
 # The country database
 # ==============================================================================
 #
-# Blocking by country needs a MaxMind format database on every node, and a node
-# without one refuses the whole config, so this is the half that puts it there.
+# Country blocking needs a MaxMind format database on every node; without one
+# the config is refused.  Sources: db-ip's free monthly database (no account)
+# or MaxMind GeoLite2 (account id and license key).  Same format either way.
 #
-# Two sources, and the difference is an account.  db-ip publish a free country
-# database every month and ask for nothing; MaxMind's GeoLite2 is free and
-# wants an account id and a licence key.  Both are the same format once
-# downloaded, so nothing past this function cares which was used.
-#
-# The manager never sends a URL or a path.  It sends the name of a source and,
-# for MaxMind, the credentials, and everything else is decided here.  A verb
-# that took a URL and a destination would be a way to write any file anywhere
-# as root, which is the one thing this agent exists not to be.
+# The manager only sends a source name and credentials, never a URL or path,
+# so this verb cannot be used to write arbitrary files as root.
 
 GEOIP_DIR = Path("/usr/share/GeoIP")
 GEOIP_FILE = GEOIP_DIR / "nfm-country.mmdb"
 GEOIP_SOURCE_FILE = GEOIP_DIR / ".nfm-source"
 
-# What a MaxMind format file has near its end.  Checked before anything is put
-# in place, because half a download is still a file, and nginx meeting one
-# refuses to start.
+# Found near the end of a valid MaxMind file.  Checked before install, since
+# a truncated file stops nginx from starting.
 MMDB_MARKER = b"\xab\xcd\xefMaxMind.com"
 
 GEOIP_MAX_BYTES = 128 * 1024 * 1024
@@ -3019,9 +2593,8 @@ def _geoip_extract(data, source):
 def _geoip_url(source, payload):
     """Where to get it, worked out here rather than taken from the caller."""
     if source == "dbip":
-        # Published monthly, on the first.  Early in the month the new one may
-        # not be up yet, so the previous month is tried as well: a database a
-        # few weeks old is worth far more than a failed install.
+        # Published monthly.  Early in the month the new one may not be up,
+        # so fall back to last month's.
         now = datetime.now(timezone.utc)
         months = [(now.year, now.month)]
         months.append((now.year - 1, 12) if now.month == 1
@@ -3045,19 +2618,16 @@ def v_geoip_install(req):
     """
     Put a country database on this node, from one of two known sources.
 
-    Written to a temporary file beside the real one and renamed into place, so
-    a download that dies half way leaves the old database serving rather than a
-    truncated one that stops nginx.
+    Written to a temp file and renamed into place, so a failed download
+    leaves the old database in use.
     """
     payload = req.get("payload") or req
     source = str(payload.get("source") or "").strip()
     if source not in GEOIP_HOSTS:
         raise AgentError("the source has to be dbip or maxmind", "invalid")
 
-    # The one folder outside /etc and /var this agent writes, and the sandbox
-    # only has a hole for it if the unit file is current.  An older unit gives a
-    # read only filesystem here, which as a bare OSError reads like a broken
-    # disk rather than an agent that needs upgrading.
+    # Only writable with a current unit file.  Probe it so an old unit gets a
+    # clear "upgrade the agent" error rather than a bare OSError.
     try:
         GEOIP_DIR.mkdir(parents=True, exist_ok=True)
         probe = GEOIP_DIR / ".nfm-write-test"
@@ -3084,8 +2654,7 @@ def v_geoip_install(req):
 
     mmdb = _geoip_extract(data, source)
 
-    # Is this really a database.  The marker sits near the end of the file, so
-    # a truncated download fails here rather than at the next nginx start.
+    # A truncated download fails here rather than at the next nginx start.
     if MMDB_MARKER not in mmdb[-200000:]:
         raise AgentError("what came back is not a MaxMind format database",
                          "failed")
@@ -3109,15 +2678,9 @@ def v_geoip_install(req):
 # The OWASP Core Rule Set
 # ==============================================================================
 #
-# The rules are the half of a WAF that people actually mean when they say
-# ModSecurity.  Same problem as the country database: they have to be on every
-# node or the node without them refuses the whole config, and telling somebody
-# to go and unpack a tarball on each box by hand is how a feature ends up
-# switched on in the GUI and broken in the fleet.
-#
-# So the same shape is used deliberately.  The manager names a track and the
-# agent works out the version, the URL and the path.  A verb that took a URL
-# would be a way to unpack any tarball anywhere as root.
+# Like the country database, the rules must be on every node or the config
+# is refused.  The manager names a track; the agent picks the version, URL
+# and path, so this verb cannot unpack arbitrary tarballs as root.
 
 CRS_DIR = NGINX_PREFIX / "modsecurity"
 CRS_LINK = CRS_DIR / "crs"
@@ -3128,16 +2691,13 @@ CRS_HOSTS = {"api.github.com", "github.com", "objects.githubusercontent.com",
              "release-assets.githubusercontent.com"}
 CRS_MAX_BYTES = 32 * 1024 * 1024
 
-# Which series is the long term support one.  CRS 4.25 was the first LTS line
-# for CRS 4, and there is no field in the API that says so, so it lives here as
-# a constant and needs bumping when the project names a new one.  Better a
-# constant somebody can find than a guess made at run time.
+# The LTS series.  The API does not mark it, so bump this when the CRS
+# project names a new one.  4.25 was the first LTS line for CRS 4.
 CRS_LTS_SERIES = (4, 25)
 CRS_TRACKS = ("lts", "latest")
 
-# Proof that what came back is really a rule set.  This file is the first thing
-# CRS loads and has been in every 3.x and 4.x release, so a tarball without it
-# is not something to point nginx at.
+# The first file CRS loads, present in every 3.x and 4.x release.  Its
+# absence means the download is not a rule set.
 CRS_SENTINEL = "rules/REQUEST-901-INITIALIZATION.conf"
 
 
@@ -3175,11 +2735,9 @@ def _crs_pick(track):
     """
     The newest release on the track, and the asset to fetch for it.
 
-    Only the -minimal tarball is a real asset.  The plain name exists in the
-    release as a signature only, since the full source tarball is the one
-    GitHub generates, and asking for it by name gets a 404.  Minimal is what is
-    wanted anyway: the rules and the example setup file, without the tests and
-    the tooling.
+    Only the -minimal tarball is a real release asset (the full one is
+    GitHub generated and 404s by name).  It has the rules and example setup
+    without tests and tooling, which is all we need.
     """
     releases = json.loads(_crs_fetch(CRS_RELEASES, timeout=60).decode("utf-8"))
 
@@ -3212,11 +2770,8 @@ def _crs_unpack(data, into):
     """
     Unpack the tarball, throwing away the version folder it is wrapped in.
 
-    Every member is checked before anything is written.  This runs as root and
-    a tarball is a list of paths somebody else chose, so a name with .. in it,
-    an absolute path, or a symlink pointing out of the tree would be a way to
-    write anywhere on the box.  Refused rather than sanitised, because a rule
-    set that needs sanitising is not one to be running.
+    Every member is checked first, since this runs as root: links, ..,
+    absolute paths and special files are refused outright, not sanitized.
     """
     import io
     import tarfile
@@ -3231,8 +2786,7 @@ def _crs_unpack(data, into):
                 raise AgentError("the rule set tarball contains something that "
                                  "is not a file or a folder, refused", "refused")
 
-            # Drop the leading coreruleset-x.y.z/ so the layout is the same
-            # whatever the version is.
+            # Drop the leading coreruleset-x.y.z/ folder.
             parts = PurePosixPath(member.name).parts
             if len(parts) < 2:
                 continue
@@ -3254,11 +2808,8 @@ def v_crs_install(req):
     """
     Put the rule set on this node, from the track we are told to follow.
 
-    Unpacked beside the live one and swapped in by moving a symlink, which is a
-    single atomic step.  Replacing the folder in place would leave a window
-    where half the rules are the old ones and half the new, and nginx reading
-    that window fails its config test for reasons nobody could reproduce
-    afterwards.
+    Unpacked beside the live one and swapped in with an atomic symlink
+    replace, so nginx never sees a mix of old and new rules.
     """
     payload = req.get("payload") or req
     track = str(payload.get("track") or "lts").strip().lower()
@@ -3287,8 +2838,7 @@ def v_crs_install(req):
             raise AgentError(f"only {len(rules)} rule files came back, which is "
                              "not a whole rule set", "failed")
 
-        # Config, read by the nginx master while it is still root.  Same
-        # reasoning as everything else we stage.
+        # Config read by the nginx master as root.  See _staged_mode.
         for path in staging.rglob("*"):
             os.chmod(path, 0o750 if path.is_dir() else 0o640)
 
@@ -3298,8 +2848,7 @@ def v_crs_install(req):
     finally:
         shutil.rmtree(staging, ignore_errors=True)
 
-    # The swap.  os.replace over a symlink is atomic, so nginx either sees the
-    # whole old rule set or the whole new one and never a mixture.
+    # Atomic swap of the symlink.
     temporary = CRS_DIR / ".crs.swap"
     if temporary.is_symlink() or temporary.exists():
         temporary.unlink()
@@ -3313,10 +2862,8 @@ def v_crs_install(req):
         "rules": len(rules),
     }))
 
-    # Keep the one before, and nothing older.  A rule set is a few hundred
-    # kilobytes so this is not about disk; it is so a bad update can be put
-    # back by moving the symlink rather than downloading again from a box that
-    # may be the reason the update went wrong.
+    # Keep the previous version so a bad update can be undone by moving the
+    # symlink back, without downloading again.
     keep = {target.name, f"crs-{version}"}
     olds = sorted((p for p in CRS_DIR.glob("crs-*") if p.is_dir()),
                   key=lambda p: p.stat().st_mtime, reverse=True)
@@ -3333,25 +2880,18 @@ def v_crs_install(req):
 # What the rules actually caught
 # ==============================================================================
 #
-# ModSecurity writes one JSON object per transaction it thought was worth
-# recording.  This reads them back, groups them, and hands the manager
-# something small enough to put on a page.
-#
-# The grouping happens here rather than in the manager on purpose.  A site
-# under a scan writes tens of thousands of these, and shipping them all across
-# the cluster so the far end can count them is a way to make one busy site into
-# a fleet wide problem.
+# ModSecurity writes one JSON object per recorded transaction.  We group them
+# here, not in the manager, because a scanned site writes tens of thousands
+# and shipping them all across the cluster would be expensive.
 
 WAF_LOG_DIR = Path("/var/log/nginx")
 
-# How much of the log to read, and how many groups to hand back.  Both are
-# ceilings rather than targets: nearly every read is far smaller.
+# Upper limits on how much log to read and how many groups to return.
 WAF_READ_BYTES = 24 * 1024 * 1024
 WAF_MAX_GROUPS = 500
 
-# When the log is big enough to do something about.  A site being scanned in
-# watching mode writes steadily, and filling the disk on a load balancer is a
-# worse outage than anything the firewall prevents.
+# Log size at which we act.  A scanned site in watching mode writes steadily,
+# and a full disk on a load balancer is worse than what the WAF prevents.
 WAF_LOG_CAP = int(os.environ.get("NFM_WAF_LOG_CAP", 64 * 1024 * 1024))
 
 
@@ -3370,8 +2910,8 @@ def _waf_when(stamp):
     """
     The audit log's timestamp as epoch seconds, or None.
 
-    ModSecurity writes "Sun Aug 16 12:48:04 2026", which sorts alphabetically
-    into nonsense, so it has to be parsed rather than compared as text.
+    ModSecurity writes "Sun Aug 16 12:48:04 2026", which does not sort as
+    text.
     """
     import calendar
 
@@ -3385,21 +2925,12 @@ def v_waf_hits(req):
     """
     What fired on this node, grouped by rule and path.
 
-    `since` and `until` bound it to a learning session.  Filtering here rather
-    than in the manager means a session that ran for ten minutes does not have
-    to carry a week of unrelated traffic across the wire to be thrown away at
-    the far end.
+    `since` and `until` bound it to a learning session, filtered here to
+    avoid shipping unrelated traffic.  `until` lets a finished session still
+    be reviewed.
 
-    `until` exists so a session that has finished can still be looked at.
-    Without it the only readable window was "since the running session began",
-    so stopping a session made its own evidence unreachable even though it was
-    still sitting in this file.  Somebody who stopped watching before saving a
-    profile had done the work and could not get at it.
-
-    Every client address that produced each group comes back with it, because
-    deciding whether a hit is a false positive is exactly the question of who
-    sent it, and a group that mixes a tester with somebody else must be
-    visible as such rather than averaged into looking safe.
+    Client addresses come back with each group, since judging a false
+    positive depends on who sent it.
     """
     payload = req.get("payload") or req
     path = _waf_log(payload.get("site"))
@@ -3414,9 +2945,7 @@ def v_waf_hits(req):
 
     size = path.stat().st_size
 
-    # The tail, not the head.  An old log that has grown past the ceiling has
-    # its interesting end at the bottom, and reading the first 24MB of it would
-    # answer with last month.
+    # Read the tail; the recent entries are at the end.
     with path.open("rb") as handle:
         if size > WAF_READ_BYTES:
             handle.seek(size - WAF_READ_BYTES)
@@ -3456,9 +2985,8 @@ def v_waf_hits(req):
             if not rule_id:
                 continue
 
-            # The path without its query string.  A rule firing on the same
-            # page with fifty different query strings is one false positive,
-            # not fifty, and grouping on the whole uri would bury it.
+            # Group on the path without the query string, so one false
+            # positive does not show up as fifty.
             bare = uri.split("?", 1)[0]
             key = (rule_id, bare)
 
@@ -3511,24 +3039,13 @@ def _surface_template(path):
     """
     Collapse the parts of a path that are an identifier into a wildcard.
 
-    Learning sees what somebody exercised.  On an application with a path per
-    object that is /user/12345/profile and nothing at all about the user
-    created tomorrow, so a positive model built from raw paths refuses every
-    object made after the testers went home.  The whole feature is unusable
-    without this.
+    Without this, a positive model learned from /user/12345/profile would
+    refuse every object created after learning ended.
 
-    Deliberately conservative, because the cost of the two mistakes is not the
-    same.  Collapsing too little leaves extra rows somebody can merge by hand
-    on the profiles page.  Collapsing too much silently widens what is allowed,
-    and nobody reviewing a list of paths would spot it.  So only three shapes
-    are treated as identifiers and everything else stays literal:
-
-      * all digits, which is the common case
-      * a uuid
-      * a long hex string, which is what a hash or a token looks like
-
-    A word is never collapsed, however object-like it looks.  /user/profile
-    and /user/settings are two pages, not one page with a variable in it.
+    Deliberately conservative: collapsing too little leaves rows to merge
+    by hand, while collapsing too much silently widens what is allowed.  Only
+    all digits, UUIDs and long hex strings count as identifiers; words are
+    never collapsed.
     """
     out = []
     for part in str(path).split("/"):
@@ -3549,23 +3066,15 @@ def _surface_template(path):
 
 def v_waf_surface(req):
     """
-    What the application actually is, as seen on this node.
+    Paths and methods used on this node, for building a positive model
+    (waf_hits answers the negative model question from the same file).
 
-    The other question the audit log can answer.  `waf_hits` asks which rules
-    fired, which is what a negative model needs.  This asks which paths and
-    methods were used at all, which is what a positive model needs, and the two
-    read the same file.
+    Only meaningful during a surface session, when the renderer enables full
+    audit logging for tester addresses.  Otherwise the log holds only rule
+    hits.
 
-    It only sees anything because the renderer switches full audit logging on
-    for the tester addresses while a surface session runs.  Outside that window
-    the log holds only transactions where a rule fired, so this would answer
-    with the shape of the attacks rather than the shape of the application.
-
-    **No request bodies, ever.**  The audit log is written without part I on
-    purpose, because a body is where passwords and card numbers are.  So this
-    learns paths and methods and does not learn parameter names, and the
-    honest version of that limit is written on the page rather than worked
-    around here.
+    The audit log never includes request bodies (no part I), since that is
+    where passwords live, so parameter names are not learned.
     """
     payload = req.get("payload") or req
     path = _waf_log(payload.get("site"))
@@ -3615,16 +3124,10 @@ def v_waf_surface(req):
 
         transactions += 1
 
-        # The path only.  A query string is not part of the surface: /search?q=a
-        # and /search?q=b are one page, and treating them as two would produce a
-        # list nobody can read and a rule set that still refuses the third
-        # search anybody does.
+        # Query strings are not part of the surface.
         bare = uri.split("?", 1)[0].split("#", 1)[0]
 
-        # One trailing slash is not a different page.  nginx hands back both
-        # forms depending on how somebody linked it, and a positive model that
-        # allowed /about and refused /about/ would be reported as broken within
-        # the hour.
+        # /about and /about/ are the same page.
         if len(bare) > 1 and bare.endswith("/"):
             bare = bare.rstrip("/") or "/"
 
@@ -3677,10 +3180,7 @@ def v_waf_surface(req):
 #
 #   1.2.3.4 - - [16/Aug/2026:21:14:59 +0000] "POST /users/sign_in HTTP/2.0" 200 42 "..." "..."
 #
-# Parsed with a regular expression rather than split(), because the request and
-# the user agent are quoted fields that contain spaces, and a split on
-# whitespace puts the method, the path and the protocol in different places
-# depending on what somebody sent.
+# A regex rather than split(), since quoted fields contain spaces.
 _ACCESS_LINE = re.compile(
     r'^(?P<addr>\S+) \S+ \S+ \[(?P<when>[^\]]+)\] '
     r'"(?P<method>[A-Z]+) (?P<path>[^ "]*)[^"]*" (?P<status>\d{3}) '
@@ -3705,9 +3205,8 @@ def _access_when(stamp):
     """
     The timestamp on an access log line, as a unix time.
 
-    nginx writes local time with an offset, and the offset is the part that
-    matters: a box on anything but UTC would otherwise report every failure as
-    hours old and fall outside every window this feature has.
+    nginx writes local time with an offset, which must be honored on
+    non-UTC boxes.
     """
     try:
         return datetime.strptime(
@@ -3720,18 +3219,11 @@ def v_login_failures(req):
     """
     Failed logins for one site, grouped by the address that made them.
 
-    Reads the access log rather than anything the application tells us, which
-    fixes what this can and cannot see.  It gets the address, the path, the
-    method and the status.  **It never sees a username or a password**, so it
-    cannot say which accounts were targeted, and that limit is worth stating
-    rather than working around: making it see usernames would mean reading
-    request bodies, which is where the passwords are.
+    Reads the access log only: address, path, method and status.  It never
+    sees usernames, since that would mean reading request bodies.
 
-    Which statuses count as a failure comes from the caller, because there is
-    no universal answer.  A form that re-renders itself with "wrong password"
-    answers 200 and answers 302 when the login worked, so for that application
-    200 is the failure.  An API answers 401.  Guessing here would report every
-    successful login on half the world's applications as an attack.
+    The caller says which statuses mean failure, because it varies: a form
+    may answer 200 on failure and 302 on success, while an API answers 401.
     """
     payload = req.get("payload") or req
     path = _access_log(payload.get("site"))
@@ -3827,11 +3319,8 @@ def v_waf_hits_clear(req):
     """
     Throw away what was learned on this node, for one site.
 
-    Truncated in place rather than removed.  nginx workers are holding this
-    file open, and deleting it leaves them writing to an inode nobody can read
-    any more: the page goes quiet, the disk does not, and the reason is
-    invisible until somebody thinks to check for a deleted file still held
-    open.
+    Truncated rather than removed: nginx workers hold the file open, and
+    deleting it would leave them writing to an unlinked inode.
     """
     payload = req.get("payload") or req
     path = _waf_log(payload.get("site"))
@@ -3851,18 +3340,10 @@ def _waf_rotate_one(path, cap, keep_history=True):
     """
     Rotate one audit log, keeping every open descriptor valid.
 
-    **Renaming is not an option here and that is the whole design.**  The nginx
-    master and every worker hold this file open for writing, so a rename leaves
-    them all writing into the rotated file: the new one stays empty, the hits
-    page goes quiet, and the disk carries on filling.  nginx's own logs survive
-    a rename because a USR1 makes it reopen them, and that does not help here,
-    libmodsecurity opens the audit log itself, not nginx's log module, so the
-    signal never reaches it.
-
-    So it is copy and truncate, which is what logrotate calls copytruncate and
-    exists for exactly this case.  It has one known cost: anything written
-    between the copy finishing and the truncate landing is lost.  For an audit
-    log that is a few lines, and losing a few lines beats losing the disk.
+    Copy and truncate, never rename.  libmodsecurity opens the audit log
+    itself, so USR1 does not make nginx reopen it, and after a rename every
+    process would keep writing to the rotated file.  Lines written between
+    the copy and the truncate are lost, which is acceptable here.
     """
     size = path.stat().st_size
     if size < cap:
@@ -3870,17 +3351,15 @@ def _waf_rotate_one(path, cap, keep_history=True):
 
     kept = path.with_name(path.name + ".1.gz")
 
-    # Copying doubles the space this log uses until the truncate lands, and we
-    # are rotating precisely because it got big.  If the disk is too tight to
-    # hold a copy, throw the history away rather than filling the disk in the
-    # act of trying not to.
+    # The copy needs extra space.  If the disk is too tight, drop the history
+    # rather than fill the disk.
     if keep_history:
         try:
             free = shutil.disk_usage(str(path.parent)).free
         except OSError:
             free = 0
-        # A tenth, since it compresses hard, plus a floor so a nearly full disk
-        # never gets a copy at all.
+        # A fifth of the size (it compresses well), with a floor so a nearly
+        # full disk never gets a copy.
         if free < max(size // 5, 256 * 1024 * 1024):
             keep_history = False
 
@@ -3913,10 +3392,7 @@ def v_waf_log_rotate(req):
     """
     Rotate any audit log past its cap.  Cheap when there is nothing to do.
 
-    Called on a schedule rather than left to a person.  A site being scanned in
-    watching mode writes steadily and nobody is watching the disk on a load
-    balancer until it is full, and filling it is a worse outage than anything
-    the firewall prevents.
+    Called on a schedule, since nobody watches the disk until it is full.
     """
     payload = req.get("payload") or req
     cap = payload.get("cap")
@@ -3940,9 +3416,7 @@ def v_waf_log_status(req):
     """
     How big every site's audit log is, and whether any is past its cap.
 
-    A site under a scan in watching mode writes steadily, and filling the disk
-    on a load balancer is a worse outage than anything the firewall prevents.
-    Nothing is deleted here: this reports, and clearing is somebody's decision.
+    Report only; nothing is deleted here.
     """
     logs = []
     total = 0
@@ -3974,14 +3448,9 @@ def v_crs_rule_ids(req):
     """
     Every rule id the installed rule set defines.
 
-    So an exclusion can be checked against the rules that are actually there.
-    A rule set update retires and renumbers rules, and an exclusion pointing at
-    one that no longer exists does nothing, says nothing, and sits in the
-    profile forever because nobody dares remove what they cannot explain.
-
-    Read from the files rather than from the engine, because there is no way to
-    ask libmodsecurity what it loaded, and the files are the same thing nginx
-    parses.
+    Lets exclusions be checked against rules that still exist, since CRS
+    updates retire and renumber rules.  Read from the files, because
+    libmodsecurity cannot be asked what it loaded.
     """
     if not CRS_LINK.exists():
         return {"ok": True, "present": False, "ids": []}
@@ -4112,27 +3581,21 @@ VERBS = {
 # The server
 # ==============================================================================
 
-# One apply at a time, cluster wide or not.  Two threads swapping config
-# folders at the same moment is how you end up with a half applied config and a
-# very confused nginx.
+# Verbs that change state or race on shared files run one at a time.
 APPLY_LOCK = threading.Lock()
 SERIALIZED_VERBS = {
     "apply", "write_staging", "rollback", "reload", "service", "certbot",
     "nginx_upgrade", "nginx_revert",
-    # Two downloads racing would both be writing the same file.
+    # Same target file.
     "geoip_install",
-    # It writes a file and then runs nginx -t against the result.  Two of these
-    # at once, or one alongside an apply, and the test proves nothing about
-    # what either of them wrote.
+    # Writes, then runs nginx -t; must not overlap an apply.
     "waf_module",
-    # Two of these would be unpacking into the same folder and racing to move
-    # the same symlink.
+    # Same folder and symlink.
     "crs_install",
-    # Truncating a file two readers are parsing.
+    # Truncation must not race the readers.
     "waf_hits_clear",
     "waf_surface",
     "login_failures",
-    # Copying and truncating the same files a read is walking.
     "waf_log_rotate",
 }
 
@@ -4198,9 +3661,7 @@ class Handler(socketserver.StreamRequestHandler):
                 self._send({"ok": False, "verb": verb, "error": exc.message, "code": exc.code})
 
             except Exception as exc:
-                # Log the whole traceback on our side, send back something
-                # short.  Stack traces going over the wire tell a caller more
-                # about this box than they need to know.
+                # Full traceback in our log; keep the reply short.
                 log.exception("verb=%s blew up", verb)
                 self._send({
                     "ok": False,
@@ -4213,10 +3674,8 @@ class Handler(socketserver.StreamRequestHandler):
         """
         Find out who is on the other end.
 
-        SO_PEERCRED comes from the kernel, not from the caller, so it cannot be
-        faked.  We only log it, since the socket permissions already decide who
-        gets to connect, but having the uid in the log is worth a lot when you
-        are trying to work out who did something.
+        SO_PEERCRED comes from the kernel, so it cannot be faked.  Only
+        logged; socket permissions decide who can connect.
         """
         try:
             creds = self.connection.getsockopt(
@@ -4251,14 +3710,9 @@ def setup_logging():
     stream.setFormatter(fmt)
     log.addHandler(stream)
 
-    # syslog too, so the agent's history outlives the journal rotation and
-    # lands wherever the rest of your logs go.
-    #
-    # Check the socket is actually there first.  Handing SysLogHandler a path
-    # that does not exist does not always fail when you build it, it fails on
-    # the first message instead, and then every single log line prints a
-    # traceback about the logging system rather than the thing you wanted to
-    # read.  Containers usually have no /dev/log, so this comes up.
+    # syslog too, so history outlives journal rotation.  Check /dev/log
+    # exists first: otherwise SysLogHandler may fail on every message instead
+    # of at construction.
     if Path("/dev/log").exists():
         try:
             sysl = logging.handlers.SysLogHandler(address="/dev/log")
@@ -4286,16 +3740,8 @@ def _dns_answers(address, port, timeout=2.0):
     """
     Is a DNS server answering here.
 
-    Asked by sending a real query rather than by reading /proc.  The first
-    version of this parsed /proc/net/udp for the port, which is exactly the
-    kind of indirect evidence this project keeps getting caught by: the unit
-    runs with ProtectProc=invisible, the parse came back empty on a box where
-    the listener was plainly up, and the watchdog tore down a working rule
-    every thirty seconds while the manager put it back.
-
-    Asking the question directly has no such failure mode.  Any well formed
-    reply counts, including a refusal: the point is whether something is there,
-    not whether it likes the question.
+    Sends a real query rather than reading /proc, which ProtectProc=invisible
+    hides.  Any well formed reply counts, including a refusal.
     """
     query = (b"\x5a\x5a" + b"\x00\x00" + b"\x00\x01" + b"\x00\x00" * 3
              + b"\x00" + b"\x00\x02" + b"\x00\x01")      # root NS query
@@ -4315,21 +3761,14 @@ def _dns_redirect_watchdog(interval=15, strikes=4):
     """
     Take the redirect away when there is nothing behind it any more.
 
-    The manager clears this on its way out, and that covers a normal stop.  It
-    does not cover the container being killed, the machine losing power to it,
-    or the manager crashing, and those leave the rule in place pointing at a
-    port with no listener.
+    The manager removes the rule on a clean stop, but not if it crashes or
+    is killed.  A rule with no listener behind it swallows queries, which is
+    worse than being unreachable: resolvers wait for a timeout instead of
+    moving on to the other nameserver.
 
-    The box then accepts DNS on port 53 and answers none of it, which is worse
-    than the box being unreachable: a resolver that gets silence waits for its
-    timeout, while a resolver that cannot reach the address at all moves
-    straight on to the other nameserver.  On a two node fleet that reads as DNS
-    having failed everywhere when one node's container went away.
-
-    Two strikes before acting, because the manager restarts in the ordinary
-    course of an upgrade and a single miss during those few seconds is not
-    worth tearing the rule down for.  The manager puts it back within ten
-    seconds of coming up.
+    Several consecutive misses are needed, so a manager restart during an
+    upgrade does not trigger it.  The manager restores the rule when it
+    comes back.
     """
     missed = 0
     while True:
@@ -4370,24 +3809,11 @@ def main():
         d.mkdir(parents=True, exist_ok=True)
     os.chmod(MANAGED_DIR / "certs", 0o750)
 
-    # The socket is created private and then opened to the group, rather than
-    # created open and closed afterwards.
-    #
-    # It used to be bound and then chmod'd, which left a window carrying
-    # whatever umask the process inherited.  Narrow, and on a root process that
-    # writes nginx configuration the thing on the other side of that window is
-    # worth more than the window is small.
-    #
-    # **Scoped, not global.**  Setting the umask for the whole process looked
-    # tidier and would have broken the fleet: nineteen directories here are
-    # created with mkdir and no explicit mode, and several of them have to be
-    # traversable by nginx.  The ACME challenge directory is the one that would
-    # have bitten first, since a webroot nginx cannot read fails every
-    # certificate issue and renewal on the box.  So it covers the bind and
-    # nothing else.
-    #
-    # A mode on the mkdir for the same reason as the umask: a first run creates
-    # this directory and the chmod below is several lines later.
+    # Create the socket private and then open it to the group, so there is no
+    # window with the inherited umask.  The umask is scoped to the bind only:
+    # a process wide umask would break directories nginx must traverse, such
+    # as the ACME webroot.  The mkdir mode closes the same window for the
+    # directory on first run.
     SOCKET_DIR.mkdir(parents=True, exist_ok=True, mode=0o750)
     if SOCKET_PATH.exists():
         SOCKET_PATH.unlink()
@@ -4398,8 +3824,7 @@ def main():
     finally:
         os.umask(previous_umask)
 
-    # This is the access control.  Group only, no world bits.  The container
-    # runs with this group added, which is the entire reason it can talk to us.
+    # The access control: group only.  The container runs with this group.
     try:
         gid = grp.getgrnam(SOCKET_GROUP).gr_gid
         os.chown(SOCKET_PATH, 0, gid)
@@ -4408,28 +3833,21 @@ def main():
         os.chmod(SOCKET_DIR, 0o750)
         log.info("socket is at %s, owned by root:%s mode 0660", SOCKET_PATH, SOCKET_GROUP)
     except KeyError:
-        # Falling back to root only is the safe direction to fail.  The
-        # container will not be able to connect and you will see why in the log,
-        # which beats quietly opening the socket to everybody.
+        # Fail closed: root only, with the reason in the log.
         os.chmod(SOCKET_PATH, 0o600)
         log.error("no group called %s, socket is root only.  Run install.sh.", SOCKET_GROUP)
 
     def shutdown(signum, frame):
         log.info("got signal %s, shutting down", signum)
-        # shutdown() tells serve_forever() to stop and then waits for it to say
-        # it has.  A signal handler runs on the main thread, which is the thread
-        # sitting in serve_forever(), so calling it straight from here waits for
-        # a loop that cannot run until the handler returns.  That is a deadlock,
-        # and systemd sat through the full 90 second stop timeout and SIGKILLed
-        # the agent on every single stop and restart.  Hand it to another thread
-        # so the handler returns right away and the loop gets to finish.
+        # shutdown() waits for serve_forever(), which runs on this same
+        # thread, so calling it here deadlocks until systemd's stop timeout.
+        # Call it from another thread.
         threading.Thread(target=server.shutdown, daemon=True).start()
 
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
 
-    # Runs for the life of the agent.  It only ever removes a rule that has
-    # nothing behind it, so the worst it can do on a healthy box is nothing.
+    # Only removes a rule with nothing behind it; harmless on a healthy box.
     threading.Thread(target=_dns_redirect_watchdog, daemon=True,
                      name="dns-redirect-watchdog").start()
 

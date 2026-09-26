@@ -32,10 +32,9 @@
     <div id="pending-body" hidden>
       <p class="small muted" id="pending-summary" style="margin-top:0"></p>
 
-      {# Everything goes together, and saying so here saves somebody hunting for
-         a per change apply button that cannot exist.  The config is rendered
-         from what is saved right now, as a whole, not replayed as a list of
-         edits, so there is no way to send one and hold another back. #}
+      {# Everything goes together. The config is rendered from what is saved
+         now, as a whole, not replayed edit by edit, so there is no per change
+         apply. #}
       <div class="notice info">
         <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 3a.9.9 0 1 1 0 1.8A.9.9 0 0 1 8 4zm1.2 8H6.8v-.9h.7V7.9h-.7V7h2.1v4.1h.3V12z"/></svg>
         <div>
@@ -77,8 +76,8 @@
               <td class="small faint">{{ v.created_at.strftime('%Y-%m-%d %H:%M:%S') }}</td>
               <td class="small">
                 {# The health checker applies on its own when a backend changes
-                   state.  Worth showing plainly, so a version nobody remembers
-                   making does not look like somebody else touching your fleet. #}
+                   state. Shown plainly so an unfamiliar version does not look
+                   like someone else editing the fleet. #}
                 {% if v.author in ('health check', 'system') %}
                   <span class="badge neutral">{{ v.author }}</span>
                 {% else %}
@@ -149,14 +148,13 @@ document.addEventListener("DOMContentLoaded", function () {
 
   // ---- check and repair ----
   //
-  // Two steps, and the first one changes nothing.  Asking first is the whole
-  // point: what comes out here is config somebody wrote and meant, and a few of
-  // them are real controls.  `ssl_verify_client` disappearing without a word
-  // would be a config error quietly becoming weaker TLS.
+  // Two steps, and the first changes nothing. What gets removed is config
+  // someone wrote on purpose, and some of it is real security control;
+  // ssl_verify_client vanishing silently would turn a config error into
+  // weaker TLS.
   //
-  // Deliberately not folded into Apply.  Apply goes to every node and its audit
-  // entry says "applied", so a directive vanishing inside it would be a change
-  // nobody sanctioned and nobody could find afterwards.
+  // Kept out of Apply on purpose. Apply hits every node and is audited as
+  // "applied", so a directive dropped inside it would be untraceable.
   const repairBtn = document.getElementById("changes-repair");
 
   function repairList(changes) {
@@ -204,8 +202,8 @@ document.addEventListener("DOMContentLoaded", function () {
 
         let body = repairList(r.changes);
         if (!r.would_load_after) {
-          // Worth saying plainly rather than letting somebody agree to a repair
-          // and then find the apply still fails.
+          // Say so plainly, rather than letting someone accept a repair and
+          // then find the apply still fails.
           body += "<div class='notice bad'><div>Taking these out is not enough "
                +  "on its own, so the config still will not load afterwards.  "
                +  "What is left:</div><pre style='white-space:pre-wrap'>"
@@ -265,9 +263,8 @@ document.addEventListener("DOMContentLoaded", function () {
         }
       } catch (err) {
         NFM.toast(err.message, "bad");
-        // The moment somebody actually needs the repair is the moment an apply
-        // has just failed, and that is exactly when they are least likely to go
-        // looking for a button.  Say it here instead.
+        // Right after a failed apply is when the repair is needed, and when
+        // nobody goes looking for a button. Point at it here.
         const said = String(err.message || "");
         if (repairBtn && /not allowed here|is duplicate|unknown directive|duplicate location|shared memory zone/.test(said)) {
           setTimeout(function () {

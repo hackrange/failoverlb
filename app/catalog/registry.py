@@ -1,8 +1,7 @@
 """
-How a feature is described, and the code that looks them up.
+The Feature dataclass, the registry, and value validation.
 
-The actual list of features lives in features.py.  This file is just the shape
-of one and the tools for finding them.
+The features themselves are defined in features.py.
 """
 
 import re
@@ -14,10 +13,8 @@ from typing import Any, Callable, Optional
 # Categories, in the order they show up in the GUI
 # ==============================================================================
 #
-# The order here is the order a person thinks about a site, roughly.  What is it
-# and where does it go, then how big can requests be, then how fast, then how
-# it is cached, then the security bits.  Putting TLS at the top looks tidy but
-# nobody starts there.
+# Roughly the order people think about a site: basics and routing first,
+# then limits, caching, and security settings.
 
 CATEGORIES = [
     ("general", "General", "Basics for this site or path"),
@@ -46,14 +43,12 @@ CATEGORY_LOOKUP = {key: (label, desc) for key, label, desc in CATEGORIES}
 @dataclass
 class HelpText:
     """
-    What shows up when somebody clicks the ? next to a setting.
+    Help shown from the ? next to a setting.
 
-    Four parts, and all four earn their place:
-
-      summary   one line, plain words, no jargon
-      detail    the why.  What actually happens, and what goes wrong.
-      use_cases real situations where you would reach for this
-      example   what to type, and what it turns into in the config
+      summary   one plain line
+      detail    what it does and what can go wrong
+      use_cases situations where you would use it
+      example   what to type, and the resulting config
     """
 
     summary: str
@@ -62,11 +57,10 @@ class HelpText:
     example: str = ""
     example_config: str = ""
 
-    # Link to the nginx docs so people can go read the real thing.
+    # Link to the upstream nginx docs.
     docs_url: str = ""
 
-    # The trap.  Shown in a warning box, for settings that look harmless and
-    # are not.
+    # Shown in a warning box, for settings that look harmless but are not.
     warning: str = ""
 
 
@@ -81,69 +75,43 @@ class Feature:
     category: str
     help: HelpText
 
-    # What nginx directive this becomes.  Blank means we handle it specially in
-    # the renderer, usually because one setting turns into several lines.
+    # nginx directive name.  Blank means the renderer handles it specially,
+    # usually because it expands to several lines.
     directive: str = ""
 
-    # Where nginx will accept it.  We only offer a setting on a page where it
-    # can legally go, so you cannot save something that fails nginx -t.
+    # nginx contexts where the directive is valid.  Settings are only offered
+    # where they can legally go.
     contexts: tuple = ("server", "location")
 
     # bool, int, size, time, string, text, select, multiselect, list
     type: str = "string"
 
     default: Any = None
-    options: list = field(default_factory=list)   # for select, list of (value, label)
+    options: list = field(default_factory=list)   # [(value, label), ...]
 
-    # Kept out of the generic settings form.
-    #
-    # For a setting that has a screen of its own.  Blocking by country is a
-    # list of two letter codes typed into a box when it lives here, and a list
-    # of countries with tick boxes when it has its own card, and offering both
-    # is how two controls end up disagreeing about what is set.  The setting is
-    # still real: it validates, it renders, and the API takes it.
+    # Hidden from the generic settings form because it has a dedicated UI
+    # (e.g. country blocking).  Still validated, rendered and accepted by the
+    # API; this only avoids two controls for the same value.
     own_screen: bool = False
 
-    # The value is the rest of a directive, not a value in one.
-    #
-    # A rewrite rule is a regular expression and a replacement, and nearly every
-    # regular expression worth writing has a backslash in it.  The blanket rule
-    # below refuses backslashes everywhere, which is right for a value going
-    # into a directive and stops these settings being usable at all.  Set this
-    # and the entries are checked against what actually breaks out of a
-    # directive instead, the same list the renderer enforces.
+    # Entries are regex rules (e.g. rewrites) that need backslashes.  Checked
+    # with _rule_problem instead of the blanket no-backslash rule, matching
+    # what the renderer enforces.
     regex_values: bool = False
 
-    # The value ends up inside a quoted response header rather than as a bare
-    # directive argument.
-    #
-    # The renderer quotes these and escapes what needs escaping, so a semicolon
-    # in one cannot end the directive: esc_header_value exists for exactly that
-    # and its docstring says so.  The blanket rule below did not know, so a
-    # Content Security Policy could never be saved, because every CSP ever
-    # written is a list separated by semicolons and so is the placeholder in
-    # the field itself.  Only a newline is refused here, which is the one thing
-    # quoting does not survive.
+    # Value is written as a quoted, escaped header value (esc_header_value),
+    # so semicolons are safe; a CSP needs them.  Only line breaks are refused.
     header_value: bool = False
 
     # Which module has to be compiled in.  "core" means it is always there.
     module: str = "core"
 
-    # The nginx version this directive first appeared in, as a tuple.
-    #
-    # Offering a directive an older nginx has never heard of gets you
-    # "unknown directive", and the whole config fails to load.  The two phase
-    # apply catches that before anything goes live, so nothing breaks, but you
-    # are left with a change that will not go out and an error that does not
-    # say which setting caused it.
-    #
-    # None means it has been there long enough that nobody is running an nginx
-    # without it.
+    # First nginx version with this directive.  Older versions fail with
+    # "unknown directive", which the apply catches but without naming the
+    # setting.  None means it is old enough to assume.
     min_version: tuple = None
 
-    # The version where this stopped being the right way to write it.  Usually
-    # it still works and logs a warning on every start, which is its own kind
-    # of annoying.
+    # Version where this was deprecated (usually still works, with a warning).
     deprecated_version: tuple = None
 
     # oss or plus.  Anything marked plus never renders a control.
@@ -155,40 +123,26 @@ class Feature:
     unit: str = ""
     placeholder: str = ""
 
-    # Checking.  Either a regex or a function that takes the value and gives
-    # back an error string, or None when it is fine.
+    # Validation: a regex, or a callable returning an error string or None.
     pattern: str = ""
     validator: Optional[Callable] = None
     min_value: Optional[int] = None
     max_value: Optional[int] = None
 
-    # This directive takes several space separated arguments rather than one
-    # value.  large_client_header_buffers wants "4 8k", proxy_buffers wants
-    # "8 4k", try_files wants a list of paths.
-    #
-    # It matters because the renderer quotes anything with a space in it, which
-    # is right for a header value and completely wrong here: nginx sees
-    # large_client_header_buffers "4 8k" as one argument and refuses to start
-    # with "invalid number of arguments".
+    # Takes several space separated arguments, e.g.
+    # large_client_header_buffers "4 8k".  The renderer must not quote these
+    # or nginx sees one argument and fails with "invalid number of arguments".
     multi_arg: bool = False
 
     # Hidden behind the "show advanced" toggle so the normal page stays short.
     advanced: bool = False
 
-    # Stop and make somebody read something before this is switched on.
-    #
-    # For the few settings that can take a working site away from most of the
-    # people using it, where the damage is not obvious from the label and does
-    # not show up until real traffic arrives.  Help text is not enough on its
-    # own: nobody opens the help for a checkbox they already understand, and
-    # this is the class of setting where they only think they do.
-    #
-    # Only on the way on.  Turning one of these off is how you recover, so it
-    # should never need a dialog.
+    # Confirmation text shown before enabling a setting that can break a
+    # working site in non-obvious ways.  Not asked when turning it off, since
+    # that is the recovery path.
     confirm: str = ""
 
-    # Only show this when another setting is on.  Keeps the form from showing
-    # you twelve cache options when caching is off.
+    # Only shown when this other setting is on.
     depends_on: str = ""
 
     def render_value(self, value) -> str:
@@ -201,11 +155,8 @@ class Feature:
 
     def is_available(self, modules: set, version: tuple = None) -> bool:
         """
-        Can the fleet actually do this.
-
-        Both halves matter.  A module has to be compiled in, and the nginx has
-        to be new enough to know the directive.  Either one missing means the
-        config will not load.
+        Whether the fleet supports this: OSS edition, module compiled in, and
+        nginx new enough for the directive.
         """
         if self.edition != "oss":
             return False
@@ -216,7 +167,7 @@ class Feature:
         return True
 
     def unavailable_reason(self, modules: set, version: tuple = None) -> str:
-        """Why not, in words somebody can act on."""
+        """Human-readable reason is_available() is False, or ""."""
         if self.edition != "oss":
             return "only in the paid nginx"
         if self.module != "core" and self.module not in modules:
@@ -262,10 +213,9 @@ def all_features() -> dict:
 def features_for_context(context: str, modules: set = None, include_plus: bool = False,
                          version: tuple = None):
     """
-    Every feature you can set in this context.
+    Features valid in this context.
 
-    modules is what we read off the box with nginx -V.  Pass None and you get
-    everything, which is only useful for the docs page.
+    `modules` comes from nginx -V.  None skips the availability filter.
     """
     _ensure_loaded()
     out = []
@@ -287,12 +237,8 @@ def features_in_category(category: str, context: str = None, modules: set = None
 
 def plus_only_features():
     """
-    The paid only ones.
-
-    We show these on a page of their own, grayed out, with what to use instead.
-    Sounds odd to advertise what you cannot have, but the alternative is people
-    hunting for sticky sessions for an hour before finding out it is not free.
-    Telling them up front, next to the free workaround, saves that hour.
+    NGINX Plus only features, listed on the comparison page with the open
+    source alternative so people do not go hunting for them.
     """
     _ensure_loaded()
     return [f for f in _REGISTRY.values() if f.edition != "oss"]
@@ -306,26 +252,19 @@ SIZE_RE = re.compile(r"^\d+[kKmMgG]?$")
 TIME_RE = re.compile(r"^\d+(\.\d+)?(ms|s|m|h|d|w|M|y)?$")
 RATE_RE = re.compile(r"^\d+r/[sm]$")
 
-# nginx variables and simple text.  We are deliberately strict here.  Anything
-# that could carry a semicolon or a brace could close the directive early and
-# then write whatever it wants into the config, so those characters never make
-# it through.
+# Deliberately strict.  A semicolon or brace could close the directive and
+# inject arbitrary config.
 SAFE_TEXT_RE = re.compile(r"^[A-Za-z0-9 _.:/@$~^|=+*?()\[\]{}<>,'\"%!&#-]*$")
 NO_BREAKOUT_RE = re.compile(r"[;{}\n\r\\]")
 
 
 def _rule_problem(text: str) -> Optional[str]:
     r"""
-    What is wrong with one line that becomes the tail of a directive.
+    Problem with one regex rule entry, or None.
 
-    Backslashes are the point of these, so what is refused is only what ends
-    the directive and starts writing config of somebody else's choosing, plus a
-    `#`, which comments away the rest of the rule and would silently drop half
-    of it.  A trailing single backslash escapes whatever nginx reads next.
-
-    The same list the renderer enforces before writing, on purpose: a rule that
-    saves and then cannot be rendered is a setting that looks accepted and does
-    nothing, which is the whole reason these two were rewritten.
+    Backslashes are allowed.  Refuses what would end the directive, `#`
+    (comments out the rest), and a trailing odd backslash.  Must match what
+    the renderer enforces, or a rule would save but never render.
     """
     if not text.strip():
         return "an empty entry is not a rule"
@@ -342,21 +281,15 @@ def _rule_problem(text: str) -> Optional[str]:
 
 def validate_value(feature: Feature, value) -> Optional[str]:
     """
-    Check one value.  Gives back an error message, or None when it is fine.
+    Validate one value; return an error message or None.
 
-    This runs on every save, on the server, no matter what the browser already
-    checked.  Browser checks are a nicety for the person typing.  They are not
-    security, since anybody can skip them entirely by calling the API directly.
+    Runs server side on every save.  Browser checks are only a convenience.
     """
     if value is None or value == "":
         return None
 
-    # First and most important.  Nothing that could end the directive early and
-    # start writing its own config ever gets through, whatever type it is.
-    #
-    # A header value is the exception, and it is quoted and escaped by the
-    # renderer rather than pasted in raw, so the only thing that still breaks
-    # out of it is a line break.
+    # Block directive breakout for every type.  Header values are quoted by
+    # the renderer, so only line breaks matter there.
     if isinstance(value, str):
         if feature.header_value:
             if re.search(r"[\n\r]", value):
@@ -395,12 +328,8 @@ def validate_value(feature: Feature, value) -> Optional[str]:
     if t == "select":
         valid = [v for v, _ in feature.options]
         if not valid:
-            # A select with nothing to select from is a feature whose choices
-            # live in the database, and the caller was supposed to check it
-            # against those rows before getting here.  Saying so beats the old
-            # answer, which was "has to be one of:" followed by nothing and
-            # sent somebody looking through nginx documentation for a value
-            # that was never going to be accepted.
+            # Choices come from the database and the caller should have
+            # validated them already.  Reaching here is a bug.
             return ("this setting takes its choices from the database and "
                     "nothing checked them, which is a bug in this tool rather "
                     "than anything you typed")
@@ -428,9 +357,7 @@ def validate_value(feature: Feature, value) -> Optional[str]:
                 if problem:
                     return problem
             elif feature.header_value:
-                # Quoted and escaped when it is written, so the only thing left
-                # that breaks out is a line break.  A Set-Cookie has semicolons
-                # in it by definition.
+                # Quoted when written; only line breaks can break out.
                 if re.search(r"[\n\r]", v):
                     return "an entry cannot contain a line break"
             elif NO_BREAKOUT_RE.search(v):
@@ -440,17 +367,13 @@ def validate_value(feature: Feature, value) -> Optional[str]:
     if t in ("string", "text"):
         if feature.pattern and not re.match(feature.pattern, str(value)):
             return f"does not match the expected format: {feature.pattern}"
-        # A header value has already been checked for the one thing that breaks
-        # a quoted argument, and the safe character list has no semicolon in
-        # it, which is the character these settings are made of.
+        # Already checked above; SAFE_TEXT_RE would reject its semicolons.
         if feature.header_value:
             return None
         if t == "string" and not SAFE_TEXT_RE.match(str(value)):
             return "has characters in it we will not put in a config file"
 
-        # For a multi argument directive, check each piece on its own.  The
-        # whole string goes into the config unquoted, so every token has to be
-        # something we are happy to write there.
+        # Multi argument values are written unquoted, so check each token.
         if feature.multi_arg:
             tokens = str(value).split()
             if not tokens:
@@ -477,10 +400,8 @@ _loaded = False
 
 def _ensure_loaded():
     """
-    Import the feature list the first time somebody asks for it.
-
-    features.py imports register() from this file, so importing it at the top
-    would be a circular import.  Doing it lazily sidesteps that.
+    Import features.py on first use.  It imports register() from here, so a
+    top-level import would be circular.
     """
     global _loaded
     if not _loaded:

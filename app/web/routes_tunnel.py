@@ -1,21 +1,13 @@
 """
-The tunnel: setting it up, and letting a workload enrol itself.
+The WireGuard tunnel: managing it, and letting a workload enroll itself.
 
-Two halves with very different rules.
+The managed half sits behind the normal login.  The enrollment half has no
+login so a workload can join with one command; the ticket in the URL is the
+credential instead.  It is single use, expires in two hours, and only its hash
+is stored, so treat it like the cluster join token.
 
-The managed half sits behind the same login as everything else and is used by
-whoever runs the load balancers.
-
-The enrolment half is deliberately not behind a login, because the whole point
-is that somebody on the workload can run one command and be done.  What stands
-in for a login is the ticket in the URL: single use, expires in two hours, and
-only its hash is stored.  Anybody holding one can put a machine on the tunnel,
-so it is treated exactly like the cluster join token.
-
-The script is served over https from a certificate this fleet holds, which is
-the honest minimum for something piped into a shell.  It is also short, and
-kept short on purpose, so that somebody whose policy requires reading it first
-can actually do that.
+The script is served over https and kept short so people can read it before
+piping it into a shell.
 """
 import logging
 
@@ -33,22 +25,15 @@ log = logging.getLogger("nfm.tunnel.web")
 
 router = APIRouter()
 
-# The interface and helper the enrolment script lays down.  These were literals
-# at the one call site that formats the script, which meant the removal command
-# shown in the GUI could quietly stop matching what was actually installed.
+# Interface and helper the enrollment script installs.  Shared constants so
+# the removal command shown in the GUI always matches what was installed.
 IFACE = "nfm0"
 BINARY = "/usr/local/bin/nfm-tunnel"
 
-# What to run on the workload to undo the enrolment.
-#
-# Deliberately not "nfm-tunnel unenrol", even though that helper exists.  If
-# enrolment stopped half way the helper is the part that never got written, and
-# an undo command that depends on the thing you are undoing is no use exactly
-# when it is needed.  This touches only the interface, config and key this
-# fleet wrote.
-#
-# It leaves the wireguard package installed on purpose.  Removing a package the
-# machine may be using for something else is not ours to do from a copied line.
+# Undo command shown for a workload.  Not the nfm-tunnel helper, because a half
+# finished enrollment may never have written it.  Only removes the interface,
+# config and key we wrote; the wireguard package is left alone since the
+# machine may use it for something else.
 UNENROL_COMMAND = (
     f"sudo bash -c 'systemctl disable --now wg-quick@{IFACE} 2>/dev/null || "
     f"wg-quick down {IFACE} 2>/dev/null; "
@@ -76,12 +61,8 @@ def _network_json(network, session):
 
 def _pools_pointing_at(p):
     """
-    Which pools name this workload's address.
-
-    Said by name rather than as "if it is still in one", because the person
-    deciding whether to remove it is the one who cannot see the pool pages from
-    here, and because a member left behind is what turns a removed workload
-    into somebody else's traffic later.
+    Names of pools with a member at this workload's address.  A member left
+    behind after removal would later send traffic to whoever gets the address.
     """
     from sqlalchemy.orm import object_session
 
@@ -99,16 +80,9 @@ def _pools_pointing_at(p):
 
 def _sites_using(p):
     """
-    Which sites actually depend on this workload, by name.
+    Names of sites that depend on this workload, i.e. what breaks if it goes.
 
-    Pools are the mechanism and sites are the thing people care about.  "Two
-    pools point at this" does not answer the question somebody is asking before
-    they remove it, which is always "what breaks".  A pool nothing serves from
-    breaks nothing; a pool behind three sites breaks three.
-
-    Counts the sites' own pools and their paths' pools, because a site with one
-    backend on the Basics tab and another on a path depends on both, and the
-    second is the one that gets forgotten.
+    Includes pools used by a site's paths as well as its main pool.
     """
     from sqlalchemy.orm import object_session
 
@@ -141,10 +115,7 @@ def _peer_json(p):
         "enrolled_at": p.enrolled_at.isoformat() if p.enrolled_at else None,
         "enabled": p.enabled,
         "waiting_for_enrolment": bool(p.enrol_token_hash and not p.public_key),
-        # Whether this peering survives somebody breaking Curve25519 later.
-        # Shown per workload rather than as one number for the tunnel, because
-        # a fleet is upgraded one workload at a time and the ones left are the
-        # useful thing to see.
+        # Per workload, since workloads are upgraded to a PSK one at a time.
         "has_psk": p.has_psk,
         "unenrol_command": UNENROL_COMMAND,
         "used_by": _pools_pointing_at(p),
@@ -191,9 +162,8 @@ async def set_tunnel(request: Request, g: ObjectGuard = Depends(changing)):
     if "enabled" in payload:
         network.enabled = bool(payload["enabled"])
 
-    # Per node, what workloads should dial.  Blank means go back to working it
-    # out ourselves rather than storing an empty string that overrides with
-    # nothing and leaves the tunnel unreachable.
+    # Per node endpoint override.  Blank clears it (store None, not "", or the
+    # override would be empty and the tunnel unreachable).
     for node_name, value in (payload.get("endpoints") or {}).items():
         row = g.session.query(TunnelNodeKey).filter(
             TunnelNodeKey.node_name == str(node_name)).first()
@@ -222,18 +192,15 @@ async def set_tunnel(request: Request, g: ObjectGuard = Depends(changing)):
 
 @router.get("/api/tunnel/install")
 async def tunnel_install_status(g: ObjectGuard = Depends(guard)):
-    """What each node has, so the page can offer the button only when it helps."""
+    """Per node install state, so the page only offers the button if needed."""
     return await tunnel.install_status()
 
 
 @router.post("/api/tunnel/install")
 async def tunnel_install(g: ObjectGuard = Depends(changing)):
     """
-    Install what the tunnel needs, on every node.
-
-    Only when the tunnel is on.  Installing a network package on somebody's
-    load balancers is not something to do because a page was open, and the
-    tunnel being switched on is the closest thing there is to being asked.
+    Install the tunnel packages on every node.  Refused unless the tunnel is
+    switched on, which is our signal that the admin wants it.
     """
     g.require("manage_cluster")
 
@@ -252,7 +219,7 @@ async def tunnel_install(g: ObjectGuard = Depends(changing)):
 
 @router.post("/api/tunnel/peers")
 async def add_peer(request: Request, g: ObjectGuard = Depends(changing)):
-    """Reserve an address for a workload and mint the ticket it enrols with."""
+    """Reserve an address for a workload and mint its enrollment ticket."""
     g.require("manage_cluster")
     payload = await request.json()
 
@@ -268,14 +235,9 @@ async def add_peer(request: Request, g: ObjectGuard = Depends(changing)):
         raise HTTPException(status_code=409,
                             detail=f"there is already a workload called {name}")
 
-    # An address can be asked for, and the reason is putting a machine back
-    # where it was.  A pool member is an address rather than a machine, so
-    # re-adding web01 at the address web01 had is the case where reuse is the
-    # thing you want rather than a risk to be talked out of.
-    #
-    # The counter is left alone when one is chosen.  Bumping it would skip
-    # everything between here and there, which is the opposite of what somebody
-    # picking an address out of a gap is trying to do.
+    # A specific address may be requested, typically to put a machine back at
+    # its old address so existing pool members keep working.  The counter is
+    # left alone in that case; bumping it would skip the addresses in between.
     wanted = str(payload.get("address") or "").strip()
     reusing = []
     if wanted:
@@ -292,9 +254,8 @@ async def add_peer(request: Request, g: ObjectGuard = Depends(changing)):
 
     peer = TunnelPeer(network_id=network.id, name=name, address=address,
                       description=(payload.get("description") or "")[:500] or None)
-    # Every new workload gets a pre-shared key, with nothing extra to do.  It
-    # goes into the enrolment script and into the peer block on every node at
-    # the same moment, so there is no window and nobody has to know it happened.
+    # Every new workload gets a pre-shared key.  It goes into the enrollment
+    # script and every node's peer block together, so there is no gap.
     tunnel.set_peer_psk(peer)
     token = tunnel.new_enrol_token(peer)
     g.session.add(peer)
@@ -310,9 +271,8 @@ async def add_peer(request: Request, g: ObjectGuard = Depends(changing)):
 
     note = "single use, expires in two hours, treat it like a password"
     if reusing:
-        # Said plainly rather than refused.  Somebody putting a machine back
-        # wants exactly this; somebody who typed the wrong address needs to
-        # know before the pool starts sending it production traffic.
+        # Warn rather than refuse: reuse is usually intended, but a typo
+        # should be caught before the pool sends it traffic.
         note += (f".  {', '.join(reusing)} already "
                  f"{'points' if len(reusing) == 1 else 'point'} at "
                  f"{address}, so {name} will start taking that traffic as soon "
@@ -330,13 +290,11 @@ async def add_peer(request: Request, g: ObjectGuard = Depends(changing)):
 @router.get("/api/tunnel/addresses")
 async def tunnel_addresses(request: Request, g: ObjectGuard = Depends(guard)):
     """
-    Who holds what in the tunnel range, and what can be picked.
+    Who holds each address in the tunnel range, and which are free.
 
-    Exists because the counter only goes up, which is right and is also
-    invisible: somebody adding and removing workloads while testing watches the
-    numbers climb and reasonably concludes they are running out.  They are not.
-    The gaps are all still there and can be asked for by name; this is the page
-    that shows them.
+    The allocation counter only goes up, so after adding and removing
+    workloads it looks like the range is running out.  This shows the gaps,
+    which can still be requested explicitly.
     """
     import ipaddress
 
@@ -355,8 +313,7 @@ async def tunnel_addresses(request: Request, g: ObjectGuard = Depends(guard)):
     nodes = {v: k for k, v in tunnel.node_addresses(g.session, network).items()}
 
     out = []
-    # The whole range is 254 rows and nobody needs that.  Everything already
-    # counted past, plus a few beyond, is the part somebody is choosing from.
+    # Only show up to the counter plus a few, not the whole range.
     for index, host in enumerate(hosts[:max(mark + 8, 16)]):
         address = str(host)
         if address in nodes:
@@ -372,9 +329,7 @@ async def tunnel_addresses(request: Request, g: ObjectGuard = Depends(guard)):
                 "state": "free",
                 "held_by": "",
                 "pools": pools,
-                # Whether the counter has gone past it.  A free address below
-                # the mark is one the automatic choice will skip, and is
-                # exactly what somebody reusing an address is looking for.
+                # Free but below the counter, so automatic allocation skips it.
                 "in_a_gap": index < mark,
             })
 
@@ -392,18 +347,13 @@ async def tunnel_addresses(request: Request, g: ObjectGuard = Depends(guard)):
 async def new_psk_link(peer_id: str, request: Request,
                        g: ObjectGuard = Depends(changing)):
     """
-    A one command upgrade that puts a pre-shared key on a workload already on
-    the tunnel.
+    Mint a one-time command that adds a pre-shared key to an enrolled
+    workload.
 
-    **This cannot be done from here alone, and it is worth saying why rather
-    than looking like a missing feature.**  A WireGuard pre-shared key is never
-    sent over the wire.  Both ends have to be told it separately, which is the
-    entire reason it survives somebody breaking Curve25519 later.  There is no
-    handshake that can carry it, so a command has to run on the workload.
-
-    What this does is make that one command, once, per workload.  It keeps the
-    workload's address, its own private key and its place in every pool, and it
-    puts itself back if the tunnel does not come up within a minute.
+    A WireGuard PSK is never sent over the wire, so it cannot be pushed from
+    here; something has to run on the workload.  The script keeps the address,
+    private key and pool membership, and rolls back if the tunnel does not
+    come up within a minute.
     """
     g.require("manage_settings")
 
@@ -446,12 +396,10 @@ async def new_psk_link(peer_id: str, request: Request,
 @router.delete("/api/tunnel/peers/{peer_id}/psk")
 async def drop_psk(peer_id: str, g: ObjectGuard = Depends(changing)):
     """
-    Take the pre-shared key off a workload, at this end.
+    Remove a workload's pre-shared key on the load balancer side.
 
-    The way out when an upgrade half happened: the load balancers took the key
-    and the workload did not, so the workload cannot connect.  Removing it here
-    puts things back to a plain WireGuard peering, which is weaker and working
-    rather than stronger and down.
+    Recovery for a half finished upgrade where the nodes have the key and the
+    workload does not.  Falls back to a plain peering.
     """
     g.require("manage_settings")
 
@@ -480,15 +428,10 @@ async def drop_psk(peer_id: str, g: ObjectGuard = Depends(changing)):
 async def new_enrol_link(peer_id: str, request: Request,
                          g: ObjectGuard = Depends(changing)):
     """
-    Mint a fresh enrolment command for a workload that has not joined yet.
+    Mint a fresh enrollment command for a workload that has not joined yet.
 
-    The old ticket cannot be shown again, because only its hash is kept, which
-    is the right way to store it and the wrong reason to strand somebody.  The
-    first version of this page showed the command once and left anybody who
-    navigated away with a workload they could not enrol and no way back.
-
-    Minting a new one replaces the old, so a link that went astray stops
-    working the moment somebody asks for another.
+    We only keep the ticket's hash, so the old command cannot be shown again.
+    The new ticket replaces the old one, which stops working.
     """
     g.require("manage_cluster")
     peer = g.get(TunnelPeer, peer_id)
@@ -524,21 +467,10 @@ async def new_enrol_link(peer_id: str, request: Request,
 @router.patch("/api/tunnel/peers/{peer_id}")
 async def edit_peer(peer_id: str, request: Request, g: ObjectGuard = Depends(changing)):
     """
-    Change the note on a workload.
+    Change a workload's description.
 
-    The note is the only thing here worth editing after the fact.  The name is
-    what pools and sites are matched against by eye, and the address is what
-    they are matched against in code, so changing either of those is a rename
-    with consequences elsewhere rather than a correction.
-
-    Notes go stale faster than anything else on this page.  A workload called
-    web07 described as "the new billing box" is worse than one with no note at
-    all once billing has moved, and if the only way to fix it is to remove the
-    workload and enrol it again, nobody fixes it.
-
-    No apply.  The tunnel config has no notes in it, so nothing on any node
-    changes and pushing a fleet wide apply for a comment would be a lie about
-    what happened.
+    Only the description is editable; name and address are referenced by
+    pools and sites.  No apply, since the tunnel config does not include it.
     """
     g.require("manage_cluster")
     peer = g.get(TunnelPeer, peer_id)
@@ -560,11 +492,8 @@ async def edit_peer(peer_id: str, request: Request, g: ObjectGuard = Depends(cha
 @router.delete("/api/tunnel/peers/{peer_id}")
 async def remove_peer(peer_id: str, g: ObjectGuard = Depends(changing)):
     """
-    Take a workload off the tunnel from this end.
-
-    Works whether or not the machine still exists, which is the point: the
-    common reason to press this is that somebody decommissioned it without
-    unenrolling.
+    Remove a workload from the tunnel on our side.  Works even if the machine
+    is already gone, which is the usual case.
     """
     g.require("manage_cluster")
     peer = g.get(TunnelPeer, peer_id)
@@ -578,7 +507,7 @@ async def remove_peer(peer_id: str, g: ObjectGuard = Depends(changing)):
 
 
 # ==============================================================================
-# The enrolment half, which has no login
+# The enrollment half, which has no login
 # ==============================================================================
 
 SCRIPT = """#!/usr/bin/env bash
@@ -852,22 +781,14 @@ fi
 @router.get("/tunnel/psk/{token}", response_class=PlainTextResponse)
 async def psk_script(token: str, request: Request):
     """
-    The one command that puts a pre-shared key on a workload already enrolled.
+    Serve the PSK upgrade script for an enrolled workload.
 
-    **Fetching this activates the key on the load balancers**, because the
-    alternative orderings are worse.  Both ends have to hold the same value, so
-    there is a window either way; making it start when the script starts means
-    the script is already running and about to close it, rather than depending
-    on somebody coming back later.
+    Fetching it activates the key on the load balancers.  Both ends must
+    agree, so there is a short window either way; starting it here means the
+    script is already running to close it.  Keepalive re-handshakes through
+    the gap, and the script rolls back if no handshake arrives in a minute.
 
-    The window is a few seconds and WireGuard's keepalive re-handshakes
-    through it.  If the script cannot get a handshake within a minute it puts
-    the file back and takes the key off the interface, so a workload that
-    cannot be upgraded ends up where it started rather than off the tunnel.
-
-    Single use.  Only the hash of the ticket is stored, the same as the
-    enrolment ticket, because anybody holding one can read a key that protects
-    a tunnel.
+    Single use, and only the ticket's hash is stored.
     """
     from app.core import tunnel as tunnel_mod
     from app.models import utcnow
@@ -885,15 +806,13 @@ async def psk_script(token: str, request: Request):
 
         value = tunnel_mod.set_peer_psk(peer)
         peer.psk_applied_at = utcnow()
-        # Burned on read.  A key that can be fetched twice is a key sitting in
-        # somebody's shell history and still valid.
+        # Burned on read so the link in shell history is useless.
         peer.psk_token_hash = None
         peer.psk_expires_at = None
         name = peer.name
         session.commit()
 
-    # The load balancers take it now, so by the time the script writes its end
-    # the far end already agrees.
+    # Apply on the nodes now so they already agree when the script runs.
     await tunnel_mod.apply_to_fleet()
 
     audit.record("tunnel.peer.psk", user=None, source_ip=client_ip(request),
@@ -906,11 +825,10 @@ async def psk_script(token: str, request: Request):
 @router.get("/tunnel/enrol/{token}", response_class=PlainTextResponse)
 async def enrol_script(token: str, request: Request):
     """
-    The script a workload pipes into bash.
+    The enrollment script a workload pipes into bash.
 
-    No login, because the ticket in the URL is the credential.  It is checked
-    here rather than by the script, so an expired or spent ticket gets a
-    sentence rather than a shell script that will not work.
+    The ticket in the URL is the credential.  It is checked here so a bad
+    ticket gets a readable error instead of a script that fails.
     """
     with session_scope() as session:
         peer = tunnel.peer_for_token(session, token)
@@ -921,8 +839,7 @@ async def enrol_script(token: str, request: Request):
                         "single use and expire after two hours.  Ask for a "
                         "fresh one on the Tunnel page."))
 
-        # Read while the session is open, because it is decrypted from the row
-        # and the script is built after this block closes.
+        # Read while the session is still open.
         psk = tunnel.peer_psk(peer)
 
         network = session.query(TunnelNetwork).first()
@@ -931,23 +848,14 @@ async def enrol_script(token: str, request: Request):
             raise HTTPException(status_code=503,
                                 detail="the load balancers have no tunnel keys yet")
 
-        # Every load balancer the workload will route down the tunnel.  Used
-        # for the comment at the top of the script, which is a list, and never
-        # as one peer's AllowedIPs, which is not.
+        # All node addresses, for the script's header comment only.  Never use
+        # this as a peer's AllowedIPs.
         routes = ", ".join(f"{k.address}/32" for k in keys)
 
-        # Each peer is allowed its own address and nothing else.
-        #
-        # AllowedIPs reads like a filter and is also a routing table: an
-        # address belongs to exactly one peer, and when two peers claim the
-        # same one the last one written wins.  Giving every peer the whole
-        # list therefore pointed all of them at whichever load balancer came
-        # last alphabetically.  Traffic to the other one was encrypted for the
-        # wrong node and dropped where it arrived.
-        #
-        # It fails in a way that looks like a network problem on one node
-        # only: the last load balancer works perfectly, the rest handshake,
-        # count bytes out and receive almost nothing back.
+        # Each peer gets only its own address.  AllowedIPs is also a routing
+        # table and the last peer to claim an address wins, so giving every
+        # peer the full list routed everything to the last node.  The others
+        # handshook fine but got almost no traffic back.
         peers = "".join(
             PEER_BLOCK.format(node=k.node_name, public_key=k.public_key,
                               endpoint=k.endpoint, allowed=f"{k.address}/32",
@@ -969,10 +877,8 @@ async def enrol_script(token: str, request: Request):
 @router.post("/tunnel/enrol/{token}")
 async def enrol_callback(token: str, request: Request):
     """
-    The workload telling us its public key, which is the only thing we want.
-
-    The ticket is spent here.  From this point the peer is identified by its
-    key, and the link cannot be used again by anybody who saw it go past.
+    The workload posts its public key.  The ticket is spent here; from now on
+    the peer is identified by its key.
     """
     payload = await request.json()
     public_key = str(payload.get("public_key") or "").strip()

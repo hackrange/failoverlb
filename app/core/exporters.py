@@ -1,43 +1,33 @@
 """
-Reading CPU and memory off a backend that already publishes it.
+Reading CPU and memory from a backend's existing metrics endpoint.
 
-These are somebody else's servers and there is no agent on them, so the only
-polite way to know what they are doing is to ask something they are already
-running.  The one format worth supporting is the Prometheus text exposition
-format, because node_exporter speaks it, and so does nearly every runtime with
-a metrics endpoint bolted on: Go, Spring Boot, .NET, Python.
+Backends have no agent, so we read the Prometheus text format they already
+publish (node_exporter, and most Go, Spring Boot, .NET and Python apps).
 
-**Deliberately not SSH.**  Reading /proc over ssh would work and would mean this
-manager holding credentials for every backend in the estate.  That turns a load
-balancer manager into the most valuable box on the network, which is a much
-bigger security story than a chart is worth.  If a backend publishes nothing,
-the answer is that it is not measured, and the page says so.
+Deliberately not SSH: that would mean holding credentials for every backend
+and make the manager the most valuable box on the network.  A backend that
+publishes nothing is shown as not measured.
 
-Two shapes of exporter, and both are handled because both turn up:
+Two kinds of exporter:
 
-  * **A machine exporter**, node_exporter being the one everybody has.  It
-    reports the whole box: every cpu, total and available memory.  This is the
-    one people mean when they ask for backend CPU.
-  * **An application exporter**, which reports the one process.  Useful, and a
-    different number: a JVM at 100% of one core on a sixteen core box is not a
-    busy box.  It is labelled as process level so nobody reads it as the
-    machine.
+  - Machine (node_exporter): the whole box, all CPUs and total memory.
+  - Application: one process.  Labeled "process" so a JVM using one core of
+    sixteen isn't read as a busy machine.
 
-Everything CPU related is a counter of seconds, so a percentage needs two
-readings.  That is the caller's job, the same as it is for our own boxes.
+CPU values are counters of seconds, so the caller needs two readings to get
+a percentage.
 """
 import logging
 import re
 
 log = logging.getLogger("nfm.exporters")
 
-# A metrics endpoint is text and small.  This is a generous ceiling for a
-# node_exporter page, which is a few hundred kilobytes at most, and stops a
-# backend that answers with something enormous from being read into memory.
+# Generous ceiling (node_exporter pages are a few hundred KB) that keeps a
+# huge response out of memory.
 MAX_BODY_BYTES = 4 * 1024 * 1024
 
-# One line of the exposition format: name, optional labels, value.  Comments
-# and blank lines are skipped by the caller.
+# One exposition line: name, optional labels, value.  The caller skips
+# comments and blank lines.
 SAMPLE = re.compile(
     r"^(?P<name>[A-Za-z_:][A-Za-z0-9_:]*)"
     r"(?:\{(?P<labels>[^}]*)\})?"
@@ -55,15 +45,10 @@ def _labels(text):
 
 def parse(body: str) -> dict:
     """
-    Pull out the handful of numbers worth charting, ignoring everything else.
+    Pull out the few metrics worth charting and ignore the rest, which keeps
+    it cheap and robust to exporters adding new metrics.
 
-    A node_exporter page has well over a thousand metrics on it.  Reading only
-    the ones asked for keeps this cheap and, more usefully, keeps it from
-    breaking when an exporter adds something new, which they do constantly.
-
-    Gives back what it found, and says nothing about what it did not.  A caller
-    that wanted cpu and got only memory should show memory rather than treating
-    the whole read as a failure.
+    Returns only what was found; a partial result is still useful.
     """
     if not body:
         return {}
@@ -127,10 +112,9 @@ def parse(body: str) -> dict:
             out["memory_percent"] = round(out["memory_used"] / total * 100, 1)
         out["level"] = "machine"
 
-    # Only fall back to the process numbers when the machine ones are absent.
-    # An application exporter running beside node_exporter would otherwise
-    # overwrite the box's memory with one process's, which reads as a machine
-    # using 200MB and is a quietly wrong answer.
+    # Process numbers only when machine numbers are missing, or an app
+    # exporter beside node_exporter would replace the box's memory with one
+    # process's.
     if "memory_percent" not in out:
         if jvm_used is not None and jvm_max:
             out["memory_used"] = jvm_used
@@ -142,9 +126,7 @@ def parse(body: str) -> dict:
             out["level"] = "process"
 
     if "cpu_seconds" not in out and process_cpu is not None:
-        # One number rather than a breakdown by mode, and it is time this
-        # process spent on cpu rather than time the box spent.  Kept apart so
-        # the percentage worked out from it is not labelled as the machine.
+        # Process CPU time, kept separate so it isn't labeled as the machine.
         out["process_cpu_seconds"] = process_cpu
         out.setdefault("level", "process")
 
@@ -155,14 +137,11 @@ def cpu_percent(older: dict, newer: dict, cpu_count: int = None):
     """
     Busy percentage between two reads of the same exporter.
 
-    node_exporter counts seconds per cpu per mode, so the busy fraction is one
-    minus the idle share of the total.  That comes out as a percentage of all
-    cores together, which is the same thing our own boxes report, so the two
-    charts mean the same thing.
+    For node_exporter it is one minus the idle share, as a percentage of all
+    cores, matching what our own nodes report.
 
-    None when there is nothing to compare or the counters went backwards, which
-    is a restart.  A gap is not zero percent, and drawing it as zero says the
-    backend was idle when it was actually being restarted.
+    None when there is nothing to compare or the counters went backwards (a
+    restart).  A gap must not be drawn as zero, which would look idle.
     """
     if not older or not newer:
         return None
@@ -184,9 +163,7 @@ def cpu_percent(older: dict, newer: dict, cpu_count: int = None):
         used = new_proc - old_proc
         if span <= 0 or used < 0:
             return None
-        # Against one core, because that is what a process cpu counter means.
-        # Dividing by the core count would be a smaller number that looks
-        # reassuring and is not what anybody is asking.
+        # Relative to one core, which is what a process CPU counter means.
         return round(max(0.0, min(100.0 * (cpu_count or 1), used / span * 100)), 1)
 
     return None
@@ -194,31 +171,18 @@ def cpu_percent(older: dict, newer: dict, cpu_count: int = None):
 
 def unsafe_fetch_target(url: str) -> str:
     """
-    Why this URL should not be fetched by the manager, or empty when it may be.
+    Reason the manager should not fetch this URL, or "" if it may.
 
-    The manager runs on a load balancer, which is one of the best connected
-    hosts on the network, so anything that makes it fetch a URL somebody typed
-    is a request forgery primitive.  The scheme is already restricted where
-    these are saved, which closes file: and gopher: and is the important half.
-    This closes the other half: where it may point.
+    Fetching user-supplied URLs from a well connected load balancer is an
+    SSRF risk.  The scheme is restricted where these are saved; this checks
+    the destination.  Refused: loopback, link local (cloud metadata lives at
+    169.254.169.254), multicast, unspecified and reserved.
 
-    Refused are the addresses that are only ever interesting to an attacker.
-    Loopback and link local, because 169.254.169.254 is the cloud metadata
-    service and 127.0.0.1 is every service that thought it was private.
-    Multicast and unspecified, because nothing legitimate is there.
+    Private ranges are allowed on purpose.  Exporters on 10.0.0.0/8 are the
+    normal case.
 
-    **Private ranges are allowed on purpose.**  A backend exporter on
-    10.0.0.0/8 is the ordinary case and the whole reason the setting exists,
-    so refusing RFC1918 would break the feature to close a hole that is mostly
-    already inside the trust boundary.  The line is drawn at the addresses that
-    reach *this* machine or its metadata rather than at private space in
-    general.
-
-    A name is left alone.  Resolving it here and checking the answer invites
-    the rebind: the name resolves to something allowed now and to loopback when
-    the fetch happens a moment later.  The honest answer is that a name cannot
-    be checked at save time, so this checks what it can and the caller keeps
-    redirects switched off.
+    Hostnames are not checked: resolving now proves nothing against DNS
+    rebinding at fetch time.  The caller keeps redirects off.
     """
     import ipaddress
     from urllib.parse import urlsplit
@@ -249,16 +213,11 @@ def unsafe_fetch_target(url: str) -> str:
 
 def build_url(template: str, address: str, port: int = None) -> str:
     """
-    Turn a per pool template into the URL for one member.
+    Expand a per-pool template into one member's URL.  Pool members are
+    usually identical, so one template beats a URL per member.
 
-    A template rather than a URL per member, because the members of a pool are
-    nearly always the same kind of box with the same exporter on the same port,
-    and asking somebody to paste the same thing once per backend is how it ends
-    up half filled in.
-
-    `{host}` is the member's address and `{port}` is the port it serves on,
-    which is occasionally what somebody wants when the app exposes its own
-    metrics on the same port as the traffic.
+    `{host}` (or `{address}`) is the member's address; `{port}` is its
+    serving port, for apps that expose metrics on the traffic port.
     """
     text = str(template or "").strip()
     if not text:

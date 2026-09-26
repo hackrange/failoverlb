@@ -48,9 +48,8 @@
 {% endif %}
 
 {% for pool in pools %}
-  {#- Everything worth searching, flattened onto the card.  Backends matter
-      most: somebody knows the address of the box misbehaving and not which
-      pool it is sitting in. -#}
+  {#- Everything searchable, flattened onto the card. Backends matter most:
+      people know the misbehaving box's address, not which pool it is in. -#}
   {%- set searchable = [
         pool.name, pool.description or '', pool.lb_method,
         pool.backend_kind or '', pool.effective_health_check_type or '',
@@ -250,8 +249,8 @@ starting point at a 10 second interval, so a backend is out within 30 seconds.</
 <script nonce="{{ csp_nonce }}">
 document.addEventListener("DOMContentLoaded", function () {
 
-  // Drain or restore a backend.  Both go through the same endpoint, which
-  // applies the config afterwards, so the change reaches nginx right away.
+  // Drain or restore a backend. Both use the same endpoint, which applies
+  // the config afterward, so nginx sees the change right away.
   document.body.addEventListener("click", async function (e) {
     const btn = e.target.closest("[data-member-state]");
     if (!btn) return;

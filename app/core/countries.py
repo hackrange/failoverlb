@@ -1,12 +1,8 @@
 """
-Country names for the two letter codes, so the page can offer a list.
+ISO 3166-1 alpha-2 codes and short English names for the country picker.
 
-Kept here rather than fetched, because a picker that needs the internet to
-render is a picker that is empty on the one network where blocking by country
-is most likely to be asked for.
-
-ISO 3166-1 alpha-2.  The names are the short English ones, chosen to be
-recognised rather than to be diplomatically exact.
+Bundled rather than fetched so the picker works on networks without internet
+access. Names are the common short forms, not the formal ones.
 """
 
 COUNTRIES = {
@@ -263,5 +259,5 @@ COUNTRIES = {
 
 
 def name(code: str) -> str:
-    """The country's name, or the code back when it is not one we know."""
+    """Country name for a code, or the code itself if unknown."""
     return COUNTRIES.get((code or "").strip().upper(), (code or "").strip().upper())

@@ -1,33 +1,20 @@
 """
-Watching a site's login for guessing, and the two shapes that takes.
+Watching a site's login for password guessing.
 
-**Brute force** is one address trying many times.  Every lockout ever written
-stops it and it is the one everybody thinks of.
+Brute force is one address trying many times; any lockout stops it.
+Password spraying is the reverse: one password tried once against many
+accounts from many addresses.  No per-account lockout or per-address rate
+limit fires.  The signal only shows in aggregate (many failures spread thin
+across many addresses in a window), so this looks at the whole site at once.
 
-**Password spraying** is the opposite shape and is the reason this module
-exists.  One password, tried once against a hundred accounts, from a hundred
-addresses.  Each account sees a single failed attempt, so no per account
-lockout fires.  Each address makes a handful of requests, so no rate limit
-fires either.  It is invisible to both of the defences people already have, and
-it is how accounts are actually taken now.
+It reads the access log only: address, path, method, status.  It never sees
+usernames or passwords, so it can report the pattern but not which accounts
+were targeted.  Seeing usernames would mean reading request bodies, where
+the passwords are.
 
-The signal only exists in the aggregate: many failures, spread thin across many
-addresses, in a window.  Nothing looking at one account or one address can see
-it, which is why this looks at the whole site at once.
-
-## What it can and cannot see
-
-It reads the access log, so it gets the address, the path, the method and the
-status.  **It never sees a username or a password.**  So it cannot tell you
-which accounts were targeted, only that the shape is there.  Making it see
-usernames would mean reading request bodies, which is where the passwords are,
-and that trade is not worth making for a detector.
-
-## Both nodes, always
-
-Whichever load balancer was serving is the one holding the evidence, and a
-spray spread across a fleet is exactly the case where looking at one node halves
-the signal and can put it under the threshold.
+It always reads every node.  Evidence lives on whichever load balancer served
+the request, and looking at one node can halve a spray's signal and drop it
+under the threshold.
 """
 import logging
 
@@ -99,28 +86,19 @@ async def fleet_failures(site: str, paths, methods, fail_statuses,
 
 def judge(addresses, failures, watch, window_seconds, slow=False) -> dict:
     """
-    What the numbers mean, if anything.
+    Turn failure counts into findings.
 
-    Three rules and each one exists because the other two miss something.
+    Brute force: one address over a threshold.
 
-    **Brute force** is one address over a threshold.  Easy, and the only one of
-    the three that a normal rate limit would also have caught.
+    Spray: enough total failures, across enough distinct addresses, with each
+    address staying low.  Each condition alone is normal traffic; only the
+    combination is suspicious.
 
-    **A spray** needs all of: enough total failures to matter, spread across
-    enough distinct addresses, with each address staying low.  All three
-    together, because any one alone is an ordinary Monday morning.  A busy
-    login page has plenty of failures; a big office has plenty of addresses;
-    everybody typing their password wrong once is exactly "low per address".
-    It is the combination that does not happen by accident.
+    Slow spray: the same test over hours instead of minutes, for attackers
+    who wait out short windows.
 
-    **The slow version** is the same test over hours rather than minutes,
-    because an attacker who knows about five minute windows waits six.  It is
-    the one most likely to be quietly missing from anybody else's detector.
-
-    Returns findings rather than actions.  Deciding to refuse traffic on the
-    strength of a pattern is a person's call: the addresses in a spray are
-    usually a botnet, and they are sometimes a corporate NAT having a bad
-    morning after a password policy change.
+    Returns findings, not actions.  Blocking is left to a person, since a
+    "spray" is sometimes a corporate NAT after a password policy change.
     """
     findings = []
     count = len(addresses)

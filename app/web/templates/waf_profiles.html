@@ -62,10 +62,9 @@ document.addEventListener("DOMContentLoaded", function () {
     try { data = await NFM.api("/waf/profiles"); }
     catch (err) { holder.textContent = err.message; return; }
 
-    // Which rule ids the installed rule set actually has.  Without this an
-    // exclusion can point at a rule retired by a rule set update: it does
-    // nothing, it is invisible, and nobody dares delete it.  A WAF fills up
-    // with those until it is excusing a list of rules that no longer exist.
+    // Rule ids in the installed rule set. Without this an exclusion can point
+    // at a rule a rule set update retired: it does nothing, nobody notices,
+    // and nobody dares delete it.
     try { rules = await NFM.api("/waf/rule-ids"); }
     catch (err) { rules = null; }
     const known = rules && rules.ids ? new Set(rules.ids.map(String)) : null;
@@ -80,10 +79,9 @@ document.addEventListener("DOMContentLoaded", function () {
 
       const rows = (p.exclusions || []).map(function (e) {
         const dead = known && !known.has(String(e.rule_id));
-        // The path is an input rather than text when you may edit, because
-        // generalising a learned path is the everyday job here, not a rare
-        // one: learning gives one row per object and the useful rule is the
-        // pattern behind them.
+        // The path is editable for editors, because generalizing a learned
+        // path is routine: learning gives one row per object and the useful
+        // rule is the pattern behind them.
         const pathCell = CAN_EDIT
           ? '<input class="mono small waf-path" style="width:100%;min-width:16rem" ' +
             'value="' + NFM.escapeHtml(e.path || "") +
@@ -120,8 +118,8 @@ document.addEventListener("DOMContentLoaded", function () {
           ? '<p class="small muted" style="margin-top:0">' +
             NFM.escapeHtml(p.description) + "</p>" : "") +
 
-        // Provenance.  An exclusion nobody can explain is one nobody will dare
-        // remove, so where it came from travels with it.
+        // Provenance. An exclusion nobody can explain is one nobody will
+        // remove, so its source travels with it.
         '<dl class="kv">' +
         "<dt>Learned from</dt><dd>" +
         NFM.escapeHtml(p.learned_from_site || "unknown site") +
@@ -181,9 +179,8 @@ document.addEventListener("DOMContentLoaded", function () {
     }).join("");
   }
 
-  // Saving a path.  On blur rather than on every keystroke, and only when it
-  // actually changed, so tabbing through a table does not write a row per
-  // column.
+  // Save a path on blur, and only if it changed, so tabbing through the
+  // table does not write a row per column.
   holder.addEventListener("focusout", async function (ev) {
     const box = ev.target.closest(".waf-path");
     if (!box || box.value === box.dataset.was) return;

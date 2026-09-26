@@ -1,18 +1,14 @@
 """
 Reading and writing real nginx config.
 
-This exists so the GUI and the config file can both be the source of truth
-without fighting each other.  You can edit a site in the forms, or you can open
-the raw config and type directly, and either way the other side keeps up.
+Lets a site be edited either in the forms or as raw config, with each side
+picking up the other's changes.
 
-To do that we need to actually parse nginx config rather than run regexes over
-it.  Regexes fall apart fast here.  Braces nest, strings can contain braces,
-comments can contain anything, and a semicolon inside quotes does not end a
-directive.  A tokenizer handles all of that and is not much more code.
+A real tokenizer rather than regexes: braces nest, strings can contain
+braces and semicolons, and comments can contain anything.
 
-What we get out is a tree of Directive objects.  Each one has a name, its
-arguments, and possibly a block of children.  That maps cleanly onto how nginx
-thinks about config, and it maps cleanly back onto our settings.
+The result is a tree of Directive objects (name, args, optional child
+block), which maps cleanly onto nginx's model and onto our settings.
 """
 
 import re
@@ -21,16 +17,16 @@ from typing import List, Optional
 
 
 class ParseError(Exception):
-    """Config we could not read.  Carries the line number so the GUI can point at it."""
+    """Unparseable config, with the line number for the GUI to highlight."""
 
     def __init__(self, message, line=None):
         self.line = line
         super().__init__(f"line {line}: {message}" if line else message)
 
 
-# ==============================================================================
+# =============================================================================
 # The tree
-# ==============================================================================
+# =============================================================================
 
 @dataclass
 class Directive:
@@ -40,9 +36,8 @@ class Directive:
     line: int = 0
     comment: str = ""
 
-    # Comments that sat on their own lines just above this directive.  We hang
-    # on to them so writing the file back out does not throw away somebody's
-    # notes, which would make anybody stop trusting the editor pretty quickly.
+    # Comment lines just above this directive, kept so a round trip doesn't
+    # lose the user's notes.
     leading_comments: List[str] = field(default_factory=list)
 
     @property
@@ -68,7 +63,7 @@ class Directive:
         return hits[0] if hits else None
 
     def get_value(self, name, default=None):
-        """The arguments of the first directive with this name, as one string."""
+        """Arguments of the first directive with this name, as one string."""
         d = self.find_one(name)
         return d.arg_string() if d else default
 
@@ -97,11 +92,8 @@ class Config:
         """
         Every server block, wherever it is.
 
-        The is_block check is doing real work here.  Inside an upstream block,
-        "server" is a plain directive naming a backend, like
-        "server 10.20.30.51:8080;".  Inside http it is a block that holds a
-        whole site.  Same word, completely different thing.  Without this check
-        a pool of three backends looks like three websites.
+        The is_block check matters: inside upstream, "server" is a plain
+        directive naming a backend ("server 10.20.30.51:8080;"), not a site.
         """
         return [d for d in self._walk() if d.name == "server" and d.is_block]
 
@@ -118,20 +110,18 @@ class Config:
         return rec(self.directives)
 
 
-# ==============================================================================
+# =============================================================================
 # Turning text into tokens
-# ==============================================================================
+# =============================================================================
 
 TOKEN_SPECIAL = {"{", "}", ";"}
 
 
 def tokenize(text: str):
     """
-    Break config text into tokens.
+    Break config text into (token, line number, is_comment) tuples.
 
-    Yields tuples of (token, line number, is_comment).
-
-    The rules we care about:
+    Rules:
       - # runs to the end of the line, unless it is inside quotes
       - single and double quotes both work, and a backslash escapes inside them
       - { } and ; are their own tokens, unless quoted
@@ -153,7 +143,7 @@ def tokenize(text: str):
             i += 1
             continue
 
-        # Comment, runs to end of line.  We keep it so we can write it back.
+        # Comment to end of line, kept so it can be written back.
         if ch == "#":
             end = text.find("\n", i)
             if end == -1:
@@ -167,7 +157,7 @@ def tokenize(text: str):
             i += 1
             continue
 
-        # A quoted string is one token even with spaces and braces inside it.
+        # A quoted string is one token, spaces and braces included.
         if ch in "\"'":
             quote = ch
             i += 1
@@ -176,9 +166,8 @@ def tokenize(text: str):
             while i < n:
                 c = text[i]
                 if c == "\\" and i + 1 < n:
-                    # Keep the escape as written.  Rewriting it could change
-                    # what nginx sees, and we are not trying to normalize
-                    # somebody's config, just read it and put it back.
+                    # Keep escapes as written; normalizing could change
+                    # what nginx sees.
                     buf.append(text[i:i + 2])
                     i += 2
                     continue
@@ -195,23 +184,22 @@ def tokenize(text: str):
             yield (quote + "".join(buf) + quote, start_line, False)
             continue
 
-        # A plain word.  Runs until whitespace or one of the special chars.
+        # A plain word, up to whitespace or a special char.
         start = i
         while i < n and text[i] not in " \t\r\n#;{}\"'":
             i += 1
         if i == start:
-            # Belt and braces.  Should not happen, but an infinite loop here
-            # would hang the whole app, so make sure we always move forward.
+            # Should not happen; always advance to avoid an infinite loop.
             i += 1
         yield (text[start:i], line, False)
 
 
-# ==============================================================================
+# =============================================================================
 # Turning tokens into a tree
-# ==============================================================================
+# =============================================================================
 
 def parse(text: str) -> Config:
-    """Parse config text into a tree.  Raises ParseError on anything malformed."""
+    """Parse config text into a tree.  Raises ParseError if malformed."""
     tokens = list(tokenize(text))
     pos = 0
 
@@ -235,7 +223,7 @@ def parse(text: str) -> Config:
                 return directives
 
             if token == ";":
-                # A stray semicolon.  nginx does not mind, so neither do we.
+                # Stray semicolon; nginx accepts it.
                 pos += 1
                 continue
 
@@ -252,8 +240,7 @@ def parse(text: str) -> Config:
                 token, line, is_comment = tokens[pos]
 
                 if is_comment:
-                    # A comment on the same line as the directive.  Rare, but
-                    # people do it, so keep it attached.
+                    # Comment in the middle of a directive: skipped.
                     pos += 1
                     continue
 
@@ -269,9 +256,8 @@ def parse(text: str) -> Config:
                 if token == "{":
                     pos += 1
                     if depth > 20:
-                        # Nothing real nests this deep.  A file this odd is
-                        # more likely hostile or corrupt than legitimate, and
-                        # recursing forever would take the app down.
+                        # Nothing real nests this deep; likely hostile or
+                        # corrupt input.  Stop before unbounded recursion.
                         raise ParseError("config is nested far too deep", line)
                     block = parse_block(depth + 1)
                     directives.append(Directive(
@@ -295,9 +281,9 @@ def parse(text: str) -> Config:
     return Config(directives=directives, source=text)
 
 
-# ==============================================================================
+# =============================================================================
 # Turning a tree back into text
-# ==============================================================================
+# =============================================================================
 
 def serialize(config, indent: int = 0) -> str:
     """Write a parsed config back out as text."""
@@ -319,37 +305,28 @@ def serialize(config, indent: int = 0) -> str:
             if inner:
                 lines.append(inner)
             lines.append(f"{pad}}}")
-            # A blank line after a block keeps things readable.
+            # Blank line after each block for readability.
             lines.append("")
         else:
             lines.append(f"{pad}{head};")
 
-    # Drop a trailing blank so files do not grow an extra newline every time
-    # somebody saves.
+    # Drop trailing blanks so files don't grow on every save.
     while lines and lines[-1] == "":
         lines.pop()
 
     return "\n".join(lines)
 
 
-# ==============================================================================
+# =============================================================================
 # Basic sanity checks
-# ==============================================================================
+# =============================================================================
 #
-# This is not a replacement for nginx -t and it never will be.  nginx is the
-# only thing that truly knows whether a config is valid.  What this does is
-# catch the obvious mistakes right in the editor, so you get an underline on
-# line 12 instead of waiting for a round trip to the agent.
-#
-# Everything still goes to nginx -t before it is allowed anywhere near a
-# running server.  This is a nicety on top, not a gate.
+# Not a replacement for nginx -t, which still runs before anything goes
+# live.  This just catches obvious mistakes in the editor without a round
+# trip to the agent.
 
-# Directives that have to have a block after them.
-#
-# "server" is deliberately not in here, because it is two different things
-# depending on where it shows up.  In http it opens a block that holds a site.
-# In upstream, stream and mail it is a plain directive naming a backend.  We
-# check it separately below, where we know the context.
+# Directives that require a block.  "server" is checked separately, since
+# in upstream, stream and mail it is a plain directive naming a backend.
 BLOCK_DIRECTIVES = {
     "http", "location", "upstream", "events", "mail", "stream",
     "map", "geo", "split_clients", "types", "if", "limit_except", "charset_map",
@@ -367,9 +344,8 @@ SIMPLE_DIRECTIVES = {
 
 def quick_check(text: str) -> list:
     """
-    Look for problems without asking nginx.
-
-    Gives back a list of dicts with line, severity and message.
+    Look for problems without asking nginx.  Returns a list of
+    {line, severity, message} dicts.
     """
     problems = []
 
@@ -400,8 +376,7 @@ def quick_check(text: str) -> list:
 
             if d.name == "server":
                 if context in SERVER_IS_SIMPLE_IN:
-                    # A backend, so it must not have a block, and it needs an
-                    # address to point at.
+                    # A backend: no block, and it needs an address.
                     if d.is_block:
                         problems.append({
                             "line": d.line,
@@ -421,17 +396,15 @@ def quick_check(text: str) -> list:
                         "message": "server needs a { } block after it",
                     })
                 elif not d.find("listen"):
-                    # Legal, nginx falls back to port 80, but it is almost
-                    # always somebody forgetting rather than meaning it.
+                    # Legal (defaults to port 80) but usually a mistake.
                     problems.append({
                         "line": d.line,
                         "severity": "warning",
                         "message": "this server block has no listen, so nginx will assume port 80",
                     })
 
-            # proxy_pass with a trailing slash behaves completely differently
-            # from one without, and mixing it up with a regex location is one of
-            # the most common nginx bugs there is.
+            # nginx rejects proxy_pass with a URI part inside a regex
+            # location; a common mistake.
             if d.name == "proxy_pass" and context == "location_regex":
                 if d.args and d.args[0].rstrip("/").count("/") > 2:
                     problems.append({
@@ -464,16 +437,13 @@ def quick_check(text: str) -> list:
     return problems
 
 
-# ==============================================================================
+# =============================================================================
 # Pulling settings back out of config
-# ==============================================================================
+# =============================================================================
 #
-# This is the half that makes the config editor two way.  Somebody types
-# client_max_body_size 50m directly into the file, and next time they open the
-# form it shows 50m rather than the old value.
-#
-# We only map directives we know about.  Anything else is left alone and kept in
-# the custom config box, so hand written config never gets quietly dropped.
+# Makes the editor two way: type client_max_body_size 50m into the file and
+# the form shows 50m next time.  Unknown directives go into the custom config
+# box so hand-written config is never dropped.
 
 # directive name -> the settings key it belongs to
 DIRECTIVE_TO_KEY = {
@@ -489,8 +459,7 @@ DIRECTIVE_TO_KEY = {
     "proxy_read_timeout": "proxy_read_timeout",
     "proxy_send_timeout": "proxy_send_timeout",
     "proxy_buffering": "proxy_buffering",
-    # Rewriting what a backend says about itself.  Both take two arguments and
-    # arg_string keeps them together, which is what the setting stores.
+    # Two arguments each; arg_string keeps them together as stored.
     "proxy_cookie_path": "proxy_cookie_path",
     "proxy_redirect": "proxy_redirect",
     "proxy_buffer_size": "proxy_buffer_size",
@@ -547,10 +516,8 @@ LIST_KEYS = {
 
 def extract_settings(block: Directive) -> dict:
     """
-    Read a server or location block and give back settings keys we recognize.
-
-    Only looks at this block's own directives, not nested ones, since a
-    location's settings belong to that location and not to the server around it.
+    Settings we recognize in a server or location block.  Only direct
+    children: nested locations have their own settings.
     """
     settings = {}
 
@@ -563,7 +530,7 @@ def extract_settings(block: Directive) -> dict:
             continue
 
         if key in LIST_KEYS:
-            # These can appear more than once and each one adds to the list.
+            # Repeatable; each occurrence adds to the list.
             existing = settings.setdefault(key, [])
             if d.name == "proxy_cache_valid":
                 existing.append(d.arg_string())
@@ -585,17 +552,14 @@ def extract_settings(block: Directive) -> dict:
 
 def extract_unknown(block: Directive) -> str:
     """
-    Everything in this block we do not have a setting for.
-
-    Goes into the custom config box so hand written directives survive a round
-    trip through the GUI.  Losing somebody's config because we did not
-    understand it is the fastest way to make them stop using the tool.
+    Directives in this block with no matching setting, serialized for the
+    custom config box so they survive a round trip through the GUI.
     """
     if not block.is_block:
         return ""
 
-    # These we generate ourselves, so seeing them here just means we wrote them.
-    # Repeating them in the custom box would double them up on the next save.
+    # We generate these ourselves; copying them into the custom box would
+    # duplicate them on the next save.
     generated = set(DIRECTIVE_TO_KEY.keys()) | {
         "listen", "server_name", "root", "index", "ssl_certificate",
         "ssl_certificate_key", "access_log", "error_log", "location",
@@ -624,17 +588,14 @@ def find_server_for_names(config: Config, server_names: list) -> Optional[Direct
     return None
 
 
-# ==============================================================================
+# =============================================================================
 # Diffing
-# ==============================================================================
+# =============================================================================
 
 def diff_configs(old_text: str, new_text: str) -> list:
     """
-    Compare two configs and say what actually changed.
-
-    A plain text diff is noisy: reformatting shows up as a hundred changed
-    lines even though nothing means anything different.  This compares the
-    parsed trees, so you get real changes only.
+    Semantic diff of two configs.  Compares parsed trees, so pure
+    reformatting shows no changes.
     """
     try:
         old = parse(old_text)

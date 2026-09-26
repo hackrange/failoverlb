@@ -2,12 +2,10 @@
 Talking to the host agent.
 
 The container cannot touch the host on its own.  Everything that needs root
-goes through the unix socket this module writes to, and the agent on the other
-end decides whether to actually do it.
+goes through the agent's unix socket, and the agent decides whether to do it.
 
-Keep this file boring.  It sends a verb and gets an answer back.  All the
-deciding happens on the agent side, where the code is short enough to read in
-one sitting.
+Keep this file boring: send a verb, return the answer.  The decisions belong
+on the agent side.
 """
 
 import asyncio
@@ -20,8 +18,8 @@ from app.config import get_settings
 
 log = logging.getLogger("nfm.agent")
 
-# Biggest answer we will read back.  A rendered config or a cert bundle is well
-# under this.  It stops a broken agent from making us eat all our memory.
+# Largest reply we will read.  Configs and cert bundles are well under this;
+# it stops a broken agent from exhausting our memory.
 MAX_RESPONSE_BYTES = 32 * 1024 * 1024
 
 DEFAULT_TIMEOUT = 90
@@ -41,9 +39,8 @@ class AgentUnavailable(AgentError):
     """
     Cannot reach the agent at all.
 
-    Its own error type because the pending change queue treats this very
-    differently from a refused request.  Unreachable means try again later.
-    Refused means the request was wrong and trying again will not help.
+    Separate type because the pending change queue retries these later,
+    whereas a refused request will not succeed on retry.
     """
 
 
@@ -57,10 +54,8 @@ class AgentClient:
         """
         Send one verb and wait for the answer.
 
-        A fresh connection each time on purpose.  These calls are not frequent
-        enough for the connection setup to matter, and a pooled connection that
-        goes stale halfway through an apply is a much worse problem than a few
-        wasted microseconds.
+        Opens a fresh connection each time.  Calls are infrequent, and a pooled
+        connection going stale mid-apply is far worse than the setup cost.
         """
         if not Path(self.socket_path).exists():
             raise AgentUnavailable(
@@ -188,7 +183,7 @@ class AgentClient:
         return await self.call("write_hook_scripts", scripts=scripts, timeout=30)
 
     async def nginx_upgrade(self, **kwargs):
-        # Building nginx from source takes real time.  Give it a long leash.
+        # Building nginx from source is slow.
         return await self.call("nginx_upgrade", timeout=1800, **kwargs)
 
     async def nginx_upgrade_status(self):

@@ -62,12 +62,9 @@ the guide covers the same ground in plainer language.
 
 ## The rename
 
-The software was called NGINX Management until August 2026.  The guide has been
-rebuilt since: the text says Failover LB throughout, and every screenshot was
-taken again against a node running the new build, so the name and the new look
-are what you see in the pictures.  The one place the old name survives on
-purpose is the nginx build screen, which is called NGINX® Build because that is
-what the software it builds is called.
+The software was called NGINX Management until August 2026.  The guide has
+since been rebuilt with the new name and fresh screenshots.  The nginx build
+screen is still called NGINX® Build, because that is what it builds.
 
 ## Trademarks
 
@@ -79,11 +76,8 @@ The same notice is on the guide's own cover and in Chapter 1.
 
 ## Keeping it up to date
 
-The guide is generated from source rather than written as a document, so it can
-be rebuilt as the software changes rather than drifting away from it.  The
-tooling that builds it is kept outside this repository, because it is of no use
-to anybody running the software.
+The guide is generated from source so it can be rebuilt as the software
+changes.  The tooling that builds it is kept outside this repository.
 
-If a feature has changed and the guide is now wrong, ask whoever maintains the
-guide to rebuild it.  Do not edit the `.docx` by hand: it is overwritten every
-time the guide is rebuilt.
+If the guide is out of date, open an issue.  Do not edit the `.docx` by hand:
+it is overwritten every time the guide is rebuilt.

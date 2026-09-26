@@ -1,12 +1,10 @@
 """
-Taking a backup out of the system, and putting one back in.
+Backup export, inspect and restore.
 
-Both halves ask for the password again.  Not as ceremony: the archive is
-encrypted with it, and the only copy this system holds is a hash, so there is
-no way to build or open one without being told.  That it also proves whoever
-is at the keyboard is the account they are logged in as is a happy side
-effect, and a welcome one for an operation that hands out every private key
-the fleet owns.
+Both directions ask for the password again.  The archive is encrypted with
+it and we only store a hash, so there is no other way to build or open one.
+It also re-proves the person at the keyboard, which is welcome for an
+operation that hands out every private key the fleet owns.
 """
 import logging
 
@@ -24,12 +22,10 @@ log = logging.getLogger("nfm.backup.web")
 
 router = APIRouter()
 
-# A backup is every key the fleet has.  Anything less than the top role reading
-# one is a way around every other permission in the system.
+# A backup holds every key in the fleet, so only the top role gets one.
 NEEDED = "manage_cluster"
 
-# Enough for a fleet's configuration many times over, and small enough that an
-# upload cannot be used to fill the disk.
+# Plenty for any real fleet, small enough that uploads cannot fill the disk.
 MAX_ARCHIVE = 64 * 1024 * 1024
 
 
@@ -38,8 +34,7 @@ def _check_password(user, password: str):
         raise HTTPException(status_code=400,
                             detail="your password is what encrypts the backup")
     if not verify_password(user.password_hash, password):
-        # Deliberately the same wording as signing in.  There is nothing to be
-        # gained by telling somebody which half they got wrong.
+        # Same wording as the login page on purpose.
         raise HTTPException(status_code=403, detail="that password is not right")
 
 
@@ -69,8 +64,7 @@ async def export_backup(request: Request, g: ObjectGuard = Depends(guard)):
         media_type="application/zip",
         headers={
             "Content-Disposition": f'attachment; filename="{name}"',
-            # So the page can say what went in without opening the file it
-            # just downloaded.
+            # Lets the page show what went in without opening the file.
             "X-Backup-Summary": str(summary.get("counts")),
         },
     )
@@ -80,12 +74,10 @@ async def export_backup(request: Request, g: ObjectGuard = Depends(guard)):
 async def inspect_backup(file: UploadFile = File(...), password: str = Form(...),
                          g: ObjectGuard = Depends(guard)):
     """
-    What is in an archive, without putting any of it back.
+    Show what is in an archive without restoring it.
 
-    Restoring replaces a working configuration, so there is a step in between
-    where somebody can see what they are about to overwrite it with, and find
-    out here rather than afterwards that they have the wrong file or the wrong
-    password.
+    Lets someone catch the wrong file or wrong password before a restore
+    overwrites a working configuration.
     """
     g.require(NEEDED)
     _check_password(g.user, password)
@@ -118,11 +110,10 @@ async def import_backup(file: UploadFile = File(...), password: str = Form(...),
                         confirm: str = Form(""),
                         g: ObjectGuard = Depends(changing)):
     """
-    Put a backup back, and push it to every node.
+    Restore a backup and push it to every node.
 
-    The confirmation is typed rather than clicked.  This replaces the running
-    configuration of a fleet, and a dialog somebody can dismiss by reflex is
-    not the right amount of friction in front of that.
+    The confirmation is typed rather than clicked, since this replaces the
+    running configuration of the whole fleet.
     """
     g.require(NEEDED)
     _check_password(g.user, password)
