@@ -412,6 +412,21 @@ class CertificateManager:
             self._record_failure(cert_id, output)
             raise AcmeError(_explain_certbot_error(output))
 
+        # certbot exits 0 when it decides the certificate is not due and keeps
+        # the old one.  Counting that as a renewal recorded a success, copied
+        # the old files around and reloaded nginx, hiding that nothing changed.
+        if "not yet due for renewal" in result.get("output", "").lower():
+            log.info("certbot on %s says %s is not yet due for renewal; nothing changed",
+                     issuing_node, cert_name)
+            return {
+                "ok": True,
+                "renewed": False,
+                "issued_by": issuing_node,
+                "selection": selection,
+                "message": f"{issuing_node} says this certificate is not yet due for "
+                           f"renewal, so the existing one was kept.",
+            }
+
         # ---- record it and copy it around -----------------------------------
         with session_scope() as session:
             cert = session.query(Certificate).filter(Certificate.id == cert_id).first()
@@ -428,6 +443,7 @@ class CertificateManager:
 
         return {
             "ok": True,
+            "renewed": True,
             "issued_by": issuing_node,
             "selection": selection,
             "synced_to": sync.get("ok", []),

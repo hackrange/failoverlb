@@ -13,7 +13,7 @@ applied_version against the latest to know whether it is behind.
 import enum
 import ipaddress
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import (
     Boolean,
@@ -1607,8 +1607,15 @@ class Certificate(Base):
     def needs_renewal(self):
         if not self.auto_renew or self.source != "letsencrypt":
             return False
-        left = self.days_left
-        return left is not None and left <= (self.renew_days_before or 30)
+        if not self.not_after:
+            return False
+        na = self.not_after
+        if na.tzinfo is None:
+            na = na.replace(tzinfo=timezone.utc)
+        # Compare the exact time left, the way certbot does.  days_left drops
+        # the hours, so 30 days and 5 hours counted as due here while certbot
+        # said "not yet due" and kept the old certificate.
+        return na - utcnow() <= timedelta(days=self.renew_days_before or 30)
 
     @property
     def status(self):

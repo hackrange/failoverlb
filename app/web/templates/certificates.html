@@ -440,8 +440,12 @@ document.addEventListener("DOMContentLoaded", function () {
           try {
             const r = await NFM.api("/certs/" + issueBtn.getAttribute("data-issue") + "/issue",
                                     { method: "POST", body: {} });
-            NFM.toast("Issued by " + r.issued_by + ", copied to " +
-                      (r.synced_to || []).join(", "), "ok");
+            if (r.renewed === false) {
+              NFM.toast(r.message, "ok");
+            } else {
+              NFM.toast("Issued by " + r.issued_by + ", copied to " +
+                        (r.synced_to || []).join(", "), "ok");
+            }
             setTimeout(function () { window.location.reload(); }, 1500);
           } finally {
             issueBtn.disabled = false;

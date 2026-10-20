@@ -6123,8 +6123,10 @@ async def issue_cert(cert_id: str, g: ObjectGuard = Depends(changing)):
                      object_name=cert.name, result="failed", detail=str(exc))
         raise HTTPException(status_code=400, detail=str(exc))
 
+    detail = (f"issued by {result.get('issued_by')}" if result.get("renewed")
+              else result.get("message"))
     audit.record("cert.issue", user=g.user, object_type="cert", object_name=cert.name,
-                 detail=f"issued by {result.get('issued_by')}")
+                 detail=detail)
     return result
 
 
