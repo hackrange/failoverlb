@@ -3247,10 +3247,17 @@ map $cookie_{cookie} $sticky_set_{var} {{
         if loc.mode == "proxy" and loc.pool:
             # `strip`, not the column, or a mount would get the location's
             # trailing slash and not the one on proxy_pass that does the work.
+            # A URI on proxy_pass swaps this path for the backend's, so the
+            # backend's redirects have to be mapped back onto this path.  A
+            # regex location keeps the whole request path, so it stays `/`.
+            client_prefix = "/"
+            if slashable and path.strip("/"):
+                client_prefix = path if path.endswith("/") else path + "/"
             lines.extend(self._proxy_lines(
                 loc.pool, cfg, indent=8, strip_prefix=strip,
                 regex_location=loc.match_type in ("regex", "regex_i"),
-                offload_only=self._offload_only(host)))
+                offload_only=self._offload_only(host),
+                client_prefix=client_prefix))
             if mount:
                 lines.extend(self._mount_redirect_lines(
                     path if path.endswith("/") else path + "/",
@@ -3323,7 +3330,8 @@ map $cookie_{cookie} $sticky_set_{var} {{
             value += "/"
         return value
 
-    def _backend_path_redirect_lines(self, backend_path, already_set, indent=8) -> list:
+    def _backend_path_redirect_lines(self, backend_path, already_set, indent=8,
+                                     client_prefix="/") -> list:
         """
         Put the backend's own path back off the redirects it sends.
 
@@ -3353,6 +3361,9 @@ map $cookie_{cookie} $sticky_set_{var} {{
         it is possible but needs the other site to share the path.  A rule set
         by hand is written above all of these and wins outright, which is the
         way out if it ever does happen.
+
+        On a path such as /mail/ the backend path maps back to that path, not
+        to the site root, or /SOGo/index would send visitors to /index.
         """
         pad = " " * indent
         lines = []
@@ -3362,16 +3373,17 @@ map $cookie_{cookie} $sticky_set_{var} {{
         lines.append(f"{pad}# The backend builds redirects from the path it thinks it")
         lines.append(f"{pad}# is under.  Take it back off.")
         for scheme in ("http", "https"):
-            lines.append(f"{pad}proxy_redirect {scheme}://$host{backend_path} /;")
-        lines.append(f"{pad}proxy_redirect {backend_path} /;")
+            lines.append(f"{pad}proxy_redirect {scheme}://$host{backend_path} {client_prefix};")
+        lines.append(f"{pad}proxy_redirect {backend_path} {client_prefix};")
         lines.append(f"{pad}# And when the backend names itself, or its own port, in the")
         lines.append(f"{pad}# Location.  Last, so the three above answer first.")
         lines.append(f"{pad}proxy_redirect "
-                     f"~^https?://[^/]+{backend_path}(.*)$ /$1;")
+                     f"~^https?://[^/]+{backend_path}(.*)$ {client_prefix}$1;")
         return lines
 
     def _proxy_lines(self, pool, cfg, indent=8, strip_prefix=False,
-                     regex_location=False, offload_only=False) -> list:
+                     regex_location=False, offload_only=False,
+                     client_prefix="/") -> list:
         if not self._pool_has_servers(pool):
             return self._empty_pool_lines(pool, indent)
 
@@ -3517,9 +3529,15 @@ map $cookie_{cookie} $sticky_set_{var} {{
                 lines.append(f"{pad}# proxy_redirect left out, {exc}")
                 hand_redirect = ""
 
+        # Only where proxy_pass actually swaps the path.  A regex location
+        # rewrites instead and keeps the whole path, and without a strip or
+        # backend path the location's own path goes through untouched.
+        if not ((backend_path and not regex_location) or strip_prefix):
+            client_prefix = "/"
         if backend_path:
             lines.extend(self._backend_path_redirect_lines(
-                backend_path, already_set=bool(hand_redirect), indent=indent))
+                backend_path, already_set=bool(hand_redirect), indent=indent,
+                client_prefix=client_prefix))
 
         if is_site and backend_name:
             # Their redirects point at their own name.  Left alone, the first
@@ -3530,8 +3548,8 @@ map $cookie_{cookie} $sticky_set_{var} {{
             # Rewriting to a path rather than to our own name means this holds
             # for every site pointed at this pool, and for http and https alike,
             # without the renderer having to know which site it is writing.
-            lines.append(f"{pad}proxy_redirect https://{backend_name}/ /;")
-            lines.append(f"{pad}proxy_redirect http://{backend_name}/ /;")
+            lines.append(f"{pad}proxy_redirect https://{backend_name}/ {client_prefix};")
+            lines.append(f"{pad}proxy_redirect http://{backend_name}/ {client_prefix};")
 
         # The pool token, if this pool has one.  The backend checks it and turns
         # away anything that did not come through us.
