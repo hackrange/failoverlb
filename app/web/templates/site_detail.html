@@ -1349,6 +1349,9 @@ document.addEventListener("DOMContentLoaded", function () {
     });
   }
 
+  // Option value for "Same as the site" on a path. Never sent to the server.
+  const INHERIT = "__inherit__";
+
   // Used for the site's settings tab and for a path's, so the ids, the values it
   // reads and the context the ? button asks about are all arguments.  The
   // defaults are the site, which is what every existing caller wants.
@@ -1401,10 +1404,19 @@ document.addEventListener("DOMContentLoaded", function () {
     }
 
     if (f.type === "select") {
-      input = '<select id="' + id + '" data-setting="' + f.key + '" data-type="select"' + disabled + ">";
+      // On a path a blank option such as "no caching" is a real choice, and
+      // inheriting is a different one, so it gets its own entry. Otherwise
+      // the blank is dropped on save and the site's cache comes back.
+      const inheriting = opts.inherit && store[f.key] === undefined;
+      input = '<select id="' + id + '" data-setting="' + f.key + '" data-type="select"' +
+              (opts.inherit ? ' data-inherit="yes"' : "") + disabled + ">";
+      if (opts.inherit) {
+        input += '<option value="' + INHERIT + '"' + (inheriting ? " selected" : "") +
+                 ">Same as the site</option>";
+      }
       f.options.forEach(function (o) {
         input += '<option value="' + NFM.escapeHtml(o[0]) + '"' +
-                 (String(val) === String(o[0]) ? " selected" : "") + ">" +
+                 (!inheriting && String(val) === String(o[0]) ? " selected" : "") + ">" +
                  NFM.escapeHtml(o[1]) + "</option>";
       });
       input += "</select>";
@@ -1488,6 +1500,10 @@ document.addEventListener("DOMContentLoaded", function () {
       }
       if (type === "int") {
         if (el.value !== "") out[key] = parseInt(el.value, 10);
+        return;
+      }
+      if (type === "select" && el.getAttribute("data-inherit") === "yes") {
+        if (el.value !== INHERIT) out[key] = el.value;
         return;
       }
       if (el.value !== "") out[key] = el.value;
@@ -2123,7 +2139,7 @@ document.addEventListener("DOMContentLoaded", function () {
                   NFM.escapeHtml(cat.label) + "</strong></div>";
           feats.forEach(function (f) {
             html += control(f, { idPrefix: "ls-", saved: savedHere,
-                                 helpContext: "location" });
+                                 helpContext: "location", inherit: true });
           });
           html += "</div>";
         });
