@@ -561,10 +561,11 @@ EOF
     log "wrote .env with a fresh secret"
 fi
 
-# Only worth saying on a first install.  On an upgrade the allow list is
-# whatever is in the .env we just refused to touch, and this variable is empty
-# because nobody passed the flag, not because the setting is missing.
-if [[ -z "$ADMIN_ALLOWLIST" ]] && ! $UPGRADE; then
+# Read it back from .env rather than trusting --allowlist. A rerun leaves an
+# existing .env alone, so the flag is unset there even when the file has a
+# list, and this used to warn on every rerun of a properly locked down box.
+EFFECTIVE_ALLOWLIST="$(grep '^NFM_ADMIN_ALLOWLIST=' "$ENV_FILE" | cut -d= -f2- || true)"
+if [[ -z "$EFFECTIVE_ALLOWLIST" ]]; then
     warn "No GUI allow list set."
     info "Anybody who can reach port 7443 gets the login page.  Set"
     info "NFM_ADMIN_ALLOWLIST in .env to your management networks and restart."
