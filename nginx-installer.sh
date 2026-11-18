@@ -286,7 +286,9 @@ check_ubuntu() {
 # on a bad one.
 fetch() {
   local url="$1" out="$2" name cached
-  name="$(basename "$out")"
+  # Key on the URL basename (nginx-1.30.7.tar.gz) so a version bump fetches
+  # fresh instead of reusing the previous version's cached tarball.
+  name="$(basename "$url")"
   cached="${CACHE_DIR}/${name}"
 
   if [[ -s "$cached" ]] && tar tzf "$cached" >/dev/null 2>&1; then
