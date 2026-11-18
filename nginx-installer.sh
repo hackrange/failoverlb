@@ -1269,6 +1269,25 @@ request_cert() {
 cmd_install() {
   require_root
   check_ubuntu
+
+  # If this node already has the WAF wired in, the connector .so must be
+  # rebuilt against the new nginx binary or the config test will fail with
+  # an ABI version mismatch.  Force it on even when the flag was not passed.
+  if [[ "$WITH_MODSECURITY" != "1" ]] \
+     && [[ -f "${PREFIX}/modules-enabled/50-modsecurity.conf" ]]; then
+    warn "WAF module is loaded on this node; rebuilding the connector to match nginx ${NGINX_VERSION}."
+    WITH_MODSECURITY=1
+    # Re-evaluate DYNAMIC_MODULES now that the flag is set.
+    DYNAMIC_MODULES=()
+    DYNAMIC_MODULES+=(
+      "modsecurity-nginx|https://github.com/owasp-modsecurity/ModSecurity-nginx|v1.0.4"
+    )
+    EXTRA_BUILD_DEPS+=(
+      automake autoconf libtool pkg-config
+      libcurl4-openssl-dev libyajl-dev liblmdb-dev libssl-dev
+    )
+  fi
+
   install_deps
   protect_from_apt
   fetch_sources
