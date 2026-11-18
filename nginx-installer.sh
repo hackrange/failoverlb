@@ -306,6 +306,21 @@ fetch() {
   fi
 }
 
+# Clone a git repo with retries, matching the resilience fetch() gives tarballs.
+# When lb nodes build simultaneously they can exhaust GitHub's connection pool;
+# three attempts with a 15 s back-off recovers from transient rate limits.
+git_clone() {
+  local url="$1" dest="$2" ref="$3"
+  local attempt
+  for attempt in 1 2 3; do
+    git clone --depth 1 --branch "$ref" "$url" "$dest" && return 0
+    warn "git clone attempt ${attempt}/3 failed for ${url}, retrying in 15s..."
+    sleep 15
+    rm -rf "$dest"
+  done
+  die "Could not clone ${url} after 3 attempts"
+}
+
 
 # ==============================================================================
 # Dependencies
@@ -466,7 +481,7 @@ fetch_sources() {
   for entry in "${THIRD_PARTY_MODULES[@]}" "${DYNAMIC_MODULES[@]}"; do
     IFS='|' read -r name url ref <<< "$entry"
     log "Fetching module $name ($ref)"
-    git clone --depth 1 --branch "$ref" "$url" "modules/${name}" \
+    git_clone "$url" "modules/${name}" "$ref" \
       || die "Could not fetch module $name from $url"
   done
 }
@@ -525,7 +540,7 @@ build_lua_support() {
   printf '%s\n' "${THIRD_PARTY_MODULES[@]}" | grep -q "lua-nginx-module" || return 0
 
   log "Building OpenResty LuaJIT for the lua module."
-  git clone --depth 1 https://github.com/openresty/luajit2 "${BUILD_ROOT}/luajit2"
+  git_clone https://github.com/openresty/luajit2 "${BUILD_ROOT}/luajit2" master
   make -C "${BUILD_ROOT}/luajit2" -j"$(nproc)"
   make -C "${BUILD_ROOT}/luajit2" install
   # Make sure the loader can find the new library at runtime.
@@ -535,9 +550,9 @@ build_lua_support() {
   # start.  This trio is the set OpenResty ships together, so they play nice.
   # If you bump lua-nginx-module above, bump these to match.
   log "Installing lua-resty-core and lua-resty-lrucache."
-  git clone --depth 1 --branch v0.1.31 https://github.com/openresty/lua-resty-core "${BUILD_ROOT}/lua-resty-core"
+  git_clone https://github.com/openresty/lua-resty-core "${BUILD_ROOT}/lua-resty-core" v0.1.31
   make -C "${BUILD_ROOT}/lua-resty-core" install LUA_LIB_DIR=/usr/local/share/lua/5.1
-  git clone --depth 1 --branch v0.15 https://github.com/openresty/lua-resty-lrucache "${BUILD_ROOT}/lua-resty-lrucache"
+  git_clone https://github.com/openresty/lua-resty-lrucache "${BUILD_ROOT}/lua-resty-lrucache" v0.15
   make -C "${BUILD_ROOT}/lua-resty-lrucache" install LUA_LIB_DIR=/usr/local/share/lua/5.1
 }
 
@@ -576,8 +591,7 @@ build_modsecurity() {
   fi
 
   log "Building libmodsecurity ${MODSECURITY_VERSION}.  This one takes a while."
-  git clone --depth 1 --branch "v${MODSECURITY_VERSION}" \
-    https://github.com/owasp-modsecurity/ModSecurity "${BUILD_ROOT}/ModSecurity" \
+  git_clone https://github.com/owasp-modsecurity/ModSecurity "${BUILD_ROOT}/ModSecurity" "v${MODSECURITY_VERSION}" \
     || die "Could not fetch libmodsecurity ${MODSECURITY_VERSION}."
 
   # libinjection is a submodule, not vendored, and it is what does the SQL
