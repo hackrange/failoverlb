@@ -29,10 +29,9 @@ set -Eeuo pipefail
 # Versions
 # ==============================================================================
 
-# Pin the versions here.  Bump these when a new release comes out, then rerun
-# install.  Keeping them at the top is the whole point, one edit and you upgrade.
-# You can also set these as env vars, which is handy for Ansible and Terraform.
-NGINX_VERSION="${NGINX_VERSION:-1.30.4}"
+# Pinned versions.  Bump and rerun install to upgrade.  Each can also be set
+# from the environment (handy for Ansible or Terraform).
+NGINX_VERSION="${NGINX_VERSION:-1.30.7}"
 OPENSSL_VERSION="${OPENSSL_VERSION:-3.5.7}"
 HEADERS_MORE_VERSION="${HEADERS_MORE_VERSION:-0.40}"
 
