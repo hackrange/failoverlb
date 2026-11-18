@@ -104,7 +104,7 @@ THIRD_PARTY_MODULES=(
   "echo-nginx-module|https://github.com/openresty/echo-nginx-module|v0.63"
   "headers-more-nginx-module|https://github.com/openresty/headers-more-nginx-module|v${HEADERS_MORE_VERSION}"
   "ngx-fancyindex|https://github.com/aperezdc/ngx-fancyindex|v0.5.2"
-  "ngx_cache_purge|https://github.com/nginx-modules/ngx_cache_purge|master"
+  "ngx_cache_purge|https://github.com/nginx-modules/ngx_cache_purge|main"
   "nginx-dav-ext-module|https://github.com/arut/nginx-dav-ext-module|v3.0.0"
   "subs-filter|https://github.com/yaoweibin/ngx_http_substitutions_filter_module|master"
   "upload-progress|https://github.com/masterzen/nginx-upload-progress-module|master"
@@ -540,7 +540,7 @@ build_lua_support() {
   printf '%s\n' "${THIRD_PARTY_MODULES[@]}" | grep -q "lua-nginx-module" || return 0
 
   log "Building OpenResty LuaJIT for the lua module."
-  git_clone https://github.com/openresty/luajit2 "${BUILD_ROOT}/luajit2" master
+  git_clone https://github.com/openresty/luajit2 "${BUILD_ROOT}/luajit2" v2.1-agentzh
   make -C "${BUILD_ROOT}/luajit2" -j"$(nproc)"
   make -C "${BUILD_ROOT}/luajit2" install
   # Make sure the loader can find the new library at runtime.
